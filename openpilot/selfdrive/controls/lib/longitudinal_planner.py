@@ -3,6 +3,7 @@ import math
 import numpy as np
 
 import openpilot.cereal.messaging as messaging
+from openpilot.cereal import log
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
@@ -20,6 +21,18 @@ A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
+
+# The e2e accel branch is a raw per-frame model output with no jerk penalty, unlike the MPC
+# trajectory which is shaped by A_CHANGE_COST/J_EGO_COST. Below ~15 m/s it wins min() almost
+# always, so its texture is what the driver feels. Low-pass it before the comparison.
+# Only active on the relaxed personality.
+E2E_ACCEL_FILTER_TS = 0.5  # s
+# Deceleration below this is a real slowdown (light, stop sign), not chatter: don't lag it.
+E2E_ACCEL_FILTER_BYPASS = -1.0  # m/s^2
+# Handing control back to the raw signal at the bypass is rate-limited: switching outright measured
+# 9.7 m/s^3 at brake onset on logged stops. 3.0 stays under the raw signal's own max (3.05) while
+# costing only ~0.2 s of catch-up.
+E2E_ACCEL_BYPASS_JERK = 3.0  # m/s^3
 
 # Lookup table for turns
 _A_TOTAL_MAX_V = [1.7, 3.2]
@@ -55,6 +68,8 @@ class LongitudinalPlanner:
 
     self.a_desired = init_a
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
+    self.a_e2e_filter = FirstOrderFilter(init_a, E2E_ACCEL_FILTER_TS, self.dt)
+    self.a_e2e_prev = init_a
     self.prev_accel_clip = [ACCEL_MIN, ACCEL_MAX]
     self.output_a_target = 0.0
     self.output_should_stop = False
@@ -113,6 +128,8 @@ class LongitudinalPlanner:
       self.v_desired_filter.x = v_ego
       # Clip aEgo to cruise limits to prevent large accelerations when becoming active
       self.a_desired = np.clip(sm['carState'].aEgo, accel_clip[0], accel_clip[1])
+      self.a_e2e_filter.x = self.a_desired
+      self.a_e2e_prev = self.a_desired
 
     # Prevent divergence, smooth in current v_ego
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
@@ -151,6 +168,21 @@ class LongitudinalPlanner:
                                                                         action_t=action_t, vEgoStopping=self.CP.vEgoStopping)
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
+
+    # Smooth the e2e branch on the relaxed personality. shouldStop is deliberately untouched, and
+    # real deceleration bypasses the filter, so neither stopping nor braking is delayed.
+    if not math.isfinite(output_a_target_e2e):
+      self.a_e2e_filter.initialized = False  # re-seed on the next good frame rather than latch NaN
+    else:
+      self.a_e2e_filter.update(output_a_target_e2e)
+      if sm['selfdriveState'].personality == log.LongitudinalPersonality.relaxed:
+        if output_a_target_e2e > E2E_ACCEL_FILTER_BYPASS:
+          output_a_target_e2e = self.a_e2e_filter.x
+        else:
+          # real slowdown: hand back to the raw signal, but rate-limited so brake onset isn't a step
+          output_a_target_e2e = max(output_a_target_e2e, self.a_e2e_prev - E2E_ACCEL_BYPASS_JERK * self.dt)
+          self.a_e2e_filter.x = output_a_target_e2e
+      self.a_e2e_prev = output_a_target_e2e
 
     if sm['selfdriveState'].experimentalMode:
       output_a_target = min(output_a_target_e2e, output_a_target_mpc)
