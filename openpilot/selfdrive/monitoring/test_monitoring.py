@@ -82,7 +82,9 @@ class TestMonitoring:
 
   # engaged, distracted past red and beyond the no-response window -> unavailability response + lockout
   def test_distracted_lockout(self):
-    alert_lvls, d_status = self._run_seq(always_distracted, always_false, always_true, always_false)
+    # stop while still inside the lockout window, it self-clears after _LOCKOUT_TIME
+    n = int((DISTRACTED_SECONDS_TO_RED + dm_settings._NO_RESPONSE_TIMEOUT + 3) / DT_DMON)
+    alert_lvls, d_status = self._run_seq(always_distracted[:n], always_false[:n], always_true[:n], always_false[:n])
     s = d_status.settings
     assert alert_lvls[int(DISTRACTED_SECONDS_TO_RED / DT_DMON)] == 3
     assert d_status.alert_3_cnt == 1
@@ -92,7 +94,9 @@ class TestMonitoring:
 
   # no face -> wheeltouch red, sustained past the no-response timeout -> unavailability response + lockout
   def test_invisible_lockout(self):
-    _, d_status = self._run_seq(always_no_face, always_false, always_true, always_false)
+    # stop while still inside the lockout window, it self-clears after _LOCKOUT_TIME
+    n = int((INVISIBLE_SECONDS_TO_RED + dm_settings._NO_RESPONSE_TIMEOUT + 3) / DT_DMON)
+    _, d_status = self._run_seq(always_no_face[:n], always_false[:n], always_true[:n], always_false[:n])
     s = d_status.settings
     assert d_status.active_policy == log.DriverMonitoringState.MonitoringPolicy.wheeltouch
     assert d_status.alert_3_cnt == 1

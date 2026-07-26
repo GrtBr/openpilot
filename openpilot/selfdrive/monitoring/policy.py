@@ -41,7 +41,7 @@ class DRIVER_MONITOR_SETTINGS:
     # lockout specs
     self._MAX_ALERT_3 = 2
     self._MAX_NO_RESPONSE = 1
-    self._LOCKOUT_TIME = int(1800 / DT_DMON)
+    self._LOCKOUT_TIME = int(30 / DT_DMON)
 
     self._TIMEOUT_RECOVERY_FACTOR_MAX = 5.
     self._TIMEOUT_RECOVERY_FACTOR_MIN = 1.25
