@@ -321,3 +321,28 @@ Verification (Pi5, no openpilot build available):
   absent (as on the Pi5), so mapd cannot spuriously start.
 - selfdrived: mapd excluded from the processNotRunning set — adapted to this version's
   not_running comprehension, NOT copied from sunnypilot (which has no ignored_processes here).
+
+## 2026-07-28 — mapd port, Phase 4: MapdSettings
+
+Added `openpilot/grt/settings.py` — a write-once installer for mapd's own JSON settings blob
+(the `MapdSettings` param), with `--force` / `--show` / `--no-notify` and a best-effort
+`reloadSettings` mapdIn publish so a running mapd picks changes up immediately.
+
+Baseline is sunnypilot's known-good config with three deliberate deltas:
+- speed_limit_control_enabled: False -> True   (enables behaviour 3, auto speed-limit adoption)
+- vision_curve_speed_control_enabled: True -> False  (nothing consumes visionCurveSpeed here)
+- map_curve_speed_control_enabled: True (unchanged, behaviour 1)
+Tuned braking profile deliberately preserved: target_speed_jerk/accel 0.6, time_offset 4.0.
+speed_limit_offset stays 0.0, with an explicit in-file caveat that this holds EXACTLY the
+posted limit and should be sanity-checked on a real drive.
+
+Explicitly did NOT port sunnypilot's 1 Hz settings-rewrite loop. That exists only because
+MapdSettings is unregistered there and clearAll() deletes it; we registered the key PERSISTENT
+in grt_params_keys.inc, so one write survives manager restarts and ignition transitions.
+
+Verified: compiles; 25 keys JSON-serializable; asserted the three deltas and that the tuning
+constants are untouched.
+
+Also ticked Verification 2 (PC schema round-trip) — completed earlier via pycapnp: a mapdOut
+was built, serialized, parsed back, and all 24 fields were addressable with correct values.
+Verification 1 (scons) remains NOT possible on the Pi5 and stays deferred to the device.

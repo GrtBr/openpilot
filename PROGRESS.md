@@ -16,9 +16,9 @@ Resume rules:
 
 ## STATE
 
-- **Status:** IN PROGRESS (offline block) — Phases 2, 1a, 3 done + grt/ scaffold
-- **Last action:** grt/ scaffold, binary vendored, all Phase 3 registration splices applied and verified. Committed.
-- **Next step:** Phase 4 (grt/settings.py MapdSettings writer), then Phase 5 (port scc_map.py + hooks.py — the big one)
+- **Status:** IN PROGRESS (offline block) — Phases 2, 1a, 3, 4 done + grt/ scaffold + Verification 2
+- **Last action:** Phase 4 (grt/settings.py) written and asserted. Committed.
+- **Next step:** Phase 5 — the big one. Port `grt/scc_map.py` from sunnypilot `map_controller.py` (377 lines, read it in FULL first), write `grt/hooks.py` (limit_v_cruise + extra_accel_candidates), then the two GRT-MOD hooks in `longitudinal_planner.py`. Note the injection is the min()-candidate design in the plan, NOT the old a_min_override kwarg.
 - **Blockers / gotchas:**
   - **The Pi5 CANNOT build openpilot.** No `scons`, no `cmake`, no `capnproto`/`capnpc`; the repo `.venv` was empty. So **Verification 1 (`scons -j4`) cannot be run here** — it must be done on the comma4 during the on-device block. Do NOT tick Verification 1 on the strength of the schema check below; they are different claims (capnp schema validity + Python addressability vs. a real C++ codegen/compile).
   - Installed `pycapnp` (2.2.4, prebuilt wheel, venv-local at `.venv/`, no sudo, no source compile) purely to validate schemas and do round-trips on the Pi5. This is a dev-only dep; it is NOT required on device and must not be added to any requirements file.
@@ -44,12 +44,12 @@ All match → the rename is wire-neutral and agrees with the binary. Also verifi
 - [x] **Phase 2 — cereal schema** — DONE. `custom.capnp` (CustomReserved17/18/19 → MapdExtendedOut/MapdIn/MapdOut, IDs unchanged; MapdOut 24 fields @0–@23; enums Mapd-prefixed for upstream-collision safety, wire-safe) + `log.capnp` union renames @143/144/145; GRT-MOD sentinels on both. Verified via pycapnp (see evidence above). Real `scons` codegen still pending on device.
 - [x] **Phase 1a — vendor binary** — DONE. md5 `0c3b552c...fbc` verified, 21211912 bytes, ELF aarch64; provenance in `third_party/mapd/README.md` — copy `~/Comma/sunnypilot/third_party/mapd_pfeiferj/mapd` → `third_party/mapd/mapd`, verify md5 `0c3b552c229addc273e2c39c28924fbc`, write `grt/README.md` provenance
 - [x] **Phase 3 — registration splices** — DONE. services.py (INLINED, see gotcha), params_keys.h `#include` + `.inc`, process_config `procs += grt_procs()`, plannerd `+ GRT_SUB`, selfdrived `- GRT_IGNORED_PROCESSES` — `registry.py` (GRT_SERVICES/GRT_SUB/GRT_PROCS/MAPD_ROOT) + one-line splices in `services.py`, `process_config.py`, `params_keys.h`(+`.inc`), `plannerd.py`, and the `selfdrived.py` not_running exclusion
-- [ ] **Phase 4 — MapdSettings** — `grt/settings.py` writes defaults (speed_limit_control_enabled=true, curve on, vision off, tuned jerk/accel/offset)
+- [x] **Phase 4 — MapdSettings** — DONE. `grt/settings.py` (write-once, `--force`/`--show`, best-effort reloadSettings notify). speed_limit_control ON, vision_curve OFF, tuning preserved. NO 1 Hz rewrite loop (key is PERSISTENT) — `grt/settings.py` writes defaults (speed_limit_control_enabled=true, curve on, vision off, tuned jerk/accel/offset)
 - [ ] **Phase 5 — control path** — port `grt/scc_map.py` from sunnypilot map_controller.py; `grt/hooks.py` (limit_v_cruise + extra_accel_candidates); two sentinel hooks in `longitudinal_planner.py`
 - [ ] **Phase 6 — speed-limit adoption** — add `speedLimitSuggestedSpeed` candidate in scc_map.py; do NOT duplicate mapd's nextSpeedLimit lookahead
 - [ ] **Phase 7 code (separate commit, disabled by default)** — Hook 2 firm-hazard-accel candidate is written but committed on its own and left for the on-device drive phase to enable; do not enable in default path
 - [ ] **Verification 1 — clean local `scons -j4`** (or `openpilot/cereal` if full build too heavy)
-- [ ] **Verification 2 — PC schema round-trip** — construct/read a `mapdOut`, all 24 fields addressable
+- [x] **Verification 2 — PC schema round-trip** — DONE on Pi5 via pycapnp: built/serialized/parsed a `mapdOut`, all 24 fields addressable, values correct (see Phase 2 evidence above)
 - [x] **GRT_MODS.md** — DONE (touchpoint table + sync procedure) — touchpoint table (file, line, category C/D, why)
 
 ### ← OFFLINE BLOCK COMPLETE = cron cancels here, notify user, hand off to on-device block.
