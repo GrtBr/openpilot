@@ -21,7 +21,7 @@ Categories: **A** new fork-owned file (no conflict) · **B** registration splice
 | `openpilot/system/manager/process_config.py` | after `procs` list | B | `procs += grt_procs()`. |
 | `openpilot/selfdrive/controls/plannerd.py` | import block + `SubMaster(...)` | B | `+ GRT_SUB` on the service list (adds `mapdOut`). Upstream does occasionally add entries to this list — expect a trivial re-resolve. |
 | `openpilot/selfdrive/selfdrived/selfdrived.py` | `not_running` set (~line 341) | **C** | Subtracts `GRT_IGNORED_PROCESSES` so mapd cannot raise `processNotRunning` and block engagement. Adapted, **not** copied from sunnypilot — this openpilot version has no `self.ignored_processes`. If upstream restructures this block, re-apply by meaning, not by patch. |
-| `openpilot/selfdrive/controls/lib/longitudinal_planner.py` | _(pending Phase 5)_ | **C** | Two hooks: lower `v_cruise` before `get_cruise_accel`, and append a hazard accel candidate before the `min()`. Highest-risk rows in this table — re-verify against the arbitration code every sync. |
+| `openpilot/selfdrive/controls/lib/longitudinal_planner.py` | import block; before `get_cruise_accel`; before `min(candidates)` | **C** | Two hooks (19 added lines, 0 deletions). Hook 1 `limit_v_cruise()` lowers the ceiling — must stay BEFORE `get_cruise_accel` and only ever lower `v_cruise` so `forceDecel` still wins. Hook 2 `extra_accel_candidates()` appends a hazard decel candidate — must stay AFTER hook 1 (which runs the controller for the frame) and before the `min()`. **Highest-risk rows in this table.** If upstream changes `A_CRUISE_MIN` or the min() arbitration, re-verify the hook-2 safety argument (see PROGRESS.md). |
 
 ## Fork-owned files (category A — no merge conflicts)
 
