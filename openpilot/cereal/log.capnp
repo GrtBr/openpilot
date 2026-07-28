@@ -2623,9 +2623,12 @@ struct Event {
     customReserved14 @140 :Custom.CustomReserved14;
     customReserved15 @141 :Custom.CustomReserved15;
     customReserved16 @142 :Custom.CustomReserved16;
-    customReserved17 @143 :Custom.CustomReserved17;
-    customReserved18 @144 :Custom.CustomReserved18;
-    customReserved19 @145 :Custom.CustomReserved19;
+    # GRT-MOD-START — mapd. Union ordinals @143/@144/@145 UNCHANGED (wire-compat with the
+    # prebuilt Go binary); only the member names and struct names changed.
+    mapdExtendedOut @143 :Custom.MapdExtendedOut;
+    mapdIn @144 :Custom.MapdIn;
+    mapdOut @145 :Custom.MapdOut;
+    # GRT-MOD-END
 
     # *********** legacy + deprecated ***********
     model @9 :Deprecated.ModelData; # TODO: rename modelV2 and mark this as deprecated

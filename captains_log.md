@@ -1,0 +1,285 @@
+# Captain's Log — `nightly-dev`
+
+Running record of code changes to **this checkout only** (`~/Comma/openpilot/nightly-dev`, branch
+`nightly-dev`). Newest entry first. Each entry: what changed, why, how it was verified, and current
+deploy status.
+
+The sibling `~/Comma/openpilot/release-mici-staging/` checkout keeps its **own** `captains_log.md`.
+The two branches diverge — changes logged here are not present there unless cherry-picked.
+
+---
+
+## 2026-07-28
+
+### 3. Hard reset onto upstream `nightly-dev` — lockout and accel-filter changes DISCARDED
+
+**This entry undoes entries under 2026-07-24. Read it before trusting anything below.**
+
+At the user's instruction ("update nightly-dev from original github... overwrite all other changes"),
+this checkout was hard-reset onto `upstream/nightly-dev` (`commaai/openpilot`) and only the Staria
+fingerprint was re-applied.
+
+- Before: `808a431b7d` (3 local commits on top of `80ac9b8adc`, openpilot v0.11.2 of 2026-07-07)
+- After: `dcb3550cac` = Staria fingerprint on top of `111861914f` (openpilot v0.11.2, 2026-07-27)
+- `git diff upstream/nightly-dev HEAD` is now **exactly the 2-line fingerprint** and nothing else.
+
+**Discarded:**
+
+| Commit | Change | Was it on the car? |
+|---|---|---|
+| `808a431b7d` | longitudinal: low-pass the e2e accel branch on relaxed personality | **Yes** — deployed, test-driven 2026-07-24 |
+| `f23cdafed5` | monitoring: driver-distracted lockout 30 min → 30 s | **Yes** — deployed, confirmed after reboot |
+
+**Preserved:** `b91340b` → re-applied as `dcb3550cac`.
+
+**Recovery:** both discarded commits survive in three places — local branch
+`nightly-dev-backup-2026-07-28`, `origin/nightly-dev` on the GrtBr fork (still at `808a431b7d`), and
+the reflog. Nothing is lost.
+
+**⚠️ The comma4 is now out of sync with this repo.** It is still running `808a431b7d`, i.e. the car
+retains the 30-second lockout and the e2e accel filter. This repo no longer has them. Pulling this
+branch onto the device will revert both behaviours.
+
+**⚠️ The lockout patch can no longer be re-applied as-is.** Upstream reworked the design between
+`80ac9b8adc` and `111861914f`: `_LOCKOUT_TIME` (a single constant) is gone, replaced by
+`_LOCKOUT_TIMES = [int(60 * n_min / DT_DMON) for n_min in [1, 5, 15, 30]]` — an escalating ladder
+indexed by `lockout_count` (`openpilot/selfdrive/monitoring/policy.py:44`). Reinstating a 30-second
+lockout now means editing that ladder, not the old constant.
+
+**Verification after the reset:**
+- `opendbc/car/tests/test_fw_fingerprint.py`: **14 passed, 139 skipped, 2499 subtests passed**
+- `match_fw_to_car_exact` on the RHD pair → `{CAR.HYUNDAI_STARIA_4TH_GEN}`
+
+**⚠️ Disk:** the reset lazily fetched the v0.11.2 tree through the `blob:none` partial clone and took
+`/` from ~4.0 GB free to **1.8 GB free (97% used)**. Untracked files (`captains_log.md`, `CLAUDE.md`,
+`.graphifyignore`, `graphify-out/`, `PORT_MAPD_FROM_SUNNYPILOT.md`) were untouched by the reset.
+
+**Deploy status:** ~~local only~~ — **DEPLOYED, see entry 4.**
+
+### 4. Deployed to comma4 — required an AGNOS 18.4 → 18.7 OS upgrade
+
+**Device is now running `dcb3550cac` on AGNOS 18.7. Verified healthy.**
+
+Sequence:
+
+1. Pushed the pre-reset tip to the fork as `pre-reset-2026-07-28` (`808a431b7d`) so the discarded
+   accel filter and lockout survive on GitHub, then `git push --force-with-lease origin nightly-dev`
+   (`808a431b7d` → `dcb3550cac`).
+2. On device: stopped openpilot, `git fetch` + `git reset --hard origin/nightly-dev`, rebooted.
+
+**The AGNOS jump was the real work.** `launch_env.sh` on the new tip sets `AGNOS_VERSION="18.7"`; the
+old commit wanted `18.4`, which is what the device had. So `launch_chffrplus.sh` ran the AGNOS system
+updater *before* manager, and openpilot did not start until the new OS image was flashed. The updater
+waits for confirmation in the device UI before downloading — from ssh this looks exactly like a hang
+(process sleeping, `write_bytes: 0`, no network throughput). It is not a hang. Confirm on the screen
+and it downloads, flashes, and reboots itself.
+
+**Two mistakes worth not repeating:**
+
+- **Do not run scons on this branch.** It ships `prebuilt` (marker file at repo root) and
+  `launch_chffrplus.sh:91` gates the build on `[ ! -f $DIR/prebuilt ]`, so the device runs committed
+  binaries. `git reset` alone delivers everything. Attempting a build fails on a missing
+  `driving_supercombo.onnx` (ONNX sources aren't shipped in a prebuilt branch) and dirties
+  `panda/board/obj/{gitversion.h,version}`, which then need `git checkout --`.
+- **`pkill -f <pattern>` over ssh matches the ssh session's own command line.** `pkill -f manager.py`
+  killed the remote shell before it could do anything, twice, with silent empty output. Use
+  `pkill -x <name>`, and keep the pattern string out of the rest of the command.
+
+**Verification on device after the final reboot:**
+
+- `/VERSION` = `18.7`, matching `AGNOS_VERSION` in `launch_env.sh`
+- `git log -1` = `dcb3550`, working tree clean
+- manager up; modeld, plannerd, controlsd, card, selfdrived, dmonitoringd all running; 18 selfdrive
+  processes stable across a 30 s recheck, load settling (16.9 → 11.0)
+- RHD Staria FW strings present in the device's `fingerprints.py`
+- Newest swaglog: zero `ERROR`/`CRITICAL`/`Traceback`; no crash-looping processes
+
+**Behaviour change on the car:** the e2e accel filter and the 30-second driver-distracted lockout are
+gone, as intended. Lockout is now upstream's escalating ladder (1/5/15/30 min).
+
+### 1. Pi5 checkout reorg: `openpilot/openpilot` → `openpilot/nightly-dev`
+
+**Not a code change** — local directory layout only, no tracked files touched.
+
+The working copy moved from `/home/pi5-ubuntu/Comma/openpilot/openpilot` to
+`/home/pi5-ubuntu/Comma/openpilot/nightly-dev`, so a second checkout of a different branch can live
+alongside it under the same parent. Verified nothing depended on the old absolute path: `.git/config`,
+hooks and `core.worktree` are all path-free; `.venv` is a uv venv with no hardcoded paths;
+`compile_commands.json` refers to `/data/openpilot` (device paths) and is unaffected.
+
+Two things did carry the old path and were rewritten: `graphify-out/` (751 files — `.graphify_root`,
+`manifest.json`, `graph.json`, AST cache) and `PORT_MAPD_FROM_SUNNYPILOT.md`. `graph.json` was
+re-validated after the rewrite (11,879 nodes intact).
+
+**Known pre-existing issue:** `graphify update .` refuses to write, because an AST-only pass produces
+10,609 nodes against the stored 11,879 LLM-enriched ones. This predates the rename; the enriched graph
+was left in place rather than force-rebuilding and losing 1,270 nodes.
+
+**Note:** keep launching Claude from `/home/pi5-ubuntu/Comma/openpilot` (the parent). The session and
+memory key derives from the cwd — starting inside `nightly-dev/` mints a fresh project dir and loses
+the `MEMORY.md` index.
+
+### 2. Second checkout: `release-mici-staging`, with the RHD Staria fingerprint
+
+**Location:** `/home/pi5-ubuntu/Comma/openpilot/release-mici-staging`
+**Files:** `opendbc_repo/opendbc/car/hyundai/fingerprints.py`
+
+Fresh full clone of `GrtBr/openpilot` (origin, pushable), then `upstream` →
+`commaai/openpilot` and the local `release-mici-staging` branch created from
+`upstream/release-mici-staging` at `70e157462` (openpilot v0.11.1). The fork itself has no
+`release-mici-staging` branch — only `master` and `nightly-dev` — so the branch had to come from
+upstream. Local branch tracks `upstream/release-mici-staging`.
+
+Commit `b91340b` (RHD Staria FW versions) was cherry-picked onto it as `0af132822`. It applied clean:
+the staging branch's `fingerprints.py` was byte-identical to the pre-fingerprint version on
+`nightly-dev`, so the cherry-pick was the entire delta. Adds to `HYUNDAI_STARIA_4TH_GEN`:
+
+- `fwdCamera` `0x7c4`: `US4 MFC  AT GEN RHD 1.00 1.01 99211-CG200 250207`
+- `fwdRadar` `0x7d0`: `US4_ RDR -----      1.00 1.01 99110-CG100`
+
+**Verification** (on the Pi5, deps supplied via `uv run --no-project --with ...` since the repo `.venv`
+is empty):
+
+- `match_fw_to_car_exact` returns exactly `{CAR.HYUNDAI_STARIA_4TH_GEN}` for the RHD pair, for the
+  pre-existing LHD pair, and for a mixed RHD-camera/LHD-radar pair.
+- `opendbc/car/tests/test_fw_fingerprint.py`: **14 passed, 138 skipped, 2473 subtests passed** — no
+  cross-model collisions introduced. Run with `-c ./pyproject.toml --confcutdir=.` from inside
+  `opendbc_repo/`, which is required to bypass the parent openpilot `conftest.py` (it needs `zmq` and
+  a built `params_pyx`).
+
+**Deploy status:** local only. Nothing pushed to `origin`, nothing deployed to comma4.
+
+---
+
+## 2026-07-24
+
+### 1. Driver-distracted lockout: 30 minutes → 30 seconds
+
+**Files:** `selfdrive/monitoring/policy.py`, `selfdrive/selfdrived/events.py`,
+`selfdrive/monitoring/test_monitoring.py`
+
+`_LOCKOUT_TIME` changed from `int(1800 / DT_DMON)` to `int(30 / DT_DMON)` (1800 s → 30 s, i.e.
+600 steps at DT_DMON = 0.05). This is the lockout that blocks re-engagement after 2 red alerts or
+1 no-response event; `selfdrived.py:192` gates engagement on `driverMonitoringState.lockout`, which
+clears once `lockout_time > _LOCKOUT_TIME`, so the one constant is the whole functional change.
+
+Two follow-on fixes were required:
+
+- **Alert text.** `too_distracted_alert` only rendered minutes: at 30 s it computed `round(0.5)` → 0,
+  then `max(1, 0)`, so the car would have displayed *"1 minute Left"* for the entire 30-second
+  lockout. Now renders seconds below a minute and keeps minutes wording above.
+- **Tests.** `test_distracted_lockout` / `test_invisible_lockout` ran a 120 s sequence and asserted
+  lockout state at the end. With a 600-step lockout it self-clears mid-run and resets
+  `alert_3_cnt` / `no_response_cnt` / `too_distracted`. Both now truncate to end inside the lockout
+  window, which preserves their intent and makes them independent of the duration.
+
+**Verification:** 13/13 monitoring tests pass on-device (`/usr/local/venv` + `PYTHONPATH=/data/openpilot`).
+The original test file was run against the new constant to confirm the fallout was real, not
+theoretical: 2 failed on `assert d_status.alert_3_cnt == 1` → `assert 0 == 1`.
+
+**Status:** live on device since the reboot. Uncommitted working-tree edit.
+
+**Note:** `policy.py:21-24` carries comma's notice that nerfing driver-monitoring safety features can
+get you and your users banned from comma's servers. Deliberate, user-directed change.
+
+---
+
+### 2. Low-pass filter on the e2e acceleration branch (longitudinal jitter)
+
+**File:** `selfdrive/controls/lib/longitudinal_planner.py`
+
+**Symptom:** without a lead, the car accelerates → coasts → accelerates, and the onset is distinctly
+felt.
+
+**Diagnosis** (route `0000000a--f31979c274`, 2026-07-24 09:26–09:37 local):
+
+- Config: `openpilotLongitudinalControl=True`, `pcmCruise=False`, `kpV/kiV=[0.0]` (LongControl is
+  pure passthrough — no PID to tune), `radarUnavailable=True`, Experimental + Alpha long both on.
+- The jitter is **speed-banded** and tracks e2e authority: at 18–54 km/h the e2e branch wins
+  `min(e2e, mpc)` 96–100% of the time and commanded jerk p95 is 0.68 m/s³ with 37.6 ripple
+  cycles/min; at 108–126 km/h e2e wins only 18% and the ride is essentially perfect
+  (aTarget std 0.026, speed ripple 0.40 km/h).
+- Within-drive counterfactual: `longitudinalPlan.accels` is the pure MPC trajectory, logged
+  unconditionally even in Experimental mode. In the problem band it shows jerk p95 **0.28** and
+  ripple **8/min** vs the commanded 0.68 / 37.6 — the MPC branch is 2.4× smoother in jerk with ~5×
+  fewer oscillation cycles. The e2e output is a raw per-frame model value with no jerk penalty
+  (`A_CHANGE_COST` / `J_EGO_COST` shape only the MPC branch).
+
+**Change:** `FirstOrderFilter` (TS = 0.5 s) on `output_a_target_e2e` *before* the `min()`, gated to
+the **relaxed** personality. Deceleration below −1.0 m/s² bypasses the filter so real slowdowns are
+never lagged, and `output_should_stop_e2e` is untouched. Bypass re-entry is rate-limited to
+3.0 m/s³. NaN input re-seeds the filter instead of latching.
+
+**Why the bypass is rate-limited:** hard-switching from filtered to raw at the boundary measured
+**9.69 m/s³** across 16 real brake-onset crossings — 6× worse than the raw signal at the same frame
+(1.66). 3.0 m/s³ stays just under the raw signal's own max (3.05), so the transition is never harsher
+than stock, at a cost of ~0.08 s mean / 0.20 s max catch-up.
+
+**Predicted effect** (replaying the real e2e signal; replay machinery validated to mean |err| 0.0000
+against logged `aTarget`, though the counterfactual itself is first-order since a filtered command
+would slightly alter next-frame inputs):
+
+| 18–54 km/h | baseline | filtered |
+|---|---|---|
+| jerk p95 | 0.676 | **0.302 m/s³ (−55%)** |
+| jerk max | 1.83 | 1.00 |
+| ripple | 37.6/min | 20.5/min |
+| mean accel | +0.154 | +0.164 (no responsiveness cost) |
+
+Highway: jerk p95 0.136 → 0.044 (−67%). TS sweep: 0.3 → −45%, 0.4 → −51%, 0.5 → −55%, 0.7 → −62%.
+
+**Verification:** longitudinal maneuver suite identical to the pristine baseline (4 failed, 2 passed,
+56 subtests passed — the 2 NaN-recovery subtest failures are pre-existing on this checkout).
+Road-tested 2026-07-24, no issues reported. Further driving planned 2026-07-25.
+
+**Status:** on device, live after reboot. Uncommitted working-tree edit.
+
+**Personality gating note:** `relaxed` and `standard` differ only in `T_FOLLOW` (1.75 vs 1.45) and
+`get_jerk_factor` returns 1.0 for both, so with no lead they are otherwise identical — toggling
+between them mid-drive is a clean A/B of the filter alone. Confounded when a lead is present.
+
+---
+
+### Investigated and ruled out (recorded so it isn't re-litigated)
+
+- **Coast gate / `ALLOW_THROTTLE_THRESHOLD`** — `allowThrottle` was False for **0.0%** of the engaged
+  no-lead regime (2 toggles in 388 s; 2.62% across the whole log, all outside the regime).
+- **`accel_clip` rate limiter (`planner:165`, the ±0.05 constant)** — reconstructed exactly and it
+  binds only 3.08% of samples in the problem band, with a mean 0.944 m/s² of headroom. It can only
+  limit jerk to 1.0 m/s³ while commanded jerk p95 was already 0.68. Halving it would also slow the
+  ceiling's recovery, nudging sluggishness the wrong way. *May become relevant after change 2:* with
+  e2e smoothed, max jerk in that band pins at exactly 1.00 m/s³, which is the clip's own slew rate.
+- **`A_CHANGE_COST`** — shapes only the MPC branch, which is already the smooth one and unselected
+  97% of the time in the problem band.
+- **PID tuning** — Hyundai leaves `kpV`/`kiV` at `[0.]`, confirmed from the device's own `CarParams`.
+- **Driving personality (for jitter)** — `get_jerk_factor` is 1.0 for both relaxed and standard.
+
+## 2026-07-28 — mapd port, Phase 2: cereal schema
+
+Ported mapd's capnp schema into the fork's reserved custom slots, as the first phase of
+PORT_MAPD_FROM_SUNNYPILOT.md (offline block).
+
+Changes (both GRT-MOD sentinel-wrapped, category D):
+- `openpilot/cereal/custom.capnp` — renamed reserved structs IN PLACE, struct IDs unchanged:
+  CustomReserved17 → MapdExtendedOut (@0xa30662f84033036c), CustomReserved18 → MapdIn
+  (@0xc86a3d38d13eb3ef), CustomReserved19 → MapdOut (@0xa4f1eb3323f5f582). Added supporting
+  structs (MapdDownloadLocationDetails, MapdDownloadProgress, MapdPathPoint) and enums, copied
+  verbatim from the authoritative Go schema the prebuilt binary was compiled against.
+- `openpilot/cereal/log.capnp` — union members @143/@144/@145 renamed to mapdExtendedOut/mapdIn/mapdOut.
+
+Decisions:
+- Enums Mapd-prefixed (MapdWaySelectionType, MapdRoadContext, MapdSpeedLimitOffsetType). No
+  collision exists today, but custom.capnp/log.capnp/deprecated.capnp all share
+  $Cxx.namespace("cereal"), so an upstream-added RoadContext would collide later. Renaming enum
+  *types* is wire-safe (enumerants serialize as ordinals), so this is free insurance.
+- MapdOut kept at 24 fields @0–@23. Did NOT add nextHazardSpeedTarget @24 — it exists only in
+  sunnypilot's python-side schema, not in the Go schema, so the binary never writes it.
+
+Verification (pycapnp on Pi5; real scons build deferred to device):
+- Union discriminants — the actual wire tag, which is positional and NOT the @143 ordinal —
+  compared three ways: pristine HEAD 141/142/143, this branch 141/142/143, Go schema 141/142/143.
+  All match, so the rename is wire-neutral AND agrees with the prebuilt binary.
+- MapdOut = 24 fields, contiguous @0–@23, all addressable; build/serialize/parse round-trip OK.
+
+Note: the Pi5 cannot build openpilot (no scons/cmake/capnproto). Verification 1 (scons -j4)
+is deferred to the on-device block and must not be ticked off the schema check above.
