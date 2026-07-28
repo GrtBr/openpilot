@@ -283,3 +283,41 @@ Verification (pycapnp on Pi5; real scons build deferred to device):
 
 Note: the Pi5 cannot build openpilot (no scons/cmake/capnproto). Verification 1 (scons -j4)
 is deferred to the on-device block and must not be ticked off the schema check above.
+
+## 2026-07-28 — mapd port, grt/ scaffold + Phase 1a (binary) + Phase 3 (registration)
+
+Established the fork-owned `openpilot/grt/` package and wired mapd into the manager, params,
+services and plannerd with one-line hooks.
+
+Added (category A, fork-owned — no future merge conflicts):
+- `openpilot/grt/__init__.py`, `openpilot/grt/registry.py` — MAPD_ROOT, GRT_SUB,
+  GRT_IGNORED_PROCESSES, grt_procs(). Deliberately import-free at module level.
+- `openpilot/common/grt_params_keys.inc` — MapdSettings (PERSISTENT/JSON) and
+  SmartCruiseControlMap (PERSISTENT/BOOL "0").
+- `third_party/mapd/mapd` + README.md — vendored fork binary, md5
+  0c3b552c229addc273e2c39c28924fbc, 21211912 bytes, ELF aarch64 static. Verified distinct from
+  the stale May-21 mapd_arm64 (2dda8f6e...). Provenance and "never auto-update" recorded.
+- `GRT_MODS.md` — the sync checklist of every in-place upstream edit.
+
+Upstream hooks (categories B/C, all GRT-MOD sentinel-wrapped):
+- cereal/services.py — 3 mapd service entries at QueueSize.MEDIUM
+- common/params_keys.h — single #include of the .inc, inside the keys initializer
+- system/manager/process_config.py — procs += grt_procs()
+- selfdrive/controls/plannerd.py — SubMaster + GRT_SUB
+- selfdrive/selfdrived/selfdrived.py — not_running - GRT_IGNORED_PROCESSES (category C)
+
+Key finding (changed the design): **services.py cannot import openpilot.grt.** It is executed
+as a standalone script at build time to generate services.h, where the repo root is not on
+sys.path; the import splice failed with ModuleNotFoundError and broke the build. The 3 service
+entries are therefore inlined in services.py, and registry.py does not duplicate them (single
+source of truth). Caught by testing the build path rather than assuming.
+
+Verification (Pi5, no openpilot build available):
+- services.py standalone run regenerates services.h; mapdOut/mapdIn/mapdExtendedOut all emit
+  queue_size 2097152 (2 MB), matching the binary's compiled-in ServiceQueueSize table.
+- All six touched python files compile.
+- grt_procs() builds NativeProcess(name='mapd', cwd='/data/media/0/osm', cmdline=<BASEDIR>/
+  third_party/mapd/mapd) and its should_run gate correctly returns False when the tile dir is
+  absent (as on the Pi5), so mapd cannot spuriously start.
+- selfdrived: mapd excluded from the processNotRunning set — adapted to this version's
+  not_running comprehension, NOT copied from sunnypilot (which has no ignored_processes here).

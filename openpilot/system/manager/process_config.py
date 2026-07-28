@@ -123,4 +123,9 @@ procs = [
   PythonProcess("joystick", "openpilot.tools.joystick.joystick_control", and_(joystick, iscar)),
 ]
 
+# GRT-MOD-START — fork-owned processes (mapd). See openpilot/grt/registry.py.
+from openpilot.grt.registry import grt_procs
+procs += grt_procs()
+# GRT-MOD-END
+
 managed_processes = {p.name: p for p in procs}

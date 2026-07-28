@@ -129,4 +129,5 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"UsbGpuActive", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, BOOL}},
     {"UsbGpuLoading", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, BOOL}},
     {"Version", {PERSISTENT, STRING}},
+#include "openpilot/common/grt_params_keys.inc"  // GRT-MOD
 };

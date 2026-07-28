@@ -91,6 +91,14 @@ _services: dict[str, tuple] = {
   "livestreamRoadEncodeData": (False, 20., None, QueueSize.MEDIUM),
   "livestreamDriverEncodeData": (False, 20., None, QueueSize.MEDIUM),
   "customReservedRawData0": (True, 0.),
+  # GRT-MOD-START — mapd. Inlined (NOT imported from openpilot.grt.registry) on purpose:
+  # this file is executed as a standalone script at build time to generate services.h, where
+  # the repo root is not on sys.path, so an `openpilot.*` import here breaks the build.
+  # Queue size MUST stay MEDIUM to match the mapd binary's compiled-in ServiceQueueSize table.
+  "mapdOut": (True, 20., 20, QueueSize.MEDIUM),
+  "mapdIn": (False, 0., None, QueueSize.MEDIUM),
+  "mapdExtendedOut": (False, 1., 1, QueueSize.MEDIUM),
+  # GRT-MOD-END
 }
 SERVICE_LIST = {name: Service(*vals) for
                 idx, (name, vals) in enumerate(_services.items())}

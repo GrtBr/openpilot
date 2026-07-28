@@ -24,6 +24,7 @@ from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroa
 
 from openpilot.common.version import get_build_metadata
 from openpilot.common.hardware import HARDWARE
+from openpilot.grt.registry import GRT_IGNORED_PROCESSES  # GRT-MOD
 
 REPLAY = "REPLAY" in os.environ
 SIMULATION = "SIMULATION" in os.environ
@@ -338,7 +339,14 @@ class SelfdriveD:
     # All events here should at least have NO_ENTRY and SOFT_DISABLE.
     num_events = len(self.events)
 
-    not_running = {p.name for p in self.sm['managerState'].processes if not p.running and p.shouldBeRunning}
+    # GRT-MOD-START — exclude fork-owned procs (mapd) from the processNotRunning safety event.
+    # mapd is a standalone Go binary, not a normal openpilot process; it must not be able to
+    # block engagement. Applied here (rather than sunnypilot's self.ignored_processes, which
+    # does not exist in this openpilot version) so both the cloudlog event and the event add
+    # below see the filtered set.
+    not_running = {p.name for p in self.sm['managerState'].processes
+                   if not p.running and p.shouldBeRunning} - GRT_IGNORED_PROCESSES
+    # GRT-MOD-END
     if self.sm.recv_frame['managerState'] and len(not_running):
       if not_running != self.not_running_prev:
         cloudlog.event("process_not_running", not_running=not_running, error=True)

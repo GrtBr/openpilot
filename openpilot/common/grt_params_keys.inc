@@ -1,0 +1,10 @@
+// GRT-MOD — fork-owned param keys, #included INSIDE the `keys` initializer in params_keys.h.
+// Kept in a separate file so params_keys.h carries exactly one fork line (one merge conflict
+// point instead of one per key). Same entry syntax as params_keys.h.
+//
+// MapdSettings MUST be PERSISTENT: Params::clear_all() unlinks every file in the params dir
+// whose name is not in this table, and manager.py calls it on manager start and on every
+// onroad/offroad/ignition transition. sunnypilot works around this by rewriting the file
+// every second from mapd_manager.py; registering the key is the correct fix here.
+{"MapdSettings", {PERSISTENT, JSON}},
+{"SmartCruiseControlMap", {PERSISTENT, BOOL, "0"}},
