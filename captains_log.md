@@ -389,3 +389,34 @@ Tests: 12/12 pass — curve ceiling, speed-limit precedence, hazard engage + ada
 [-1.5,-0.3], MIN_V floor, lead blocks rising edge, lead-past-hazard does not block, sticky latch
 survives a lead appearing mid-approach, and full inertness when the param is off / long disabled
 / overriding / road clear.
+
+## 2026-07-28 — mapd port, Phase 7: firm hazard pre-braking (default OFF) — offline block complete
+
+- `openpilot/common/grt_params_keys.inc` — registered SmartCruiseControlMapHazardAccel
+  (PERSISTENT, BOOL, default "0"). Separate from the SmartCruiseControlMap master switch on
+  purpose: this is the most aggressive part of the feature and should only be enabled after
+  the speed-ceiling behaviour has been driven and validated.
+- `openpilot/selfdrive/controls/lib/longitudinal_planner.py` — Hook 2, one functional line:
+  `candidates += grt_hooks.extra_accel_candidates(v_ego)` immediately before the min().
+- `openpilot/grt/tests/test_hooks.py` — 9 tests, all passing.
+
+This replaces sunnypilot's a_min_override kwarg on long_mpc.update, which does not exist in
+this openpilot version. Safety argument, asserted by test: a_cruise saturates at
+A_CRUISE_MIN = -1.2 while the adaptive hazard decel spans [-1.5, -0.3], so the candidate only
+wins the min() when it is HARDER than the cruise floor. It can therefore never make braking
+weaker than stock, and the result is still clipped to ACCEL_MIN downstream.
+
+Also asserted: inert while the param is off (the default), no candidate when a lead is present,
+no candidate on a clear road, an unregistered param degrades to off instead of raising, and a
+controller exception cannot propagate into plannerd.
+
+Total upstream footprint in longitudinal_planner.py is 19 added lines, 0 deletions, all
+GRT-MOD sentinel-wrapped.
+
+### Offline block is COMPLETE. Everything from here needs the car.
+
+Remaining work is the on-device block and must be run with the Staria powered and supervised:
+Phase -1 (prebuilt marker), Phase 1b (deploy binary + tiles), Phase 0 (compatibility gate),
+then boot/params/road verification. Verification 1 (scons build) was reassigned to the device
+because the Pi5 has no capnp/scons toolchain at all - it was never run here and must not be
+assumed to pass.

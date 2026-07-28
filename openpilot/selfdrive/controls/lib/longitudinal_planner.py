@@ -152,6 +152,14 @@ class LongitudinalPlanner:
     if sm['selfdriveState'].experimentalMode:
       candidates.append((output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e))
 
+    # GRT-MOD-START — firm hazard pre-braking (default OFF, param SmartCruiseControlMapHazardAccel).
+    # Returns [] unless the hazard branch is in charge. Because a_cruise saturates at
+    # A_CRUISE_MIN (-1.2) and this candidate spans [-1.5, -0.3], it only wins the min() when
+    # harder than the cruise floor, so it can never brake more weakly than stock. Must come
+    # after the limit_v_cruise() hook above, which runs the controller for this frame.
+    candidates += grt_hooks.extra_accel_candidates(v_ego)
+    # GRT-MOD-END
+
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)

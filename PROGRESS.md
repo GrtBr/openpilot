@@ -16,9 +16,9 @@ Resume rules:
 
 ## STATE
 
-- **Status:** IN PROGRESS (offline block) — Phases 2, 1a, 3, 4, 5, 6 done + Verification 2. Only Phase 7 (hook 2 wiring) remains offline.
-- **Last action:** Phases 5+6 — controller ported, hooks written, Hook 1 wired into the planner, 12/12 tests pass. Committed.
-- **Next step:** Phase 7 — register `SmartCruiseControlMapHazardAccel` (PERSISTENT BOOL "0") in `grt_params_keys.inc` and add the ONE-LINE Hook 2 (`candidates += grt_hooks.extra_accel_candidates(v_ego)`) immediately before the `min()` in longitudinal_planner. Keep it DEFAULT OFF. Then the offline block is complete -> cron self-cancels.
+- **Status:** ✅ **OFFLINE BLOCK COMPLETE.** Phases 1a, 2, 3, 4, 5, 6, 7 all done and committed; Verification 2 done; Verification 1 reassigned to the device (impossible on Pi5). Auto-resume cron cancelled. **Next work requires the car.**
+- **Last action:** Phase 7 — hazard-accel param registered (default OFF) and Hook 2 wired. 21/21 tests pass across both suites. Committed.
+- **Next step:** ON-DEVICE BLOCK — requires the Staria powered and SSH-reachable, with the user supervising. Start at Phase -1 (`prebuilt` marker), then deploy, then the Phase 0 gate. **Do NOT auto-run any of it.** Enable `SmartCruiseControlMap` only after Phase 0 passes; leave `SmartCruiseControlMapHazardAccel` OFF until the speed-ceiling behaviour has been driven.
 - **Blockers / gotchas:**
   - **The Pi5 CANNOT build openpilot.** No `scons`, no `cmake`, no `capnproto`/`capnpc`; the repo `.venv` was empty. So **Verification 1 (`scons -j4`) cannot be run here** — it must be done on the comma4 during the on-device block. Do NOT tick Verification 1 on the strength of the schema check below; they are different claims (capnp schema validity + Python addressability vs. a real C++ codegen/compile).
   - Installed `pycapnp` (2.2.4, prebuilt wheel, venv-local at `.venv/`, no sudo, no source compile) purely to validate schemas and do round-trips on the Pi5. This is a dev-only dep; it is NOT required on device and must not be added to any requirements file.
@@ -48,8 +48,8 @@ All match → the rename is wire-neutral and agrees with the binary. Also verifi
 - [x] **Phase 4 — MapdSettings** — DONE. `grt/settings.py` (write-once, `--force`/`--show`, best-effort reloadSettings notify). speed_limit_control ON, vision_curve OFF, tuning preserved. NO 1 Hz rewrite loop (key is PERSISTENT) — `grt/settings.py` writes defaults (speed_limit_control_enabled=true, curve on, vision off, tuned jerk/accel/offset)
 - [x] **Phase 5 — control path** — DONE. `grt/scc_map.py` ported (MapState IntEnum, vestigial param reads dropped, MIN_V/PARAMS_UPDATE_PERIOD inlined), `grt/hooks.py`, Hook 1 in longitudinal_planner (11 added lines, 0 deletions). 12/12 behavioural tests pass (`openpilot/grt/tests/test_scc_map.py`) — port `grt/scc_map.py` from sunnypilot map_controller.py; `grt/hooks.py` (limit_v_cruise + extra_accel_candidates); two sentinel hooks in `longitudinal_planner.py`
 - [x] **Phase 6 — speed-limit adoption** — DONE inside scc_map.update_calculations: takes `speedLimitSuggestedSpeed` as a candidate; sunnypilot's nextSpeedLimit pre-braking block deliberately NOT ported (would fight mapd's own lookahead); `suggestedSpeed` deliberately unused — add `speedLimitSuggestedSpeed` candidate in scc_map.py; do NOT duplicate mapd's nextSpeedLimit lookahead
-- [ ] **Phase 7 code (separate commit, disabled by default)** — Hook 2 firm-hazard-accel candidate is written but committed on its own and left for the on-device drive phase to enable; do not enable in default path
-- [ ] **Verification 1 — clean local `scons -j4`** (or `openpilot/cereal` if full build too heavy)
+- [x] **Phase 7 code (separate commit, disabled by default)** — DONE. `SmartCruiseControlMapHazardAccel` registered (PERSISTENT BOOL "0", DEFAULT OFF); Hook 2 = one line `candidates += grt_hooks.extra_accel_candidates(v_ego)` before the `min()`. 9/9 hook tests pass incl. never-weaker-than-stock. **Enable only after the speed-ceiling behaviour has been driven and validated.**
+- [~] **Verification 1 — clean local `scons -j4`** — **NOT POSSIBLE ON THE PI5** (no scons/cmake/capnproto). MOVED to the on-device block. Schema validity + python addressability were verified instead via pycapnp; that is a weaker claim and does NOT substitute for a C++ build.
 - [x] **Verification 2 — PC schema round-trip** — DONE on Pi5 via pycapnp: built/serialized/parsed a `mapdOut`, all 24 fields addressable, values correct (see Phase 2 evidence above)
 - [x] **GRT_MODS.md** — DONE (touchpoint table + sync procedure) — touchpoint table (file, line, category C/D, why)
 

@@ -8,3 +8,7 @@
 // every second from mapd_manager.py; registering the key is the correct fix here.
 {"MapdSettings", {PERSISTENT, JSON}},
 {"SmartCruiseControlMap", {PERSISTENT, BOOL, "0"}},
+// Firm hazard pre-braking (planner min() accel candidate). Separate from the master switch
+// above and DEFAULT OFF: it is the most aggressive part of the feature and is meant to be
+// enabled only after the speed-ceiling behaviour has been driven and validated.
+{"SmartCruiseControlMapHazardAccel", {PERSISTENT, BOOL, "0"}},
