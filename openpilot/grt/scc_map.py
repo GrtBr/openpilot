@@ -1,0 +1,349 @@
+"""SmartCruiseControlMap — consumes mapdOut and produces longitudinal targets.
+
+Ported from sunnypilot's
+`sunnypilot/selfdrive/controls/lib/smart_cruise_control/map_controller.py`.
+
+The constants and comments here encode real tuning history from on-car testing. Values that
+look arbitrary usually are not — read the comment before changing one.
+
+Two outputs, consumed by openpilot/grt/hooks.py:
+  * `output_v_target`      — speed ceiling (V_CRUISE_UNSET when inactive)
+  * `output_hazard_accel`  — firm hazard decel, or None. (sunnypilot calls this
+                             `output_a_min_override`; see hooks.py for why the injection
+                             mechanism differs in this openpilot version.)
+
+Differences from the sunnypilot original, all deliberate:
+  * `MapState` is a local IntEnum (sunnypilot's lives in the LongitudinalPlanSP capnp schema,
+    which this fork does not port).
+  * The vestigial `LastGPSPosition` / `MapTargetVelocities` param reads are gone. Nothing
+    downstream used them (mapd computes the curve speed itself and publishes mapCurveSpeed),
+    and they would raise UnknownKeyName here.
+  * Speed limits come from `mapdOut.speedLimitSuggestedSpeed` rather than a second python-side
+    pre-braking integrator — see `update_calculations`.
+"""
+import json
+import platform
+import time
+from enum import IntEnum
+
+import openpilot.cereal.messaging as messaging
+from openpilot.common.constants import CV
+from openpilot.common.params import Params
+from openpilot.common.realtime import DT_MDL
+from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
+
+_DEBUG_LOG = "/data/media/0/mapd_debug.log" if platform.system() != "Darwin" else None
+
+# Inlined from sunnypilot (openpilot.sunnypilot.PARAMS_UPDATE_PERIOD / smart_cruise_control.MIN_V)
+PARAMS_UPDATE_PERIOD = 3  # seconds
+MIN_V = 20 * CV.KPH_TO_MS  # do not operate under 20 km/h
+
+
+class MapState(IntEnum):
+  disabled = 0
+  enabled = 1
+  turning = 2
+  overriding = 3
+
+
+ACTIVE_STATES = (MapState.turning, )
+ENABLED_STATES = (MapState.enabled, MapState.overriding, *ACTIVE_STATES)
+
+# Jerk-limited pre-braking profile. Currently used only by the optional python-side
+# speed-limit pre-braking path, which is DISABLED in favour of mapd's own internal lookahead
+# (see update_calculations). Retained because it is the documented tuning baseline.
+TARGET_JERK = -0.6   # m/s^3
+TARGET_ACCEL = -1.2  # m/s^2 should match up with the long planner limit
+TARGET_OFFSET = 3.0  # seconds before the sign at which the target velocity should be reached
+
+HAZARD_HOLD_DISTANCE = 10.0  # metres to hold target speed after passing hazard waypoint
+
+# Hazard-specific deceleration constants. Kept separate from TARGET_ACCEL/TARGET_JERK so
+# changing hazard pre-braking aggression doesn't affect speed-limit pre-braking or the
+# in-flight curve braking.
+HAZARD_TARGET_ACCEL = -0.6     # m/s² baseline hazard decel
+HAZARD_REACH_BUFFER_M = 1.0    # minimal margin; engagement ≈ the pure kinematic decel distance
+HAZARD_ACCEL_MIN = -1.5        # m/s² — hardest decel the adaptive loop may command
+HAZARD_ACCEL_MAX = -0.3        # m/s² — softest decel; never command less than this floor
+                               # (was -0.1; reverted because the looser floor let the planner
+                               # coast in the final 50 m and the car couldn't reach target —
+                               # 5/6 stop-sign approaches required driver brake)
+HAZARD_ACCEL_RATE = 0.05       # m/s² per 50 ms frame — rate limit (1 m/s² per second)
+LEAD_PAST_HAZARD_MARGIN_M = 10.0  # lead must be this far past the hazard to be ignored
+
+# OSM hazard string -> target speed (m/s). 5.55 m/s = 20 km/h, 4.16 m/s = 15 km/h.
+_HAZARD_SPEED_TARGETS = {
+  "stop": 5.55, "give_way": 5.55, "roundabout": 5.55,
+  "mini_roundabout": 5.55, "turning_circle": 5.55,
+  "T-Junction": 5.55,
+  "toll_booth": 5.55, "level_crossing": 5.55, "railway_crossing": 5.55,
+  "traffic_calming": 4.16,
+}
+
+
+def calculate_accel(t, target_jerk, a_ego):
+  return a_ego + target_jerk * t
+
+
+def calculate_velocity(t, target_jerk, a_ego, v_ego):
+  return v_ego + a_ego * t + target_jerk / 2 * (t ** 2)
+
+
+def calculate_distance(t, target_jerk, a_ego, v_ego):
+  return t * v_ego + a_ego / 2 * (t ** 2) + target_jerk / 6 * (t ** 3)
+
+
+class SmartCruiseControlMap:
+  def __init__(self):
+    self.params = Params()
+    self.enabled = self.params.get_bool("SmartCruiseControlMap")
+    self.long_enabled = False
+    self.long_override = False
+    self.is_enabled = False
+    self.is_active = False
+    self.state = MapState.disabled
+    self.v_cruise = 0.0
+    self.frame = -1
+
+    self.v_target = 0.0
+    self.v_ego = 0.0
+    self.a_ego = 0.0
+    self.output_v_target = V_CRUISE_UNSET
+    self.output_hazard_accel = None
+
+    self.hazard_speed_target = 0.0
+    self.hazard_hold_m = 0.0
+    self.hazard_active = False
+    self._hazard_engaged = False                          # sticky latch — prevents gate oscillation
+    self._adaptive_hazard_accel = HAZARD_TARGET_ACCEL
+    self._prev_hazard_distance = 0.0
+    self._has_lead = False
+
+    # debug-only snapshots
+    self._dbg = {}
+
+  def get_v_target_from_control(self) -> float:
+    if self.is_active:
+      return max(self.v_target, MIN_V)
+    return V_CRUISE_UNSET
+
+  def update_params(self) -> None:
+    if self.frame % int(PARAMS_UPDATE_PERIOD / DT_MDL) == 0:
+      self.enabled = self.params.get_bool("SmartCruiseControlMap")
+
+  def update_calculations(self, sm: messaging.SubMaster) -> None:
+    # Reset each frame; the hazard / hold branches below set it if the hazard logic ends up
+    # owning v_target. Gates the firm hazard decel output.
+    self.hazard_active = False
+
+    mapd = sm['mapdOut']
+
+    # mapd's UpdateCurveSpeed() already handles path distance, the 3-phase jerk profile,
+    # TriggerDistance hysteresis and CURVE_CALC_OFFSET. Trust its output directly.
+    map_curve_speed = float(mapd.mapCurveSpeed)
+    self.v_target = map_curve_speed if map_curve_speed > 0 else 0.0
+
+    # --- speed limits (Phase 6) ---
+    # mapd already folds the posted limit, speed_limit_offset, hold-last-seen AND the
+    # next-limit lookahead + jerk profile (speed_limit.go SuggestNewSpeedLimit) into
+    # speedLimitSuggestedSpeed, which state.go sets unconditionally. Take it as one more
+    # candidate. Deliberately NOT re-implementing sunnypilot's nextSpeedLimit /
+    # nextSpeedLimitDistance pre-braking block: it duplicates that lookahead, and two
+    # integrators fight over the same slow-down. If mapd's pre-braking feels too gentle,
+    # tune MapdSettings — do not add a second python-side integrator here.
+    # Note: mapdOut.suggestedSpeed is deliberately NOT used; it already folds in vCruise and
+    # the curve speeds with mapd's own priority rules, which would fight this arbitration.
+    speed_limit_suggested = float(mapd.speedLimitSuggestedSpeed)
+    if speed_limit_suggested > 0 and (self.v_target == 0 or speed_limit_suggested < self.v_target):
+      self.v_target = speed_limit_suggested
+
+    # --- hazards: stop signs, give-way, level crossings, T-junctions, ... ---
+    next_hazard_str = mapd.nextHazard
+    next_hazard_speed_target = _HAZARD_SPEED_TARGETS.get(next_hazard_str, 0.0)
+    next_hazard_distance = float(mapd.nextHazardDistance)
+    d_frame = self.v_ego * DT_MDL
+
+    # Lead vehicle gate: when following a lead, skip hazard pre-braking — the lead-following
+    # MPC encodes the right brake authority. Cached for the firm-decel gate below.
+    lead1 = sm['radarState'].leadOne
+    lead2 = sm['radarState'].leadTwo
+    raw_has_lead = lead1.status or lead2.status
+    self._has_lead = raw_has_lead
+
+    # Lead-past-hazard refinement: a lead already beyond the hazard line (plus margin) is not
+    # between us and the hazard and should not block engagement. Used ONLY at the rising edge.
+    has_lead_for_engage = raw_has_lead
+    if raw_has_lead and next_hazard_distance > 0:
+      blocking = False
+      if lead1.status and lead1.dRel <= next_hazard_distance + LEAD_PAST_HAZARD_MARGIN_M:
+        blocking = True
+      if lead2.status and lead2.dRel <= next_hazard_distance + LEAD_PAST_HAZARD_MARGIN_M:
+        blocking = True
+      if not blocking:
+        has_lead_for_engage = False
+
+    # Clear the sticky latch when there is no hazard, we've passed it, mapd switched to a new
+    # hazard far ahead, or openpilot disengaged. A lead does NOT clear an engaged latch —
+    # leads only gate the rising edge, so transient cross-traffic can't cancel a slow-down
+    # already underway.
+    if (not self.long_enabled or
+        next_hazard_speed_target == 0 or
+        next_hazard_distance == 0 or
+        next_hazard_distance > self._prev_hazard_distance + 100):
+      self._hazard_engaged = False
+
+    # Decay hold distance (maintain target speed briefly after passing the hazard point)
+    if self.hazard_hold_m > 0:
+      self.hazard_hold_m = max(0.0, self.hazard_hold_m - d_frame)
+      if self.hazard_hold_m > 0 and (self.v_target == 0 or self.hazard_speed_target < self.v_target):
+        self.v_target = self.hazard_speed_target
+        self.hazard_active = True
+
+    if next_hazard_speed_target > 0 and next_hazard_distance > 0:
+      if next_hazard_speed_target < self.v_ego:
+        # Kinematic brake distance at constant decel. Stable across a_ego variation, unlike
+        # the cubic jerk-limited formula, which oscillates the engagement gate during approach.
+        decel_dist = (self.v_ego ** 2 - next_hazard_speed_target ** 2) / (2.0 * abs(HAZARD_TARGET_ACCEL))
+        brake_dist = decel_dist + HAZARD_REACH_BUFFER_M
+        # Latch on the rising edge, gated on `not has_lead` HERE only.
+        if brake_dist > 0 and next_hazard_distance <= brake_dist and not has_lead_for_engage:
+          self._hazard_engaged = True
+      # Sticky: while engaged, keep applying the hazard target every frame.
+      if self._hazard_engaged:
+        if self.v_target == 0 or next_hazard_speed_target < self.v_target:
+          self.v_target = next_hazard_speed_target
+          self.hazard_speed_target = next_hazard_speed_target
+          self.hazard_active = True
+      if next_hazard_distance <= d_frame * 2:
+        self.hazard_hold_m = HAZARD_HOLD_DISTANCE
+        self.hazard_speed_target = next_hazard_speed_target
+
+    # Adaptive decel: while the hazard branch owns v_target and we have a valid positive
+    # distance, compute the decel actually needed to hit the hazard target at the line.
+    # Rate-limit and clamp. Compensates for road grade and other unmodelled forces.
+    #
+    # Gated on hazard_active, NOT _hazard_engaged: hazard_active also covers the 10 m hold
+    # past the line. During the hold, next_hazard_distance resets to 0 (or jumps to the next
+    # hazard), so the inner guard skips the recompute and we keep the last adapted value.
+    if self.hazard_active:
+      if next_hazard_distance > 5.0 and self.v_ego > next_hazard_speed_target:
+        needed = -(self.v_ego ** 2 - next_hazard_speed_target ** 2) / (2.0 * next_hazard_distance)
+        delta = needed - self._adaptive_hazard_accel
+        delta = max(-HAZARD_ACCEL_RATE, min(HAZARD_ACCEL_RATE, delta))
+        self._adaptive_hazard_accel += delta
+        self._adaptive_hazard_accel = max(HAZARD_ACCEL_MIN,
+                                          min(HAZARD_ACCEL_MAX, self._adaptive_hazard_accel))
+      # else (in hold, or already at/below target): keep the current adapted value
+    else:
+      # Reset to baseline so the next approach starts fresh and no stale value leaks across.
+      self._adaptive_hazard_accel = HAZARD_TARGET_ACCEL
+
+    self._prev_hazard_distance = next_hazard_distance
+
+    self._dbg = {
+      "map_curve_speed": map_curve_speed,
+      "speed_limit_suggested": speed_limit_suggested,
+      "next_speed_limit": float(mapd.nextSpeedLimit),
+      "next_speed_limit_distance": float(mapd.nextSpeedLimitDistance),
+      "next_hazard_str": next_hazard_str,
+      "next_hazard_speed_target": next_hazard_speed_target,
+      "next_hazard_distance": next_hazard_distance,
+      "lead1_d_rel": lead1.dRel if lead1.status else 0.0,
+      "lead2_d_rel": lead2.dRel if lead2.status else 0.0,
+    }
+
+  def _update_state_machine(self) -> tuple[bool, bool]:
+    if self.state != MapState.disabled:
+      if not self.long_enabled or not self.enabled:
+        self.state = MapState.disabled
+      elif self.long_override:
+        self.state = MapState.overriding
+      else:
+        # ENABLED
+        if self.state == MapState.enabled:
+          if self.v_cruise > self.v_target != 0:
+            self.state = MapState.turning
+        # TURNING
+        elif self.state == MapState.turning:
+          if self.v_cruise <= self.v_target or self.v_target == 0:
+            self.state = MapState.enabled
+        # OVERRIDING
+        elif self.state == MapState.overriding:
+          if not self.long_override:
+            if self.v_cruise > self.v_target != 0:
+              self.state = MapState.turning
+            else:
+              self.state = MapState.enabled
+    # DISABLED
+    elif self.state == MapState.disabled:
+      if self.long_enabled and self.enabled:
+        self.state = MapState.overriding if self.long_override else MapState.enabled
+
+    return self.state in ENABLED_STATES, self.state in ACTIVE_STATES
+
+  def update(self, sm: messaging.SubMaster, long_enabled: bool, long_override: bool,
+             v_ego: float, a_ego: float, v_cruise: float) -> None:
+    self.long_enabled = long_enabled
+    self.long_override = long_override
+    self.v_ego = v_ego
+    self.a_ego = a_ego
+    self.v_cruise = v_cruise
+
+    self.update_params()
+    self.update_calculations(sm)
+
+    self.is_enabled, self.is_active = self._update_state_machine()
+
+    self.output_v_target = self.get_v_target_from_control()
+
+    # Firm hazard decel — triple-gated for safety:
+    #   1. is_active     → state machine in `turning` (controller actively in charge)
+    #   2. hazard_active → v_target was set by the hazard branch, not passthrough
+    #   3. not _has_lead → no lead car (lead-following keeps full authority)
+    # Any one False → None → no extra decel authority.
+    if self.is_active and self.hazard_active and not self._has_lead:
+      # Use the ADAPTIVE value. Hardcoding HAZARD_TARGET_ACCEL here was the historical bug:
+      # the adaptive loop's output never reached the planner and a_ego plateaued near
+      # -0.9 m/s² regardless of tuning.
+      self.output_hazard_accel = self._adaptive_hazard_accel
+    else:
+      self.output_hazard_accel = None
+
+    self._write_debug(sm)
+    self.frame += 1
+
+  def _write_debug(self, sm: messaging.SubMaster) -> None:
+    if _DEBUG_LOG is None or self.frame % 10 != 0:
+      return
+    line = json.dumps({
+      "t": time.monotonic(),
+      "v_ego_kmh": self.v_ego * 3.6,
+      "a_ego_mps": self.a_ego,
+      "v_cruise_kmh": self.v_cruise * 3.6,
+      "map_curve_speed_kmh": self._dbg.get("map_curve_speed", 0.0) * 3.6,
+      "speed_limit_suggested_kmh": self._dbg.get("speed_limit_suggested", 0.0) * 3.6,
+      "next_sl_kmh": self._dbg.get("next_speed_limit", 0.0) * 3.6,
+      "next_sl_dist_m": self._dbg.get("next_speed_limit_distance", 0.0),
+      "next_hazard_kmh": self._dbg.get("next_hazard_speed_target", 0.0) * 3.6,
+      "next_hazard_dist_m": self._dbg.get("next_hazard_distance", 0.0),
+      "next_hazard_str": self._dbg.get("next_hazard_str", ""),
+      "hazard_hold_m": self.hazard_hold_m,
+      "v_target_kmh": self.v_target * 3.6,
+      "output_v_target_kmh": self.output_v_target * 3.6,
+      "is_active": self.is_active,
+      "is_enabled": self.is_enabled,
+      "state": int(self.state),
+      "long_enabled": self.long_enabled,
+      "long_override": self.long_override,
+      "hazard_active": self.hazard_active,
+      "has_lead": self._has_lead,
+      "output_hazard_accel": self.output_hazard_accel,
+      "adaptive_hazard_accel": self._adaptive_hazard_accel,
+      "lead1_d_rel": self._dbg.get("lead1_d_rel", 0.0),
+      "lead2_d_rel": self._dbg.get("lead2_d_rel", 0.0),
+    })
+    try:
+      with open(_DEBUG_LOG, "a") as f:
+        f.write(line + "\n")
+    except OSError:
+      pass

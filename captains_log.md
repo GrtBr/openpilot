@@ -346,3 +346,46 @@ constants are untouched.
 Also ticked Verification 2 (PC schema round-trip) — completed earlier via pycapnp: a mapdOut
 was built, serialized, parsed back, and all 24 fields were addressable with correct values.
 Verification 1 (scons) remains NOT possible on the Pi5 and stays deferred to the device.
+
+## 2026-07-28 — mapd port, Phases 5 + 6: control path and speed-limit adoption
+
+Ported the controller and wired the speed-ceiling hook into the planner.
+
+Added (fork-owned):
+- `openpilot/grt/scc_map.py` — SmartCruiseControlMap ported from sunnypilot's map_controller.py.
+  All tuning constants and their explanatory comments preserved verbatim (HAZARD_ACCEL_MAX
+  -0.3 reverted-from--0.1 note, the sticky-latch rationale, the adaptive-decel gating note).
+  Adaptations: MapState is a local IntEnum (LongitudinalPlanSP schema not ported); the
+  vestigial LastGPSPosition / MapTargetVelocities param reads are dropped (unused, and they
+  would raise UnknownKeyName here); MIN_V (20 km/h) and PARAMS_UPDATE_PERIOD (3 s) inlined;
+  output_a_min_override renamed output_hazard_accel.
+- `openpilot/grt/hooks.py` — limit_v_cruise() and extra_accel_candidates(); owns the
+  controller singleton and the once-per-frame update ordering contract. limit_v_cruise is
+  exception-guarded so the fork can never take down plannerd.
+- `openpilot/grt/tests/test_scc_map.py` — 12 behavioural tests, all passing, runnable with
+  stubbed deps on a box that cannot import openpilot.
+
+Phase 6 (speed limits) is implemented inside update_calculations: mapdOut.speedLimitSuggestedSpeed
+is taken as one more candidate for v_target. Sunnypilot's nextSpeedLimit/nextSpeedLimitDistance
+pre-braking block was deliberately NOT ported — mapd already does that lookahead internally
+(speed_limit.go SuggestNewSpeedLimit) and two integrators would fight the same slow-down.
+mapdOut.suggestedSpeed is deliberately unused (it folds in vCruise and curve speeds with mapd's
+own priority rules).
+
+Upstream hook (category C, sentinel-wrapped) — longitudinal_planner.py, 11 insertions and 0
+deletions: v_cruise = grt_hooks.limit_v_cruise(...) placed immediately before get_cruise_accel.
+A lower v_cruise makes a_cruise negative and the existing min() selects it. limit_v_cruise only
+ever lowers v_cruise, so the forceDecel v_cruise = 0.0 still wins.
+
+Architecture note worth recording: this openpilot no longer passes v_cruise to the MPC
+(long_mpc.update lost that parameter) and arbitrates by min() over acceleration candidates
+with a_cruise = clip(v_cruise - v_ego, A_CRUISE_MIN=-1.2, max_accel). Hook 2 (Phase 7) will
+therefore append a candidate rather than loosening an MPC slack floor. Since a_cruise saturates
+at -1.2 and the adaptive hazard decel spans [-1.5, -0.3], that candidate only binds when it is
+harder than -1.2 — granting authority beyond the cruise floor, which is what sunnypilot's
+a_min_override achieved, and it can never brake more weakly than stock.
+
+Tests: 12/12 pass — curve ceiling, speed-limit precedence, hazard engage + adaptive decel in
+[-1.5,-0.3], MIN_V floor, lead blocks rising edge, lead-past-hazard does not block, sticky latch
+survives a lead appearing mid-approach, and full inertness when the param is off / long disabled
+/ overriding / road clear.

@@ -14,6 +14,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDX
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, should_stop
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
+from openpilot.grt import hooks as grt_hooks  # GRT-MOD
 
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
@@ -130,6 +131,16 @@ class LongitudinalPlanner:
     output_should_stop_mpc = should_stop(v_ego, output_a_target_mpc)
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
+
+    # GRT-MOD-START — mapd speed ceiling (curve / speed limit / hazard targets).
+    # Must stay BEFORE get_cruise_accel: a lower v_cruise makes a_cruise negative and the
+    # min() below selects it. limit_v_cruise only ever lowers v_cruise, so the forceDecel
+    # v_cruise = 0.0 set above still wins. This call also runs the controller for this frame;
+    # extra_accel_candidates() below reuses its result and must come after.
+    v_cruise = grt_hooks.limit_v_cruise(sm, v_cruise, v_ego, sm['carControl'].enabled,
+                                        sm['carControl'].cruiseControl.override,
+                                        sm['carState'].aEgo)
+    # GRT-MOD-END
 
     self.a_cruise = get_cruise_accel(sm['selfdriveState'].experimentalMode, v_cruise, v_ego,
                                      self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
