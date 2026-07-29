@@ -589,3 +589,15 @@ _write_debug() could run; with the fix in, it will be written from the next driv
 
 Still unknown and only answerable by driving: whether mapd's way selection succeeds in motion.
 Parked it reports waySelectionType=fail with an empty roadName because vEgo=0 and bearingDeg=0.
+
+## 2026-07-29 — fix verified on device after reboot
+
+- scc_map update failures since boot: **0** (was 38,300 in the failed drive).
+- `/data/media/0/mapd_debug.log` is now being WRITTEN (78 KB and growing) - proof that
+  update_calculations() completes every frame instead of throwing.
+- Sample entry parked: v_cruise_kmh=145, v_ego 0, all mapd values 0 (expected while stationary).
+- mapd running, plannerd running, longitudinalPlan VALID=True, mapdOut live tileLoaded=True.
+- waySelectionType still `fail` - expected while parked; only a drive can settle it.
+
+Ready for a second test drive. mapd_debug.log is the instrument: check map_curve_speed_kmh,
+speed_limit_suggested_kmh, v_target_kmh, state and is_active while moving.
