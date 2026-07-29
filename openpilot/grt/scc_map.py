@@ -39,6 +39,20 @@ PARAMS_UPDATE_PERIOD = 3  # seconds
 MIN_V = 20 * CV.KPH_TO_MS  # do not operate under 20 km/h
 
 
+def get_bool_safe(params, key: str) -> bool:
+  """Read a bool param, treating ANY failure as False (feature off).
+
+  Critical: openpilot's Params raises UnknownKeyName for a key that is not in the COMPILED
+  params_keys.h table. Our keys live in grt_params_keys.inc, which only takes effect after a
+  C++ rebuild — so on a device running prebuilt binaries these keys raise. A fork feature must
+  never be able to break the base system, so the failure mode here is "disabled", not "crash".
+  """
+  try:
+    return bool(params.get_bool(key))
+  except Exception:
+    return False
+
+
 class MapState(IntEnum):
   disabled = 0
   enabled = 1
@@ -96,7 +110,7 @@ def calculate_distance(t, target_jerk, a_ego, v_ego):
 class SmartCruiseControlMap:
   def __init__(self):
     self.params = Params()
-    self.enabled = self.params.get_bool("SmartCruiseControlMap")
+    self.enabled = get_bool_safe(self.params, "SmartCruiseControlMap")
     self.long_enabled = False
     self.long_override = False
     self.is_enabled = False
@@ -129,7 +143,7 @@ class SmartCruiseControlMap:
 
   def update_params(self) -> None:
     if self.frame % int(PARAMS_UPDATE_PERIOD / DT_MDL) == 0:
-      self.enabled = self.params.get_bool("SmartCruiseControlMap")
+      self.enabled = get_bool_safe(self.params, "SmartCruiseControlMap")
 
   def update_calculations(self, sm: messaging.SubMaster) -> None:
     # Reset each frame; the hazard / hold branches below set it if the hazard logic ends up

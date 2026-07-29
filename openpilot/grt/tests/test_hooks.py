@@ -129,6 +129,38 @@ def main():
   check("controller exception is contained; v_cruise passes through",
         hooks.limit_v_cruise(None, 42., 15., True, False, 0.) == 42.)
 
+  # REGRESSION: a device running prebuilt binaries has NOT compiled grt_params_keys.inc, so
+  # every fork param raises UnknownKeyName. The controller must then be unbuildable WITHOUT
+  # taking plannerd down. This bug shipped once and was caught on the car - keep it covered.
+  saved = dict(FakeParams.vals)
+  FakeParams.vals.clear()                      # every key now raises
+  hooks._scc = None
+  hooks._scc_broken = False
+  hooks._hazard_accel_enabled = None
+  check("all params raise -> limit_v_cruise is a no-op, does NOT raise",
+        hooks.limit_v_cruise(SM(hz="stop", hzd=30.), 30., 15., True, False, 0.) == 30.)
+  check("all params raise -> extra_accel_candidates returns []",
+        hooks.extra_accel_candidates(15.) == [])
+  # With get_bool_safe in place the controller still CONSTRUCTS; it just reports disabled.
+  # That is the desired outcome - degrade to "feature off", not "no controller".
+  check("controller still constructs, reporting feature DISABLED",
+        hooks._scc is not None and hooks._scc.enabled is False)
+  FakeParams.vals.update(saved)
+
+  # Separately: if construction genuinely fails, it must latch and never retry.
+  import openpilot.grt.scc_map as _sm
+  orig = _sm.SmartCruiseControlMap
+  _sm.SmartCruiseControlMap = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+  hooks._scc = None
+  hooks._scc_broken = False
+  first = hooks.limit_v_cruise(SM(), 31., 15., True, False, 0.)
+  check("hard construction failure -> no-op, no raise", first == 31.)
+  check("hard construction failure is latched (not retried every frame)",
+        hooks._scc_broken is True)
+  _sm.SmartCruiseControlMap = orig
+  hooks._scc = None
+  hooks._scc_broken = False
+
   print(f"\n{sum(results)}/{len(results)} passed")
   return 0 if all(results) else 1
 

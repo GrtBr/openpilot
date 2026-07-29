@@ -35,14 +35,32 @@ can be enabled separately during on-car testing, per the phased rollout.
 from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 
 _scc = None
+_scc_broken = False          # set if the controller cannot even be constructed
 _hazard_accel_enabled: bool | None = None
 
 
 def _scc_singleton():
-  global _scc
+  """Return the controller, or None if it cannot be built.
+
+  Construction is allowed to fail (e.g. Params raises UnknownKeyName when grt_params_keys.inc
+  has not been compiled in yet). We latch that so we do not retry — and every hook then
+  degrades to a no-op rather than taking plannerd down with it.
+  """
+  global _scc, _scc_broken
+  if _scc_broken:
+    return None
   if _scc is None:
-    from openpilot.grt.scc_map import SmartCruiseControlMap
-    _scc = SmartCruiseControlMap()
+    try:
+      from openpilot.grt.scc_map import SmartCruiseControlMap
+      _scc = SmartCruiseControlMap()
+    except Exception:
+      _scc_broken = True
+      try:
+        from openpilot.common.swaglog import cloudlog
+        cloudlog.exception("grt: scc_map unavailable; mapd control disabled")
+      except Exception:
+        pass
+      return None
   return _scc
 
 
@@ -56,6 +74,8 @@ def limit_v_cruise(sm, v_cruise: float, v_ego: float, long_enabled: bool,
   Never raises v_cruise: a `forceDecel` v_cruise of 0.0 still wins.
   """
   scc = _scc_singleton()
+  if scc is None:
+    return v_cruise
   try:
     scc.update(sm, long_enabled, long_override, v_ego, a_ego, v_cruise)
   except Exception:
@@ -77,12 +97,12 @@ def extra_accel_candidates(v_ego: float) -> list:
   """
   global _hazard_accel_enabled
   scc = _scc_singleton()
+  if scc is None:
+    return []
 
   if _hazard_accel_enabled is None or scc.frame % 60 == 0:
-    try:
-      _hazard_accel_enabled = scc.params.get_bool("SmartCruiseControlMapHazardAccel")
-    except Exception:
-      _hazard_accel_enabled = False
+    from openpilot.grt.scc_map import get_bool_safe
+    _hazard_accel_enabled = get_bool_safe(scc.params, "SmartCruiseControlMapHazardAccel")
   if not _hazard_accel_enabled:
     return []
 

@@ -420,3 +420,50 @@ Phase -1 (prebuilt marker), Phase 1b (deploy binary + tiles), Phase 0 (compatibi
 then boot/params/road verification. Verification 1 (scons build) was reassigned to the device
 because the Pi5 has no capnp/scons toolchain at all - it was never run here and must not be
 assumed to pass.
+
+## 2026-07-29 — mapd port, on-device deployment + CRITICAL fail-safe fix
+
+Deployed to comma4 and ran the Phase 0 gate. Found and fixed a bug of mine that would have
+crashed plannerd on the car.
+
+THE BUG: openpilot's Params raises UnknownKeyName for any key not in the COMPILED
+params_keys.h table. Our keys live in grt_params_keys.inc, which only takes effect after a C++
+rebuild - and this device runs prebuilt binaries. On device, all three of MapdSettings,
+SmartCruiseControlMap and SmartCruiseControlMapHazardAccel raise. SmartCruiseControlMap's
+__init__ read that param, and hooks.limit_v_cruise called the constructor OUTSIDE its
+try/except, so the exception would have propagated into plannerd and killed longitudinal
+planning on the next start.
+
+THE FIX: added get_bool_safe() in scc_map.py (any failure -> False, i.e. feature off), and made
+_scc_singleton() return None on construction failure, latched so it is not retried every frame.
+Both hooks now degrade to a no-op. A fork feature must never be able to break the base system;
+the failure mode is "disabled", not "crash". Regression tests added for both paths (26/26 pass).
+
+DEVICE FINDINGS:
+- Device was clean at dcb3550, exactly our base. Transferred via git bundle (atomic, no GitHub
+  push, not the raw-file SCP the repo CLAUDE.md forbids) and fast-forwarded. Binary md5 verified
+  on device.
+- The build toolchain DOES exist, in /usr/local/venv/bin (scons 4.10.1, capnp/capnpc, pycapnp).
+  A plain `which` misses it because the non-login ssh PATH excludes the venv.
+- BUT a full scons build is blocked before it starts: SConstruct fails while READING
+  SConscripts because openpilot/selfdrive/modeld/models/driving_supercombo.onnx is absent
+  (chunked/LFS model, not tracked in git). Pre-existing device condition, unrelated to this
+  port. Consequence: params_keys.h cannot be recompiled, so our param keys stay unknown and
+  the feature stays disabled until that is resolved.
+- Python needs NO build: cereal/__init__.py capnp.load()s the .capnp files at runtime, so our
+  schema is already live on device. mapdOut is in SERVICE_LIST at 20 Hz / 2 MB.
+- WIRE COMPAT PROVEN ON TARGET: device union discriminants are mapdExtendedOut 141 / mapdIn 142
+  / mapdOut 143, matching the Go binary exactly; 24 fields; full round-trip OK.
+
+PHASE 0 GATE: mapd runs, stays alive, creates msgq_mapd{Out,In,ExtendedOut,Cli}, and openpilot
+python received 307/307 frames with tileLoaded=True at ~12 Hz. GATE-1 (messages arrive) and
+GATE-2 (tileLoaded) PASS.
+
+TILE BAND GOTCHA: band directories are floor(lat/2)*2, so tiles for latitude -34.x live in
+source dir -36, NOT -34. The first deploy used -34 and mapd logged "could not unmarshal offline
+data" with tileLoaded=False. Deploying -36 fixed it immediately. Deployed: -34 (83M) and -36
+(24M) of 606M total; device has 8.8G free.
+
+STILL OPEN: waySelectionType=fail and roadName empty because the car is stationary (vEgo=0.0,
+bearingDeg=0.0) - way selection needs a heading. Resolves once driving. GATE-3 therefore needs
+a road test.

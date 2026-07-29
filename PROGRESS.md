@@ -16,7 +16,7 @@ Resume rules:
 
 ## STATE
 
-- **Status:** ✅ **OFFLINE BLOCK COMPLETE.** Phases 1a, 2, 3, 4, 5, 6, 7 all done and committed; Verification 2 done; Verification 1 reassigned to the device (impossible on Pi5). Auto-resume cron cancelled. **Next work requires the car.**
+- **Status:** ON-DEVICE IN PROGRESS. Offline block complete; deployed to comma4; Phase 0 gates 1&2 PASS. **Feature is currently INERT on device (params unknown until a C++ build) — this is the safe designed fallback.** Prior status: ✅ **OFFLINE BLOCK COMPLETE.** Phases 1a, 2, 3, 4, 5, 6, 7 all done and committed; Verification 2 done; Verification 1 reassigned to the device (impossible on Pi5). Auto-resume cron cancelled. **Next work requires the car.**
 - **Last action:** Phase 7 — hazard-accel param registered (default OFF) and Hook 2 wired. 21/21 tests pass across both suites. Committed.
 - **Next step:** ON-DEVICE BLOCK — requires the Staria powered and SSH-reachable, with the user supervising. Start at Phase -1 (`prebuilt` marker), then deploy, then the Phase 0 gate. **Do NOT auto-run any of it.** Enable `SmartCruiseControlMap` only after Phase 0 passes; leave `SmartCruiseControlMapHazardAccel` OFF until the speed-ceiling behaviour has been driven.
 - **Blockers / gotchas:**
@@ -57,8 +57,8 @@ All match → the rename is wire-neutral and agrees with the binary. Also verifi
 
 ## ON-DEVICE BLOCK — DO NOT auto-run. Car powered + user supervising, one session.
 
-- [ ] **Phase -1 — prebuilt marker** reconcile on device (delete stale marker so cereal rebuilds)
-- [ ] **Phase 1b — deploy** binary + tiles (`~/Comma/sunnypilot/tiles/`) to `/data/media/0/osm/`; verify sizes/md5
-- [ ] **Phase 0 — compatibility gate** — mapd by hand, `tileLoaded==True`, sane moving `mapCurveSpeed`/`nextHazardDistance` (proves trap 6)
+- [~] **Phase -1 — prebuilt marker** — marker EXISTS at /data/openpilot/prebuilt. **DO NOT delete it**: a full scons build currently FAILS (missing driving_supercombo.onnx), so deleting the marker would make the device try, and fail, to build at boot — stranding it in the fallback launcher. Left in place deliberately.
+- [x] **Phase 1b — deploy** DONE. Repo fast-forwarded via git bundle; binary md5 verified on device. Tiles: bands **-34 and -36** deployed. **GOTCHA: band dir = floor(lat/2)*2 — tiles for lat -34.x live in dir -36, not -34.**
+- [~] **Phase 0 — compatibility gate** — GATE-1 (messages arrive/decode) **PASS**, GATE-2 (tileLoaded 307/307 @12Hz) **PASS**. GATE-3 (roadName/speedLimit/curve) BLOCKED: car stationary (vEgo=0, bearing=0) so waySelectionType=fail. **Needs a road test.**
 - [ ] **Verification 3–5** — prebuilt reconciled, boot clean, params survive a reboot+ignition cycle
 - [ ] **Verification 6–9** — static drive-through, road tests (curve, speed-limit change, stop sign), log review
