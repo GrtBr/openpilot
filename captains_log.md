@@ -516,3 +516,28 @@ Fix: pass ignore_alive / ignore_valid / ignore_avg_freq = GRT_SUB in plannerd's 
 Verified empirically on device with mapd stopped:
   WITHOUT ignores -> all_checks() = False
   WITH    ignores -> all_checks() = True
+
+## 2026-07-29 — mapd ENABLED on the car + clean reboot
+
+Enabled the speed-ceiling feature and rebooted. Device came back in ~136 s.
+
+Post-reboot verification:
+- manager, plannerd, controlsd, selfdrived, card, modeld all running; nothing crash-looping
+  (managerState reports no process shouldBeRunning-but-not-running).
+- **mapd is running under manager** (pid 10159, /data/openpilot/third_party/mapd/mapd), with
+  msgq_mapd{Out,In,ExtendedOut,Cli} present. mapdOut publishing, tileLoaded=True.
+- **longitudinalPlan VALID=True** with 400 msgs - confirming the SubMaster ignore fix on the car.
+- SmartCruiseControlMap=1 survived the reboot, because the flag lives in /data/media/0/grt,
+  outside the params dir. The file-based design works as intended.
+- SmartCruiseControlMapHazardAccel still absent => hazard braking OFF, as planned.
+
+One wrinkle understood and benign: MapdSettings was absent immediately after boot. Cause is
+clear_all() running on a boot-time transition AFTER mapd had already started. Harmless, because
+mapd reads its settings at startup and our launch cmdline rewrites the file before EVERY mapd
+exec - so any future mapd start gets correct settings regardless. Verified the write command
+works and the file persists in steady state; also sent a reloadSettings and mapd stayed healthy.
+
+STILL OUTSTANDING - THE ROAD TEST. waySelectionType=fail and roadName empty because the car is
+stationary (vEgo=0, bearingDeg=0); way selection needs a heading. Nothing more can be proven
+parked. Drive order: (a) known curve, (b) posted speed-limit change, (c) stop sign with no lead
+car. Hand near the wheel, ready to override. Then pull /data/media/0/mapd_debug.log.
