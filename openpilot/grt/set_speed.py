@@ -73,9 +73,21 @@ MAX_LIMIT_KPH = float(V_CRUISE_MAX)
 # waySelectionType values that mean mapd actually knows which way we are on. `fail` (4) is what
 # it reports while parked (vEgo=0, bearing=0), and adopting a limit off a failed selection would
 # be adopting a limit for a road we may not be on.
+#
+# The two tiers are a deliberate asymmetry, not an oversight. `predicted` is mapd GUESSING which
+# way we will take at a junction. Acting on a guess to SLOW DOWN is conservative; acting on it to
+# SPEED UP is not — a mispredicted off-ramp would raise the set speed on a road we are not on.
+# So upward adoption requires the way we are demonstrably on (`current`) or a continuation of it
+# (`extended`). The ±20 km/h band bounds the damage either way; this bounds it further.
 GOOD_WAY_SELECTION = ("current", "predicted", "extended")
+GOOD_WAY_SELECTION_UP = ("current", "extended")
 
 _DEBUG_LOG = os.path.join(GRT_CONFIG_DIR, "set_speed.log") if platform.system() != "Darwin" else None
+
+# Heartbeat: how often to log WHY nothing happened. Without this a road test where the feature
+# never fires produces an empty log and no way to tell which gate rejected — and mapdOut is not
+# in rlog on a prebuilt branch, so there is no retrospective path either.
+HEARTBEAT_S = 2.0
 
 
 class SetSpeedLimitTracker:
@@ -92,6 +104,9 @@ class SetSpeedLimitTracker:
     self._pending_frames = 0
 
     self.last_action = ""                        # debug only: adopt / pending / confirm / expire
+    self._way = ""                               # last waySelectionType seen, for the heartbeat
+    self._raw_limit = 0.0                        # last mapdOut.speedLimit seen, in m/s
+    self._hb_frame = -1
 
   # ---------------------------------------------------------------------------------------
 
@@ -137,21 +152,32 @@ class SetSpeedLimitTracker:
     return any(b.type.raw in (ButtonType.accelCruise, ButtonType.decelCruise)
                for b in CS.buttonEvents)
 
-  def _read_limit(self, sm) -> float | None:
-    """Posted limit in km/h from mapdOut, or None if it should not be trusted this frame."""
-    if not sm.alive.get('mapdOut', False) or not sm.valid.get('mapdOut', True):
-      return None
+  def _read_limit(self, sm) -> tuple[float | None, str]:
+    """Posted limit in km/h from mapdOut, plus WHY it was rejected.
+
+    The reason string is the whole point of the heartbeat log: on the road, "nothing happened"
+    has five possible causes and they are indistinguishable without it.
+    """
+    if not sm.alive.get('mapdOut', False):
+      return None, "mapd_not_alive"
+    if not sm.valid.get('mapdOut', True):
+      return None, "mapd_not_valid"
 
     mapd = sm['mapdOut']
-    if not mapd.tileLoaded:
-      return None
-    if str(mapd.waySelectionType) not in GOOD_WAY_SELECTION:
-      return None
+    self._way = str(mapd.waySelectionType)
+    self._raw_limit = float(mapd.speedLimit)
 
-    limit_kph = round(float(mapd.speedLimit) * 3.6)
+    if not mapd.tileLoaded:
+      return None, "no_tiles"
+    if self._way not in GOOD_WAY_SELECTION:
+      return None, f"way_{self._way}"
+
+    limit_kph = round(self._raw_limit * 3.6)
+    if limit_kph == 0:
+      return None, "no_limit_posted"
     if not (MIN_LIMIT_KPH <= limit_kph <= MAX_LIMIT_KPH):
-      return None
-    return float(limit_kph)
+      return None, "implausible_limit"
+    return float(limit_kph), "ok"
 
   # ---------------------------------------------------------------------------------------
 
@@ -167,7 +193,7 @@ class SetSpeedLimitTracker:
       self._reset()
       return v_cruise_kph
 
-    limit_kph = self._read_limit(sm)
+    limit_kph, reason = self._read_limit(sm)
 
     # --- a pending limit is awaiting confirmation -------------------------------------------
     if self.pending_limit_kph is not None:
@@ -185,31 +211,52 @@ class SetSpeedLimitTracker:
     # --- stability gate ---------------------------------------------------------------------
     # A limit that is absent/untrusted does NOT clear `_acted_limit_kph`: losing a limit must
     # never trigger anything, and a road that flickers in and out must not re-adopt each time.
+    #
+    # Note the failure mode this creates and which the heartbeat exists to expose: the candidate
+    # counter resets here, so a waySelectionType flickering between `current` and `fail` faster
+    # than LIMIT_STABLE_S means a limit NEVER clears the gate, and nothing is ever logged as a
+    # decision.
     if limit_kph is None:
       self._cand_limit_kph = None
       self._cand_frames = 0
+      self._heartbeat(reason, v_cruise_kph)
       return v_cruise_kph
 
     if limit_kph != self._cand_limit_kph:
       self._cand_limit_kph = limit_kph
       self._cand_frames = 0
+      self._heartbeat("new_candidate", v_cruise_kph, limit_kph)
       return v_cruise_kph
 
     self._cand_frames += 1
-    if self._cand_frames != int(LIMIT_STABLE_S / DT_CTRL):   # exact == : fires once
+    if self._cand_frames < int(LIMIT_STABLE_S / DT_CTRL):
+      self._heartbeat("settling", v_cruise_kph, limit_kph)
       return v_cruise_kph
     if limit_kph == self._acted_limit_kph:
+      self._heartbeat("already_handled", v_cruise_kph, limit_kph)
       return v_cruise_kph
 
     # --- one-shot decision for this limit value ----------------------------------------------
     # Never act on a frame the driver is working the buttons: upstream is mid-adjustment and an
-    # absolute assignment here would eat the press.
+    # absolute assignment here would eat the press. `_cand_frames` is compared with `>=` above
+    # precisely so this is a DEFERRAL to the next clear frame — with an exact `==` the decision
+    # would be dropped permanently and silently. `_acted_limit_kph` is what makes it one-shot.
     if self._cruise_button_event(CS):
+      self._heartbeat("driver_busy", v_cruise_kph, limit_kph)
+      return v_cruise_kph
+
+    delta = limit_kph - v_cruise_kph
+    band = AUTO_ADOPT_BAND_UP_KPH if delta > 0 else AUTO_ADOPT_BAND_DOWN_KPH
+
+    # Raising the set speed on a merely PREDICTED way is acting on a guess in the accelerating
+    # direction — see GOOD_WAY_SELECTION_UP. A DEFERRAL, like the button-busy case: this returns
+    # before `_acted_limit_kph` is set, so the same limit is reconsidered once mapd settles on
+    # `current`.
+    if delta > 0 and self._way not in GOOD_WAY_SELECTION_UP:
+      self._heartbeat("defer_up_on_predicted", v_cruise_kph, limit_kph)
       return v_cruise_kph
 
     self._acted_limit_kph = limit_kph
-    delta = limit_kph - v_cruise_kph
-    band = AUTO_ADOPT_BAND_UP_KPH if delta > 0 else AUTO_ADOPT_BAND_DOWN_KPH
 
     if abs(delta) <= band:
       adopted = self._clamped(limit_kph)
@@ -226,6 +273,28 @@ class SetSpeedLimitTracker:
 
   # ---------------------------------------------------------------------------------------
 
+  def _heartbeat(self, reason: str, v_cruise_kph: float, limit_kph=None) -> None:
+    """Periodic 'why nothing happened' line. Throttled to HEARTBEAT_S; this is a 100 Hz loop.
+
+    Only runs when the feature is enabled AND openpilot is engaged (the caller returns before
+    this otherwise), so it cannot fill the disk while parked.
+    """
+    if _DEBUG_LOG is None or self.frame - self._hb_frame < int(HEARTBEAT_S / DT_CTRL):
+      return
+    self._hb_frame = self.frame
+    self._write({
+      "t": time.monotonic(),
+      "action": "idle",
+      "reason": reason,
+      "v_cruise_kph": v_cruise_kph,
+      "limit_kph": limit_kph,
+      "raw_limit_ms": round(self._raw_limit, 3),
+      "way": self._way,
+      "cand_kph": self._cand_limit_kph,
+      "cand_frames": self._cand_frames,
+      "acted_kph": self._acted_limit_kph,
+    })
+
   def _log(self, action: str, limit_kph, v_cruise_kph: float, adopted) -> None:
     """One line per DECISION, not per frame — this loop is 100 Hz.
 
@@ -234,17 +303,23 @@ class SetSpeedLimitTracker:
     IS in rlog: carState.vCruise / vCruiseCluster.
     """
     self.last_action = action
-    if _DEBUG_LOG is None:
-      return
-    line = json.dumps({
+    self._hb_frame = self.frame          # a decision counts as a heartbeat
+    self._write({
       "t": time.monotonic(),
       "action": action,
       "limit_kph": limit_kph,
       "v_cruise_kph": v_cruise_kph,
       "adopted_kph": adopted,
+      "raw_limit_ms": round(self._raw_limit, 3),
+      "way": self._way,
     })
+
+  @staticmethod
+  def _write(record: dict) -> None:
+    if _DEBUG_LOG is None:
+      return
     try:
       with open(_DEBUG_LOG, "a") as f:
-        f.write(line + "\n")
+        f.write(json.dumps(record) + "\n")
     except OSError:
       pass

@@ -12,3 +12,7 @@
 // above and DEFAULT OFF: it is the most aggressive part of the feature and is meant to be
 // enabled only after the speed-ceiling behaviour has been driven and validated.
 {"SmartCruiseControlMapHazardAccel", {PERSISTENT, BOOL, "0"}},
+// Set speed follows the posted limit (grt/set_speed.py, hook 3 in card.py). DEFAULT OFF and
+// deliberately separate from SmartCruiseControlMap: this is the only fork feature that can
+// RAISE the set speed, i.e. accelerate the car on OSM data.
+{"SmartCruiseControlSetSpeed", {PERSISTENT, BOOL, "0"}},

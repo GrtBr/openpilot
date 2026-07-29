@@ -694,7 +694,18 @@ BEHAVIOUR (what actually ships):
 - Gates: feature flag on, openpilot engaged, set speed initialised, `mapdOut` alive+valid,
   `tileLoaded`, `waySelectionType` ∈ {current, predicted, extended} (parked reports `fail`),
   limit stable for 1.0 s, limit within [20, 145] km/h, and no cruise-button activity that frame.
+- **Raising** the set speed additionally requires `waySelectionType` ∈ {current, extended}.
+  `predicted` is mapd guessing which way we will take at a junction; acting on a guess to slow
+  down is conservative, acting on it to speed up is not. Slowing down still honours `predicted`.
 - Result clamped to upstream's `[V_CRUISE_MIN, V_CRUISE_MAX]`.
+
+Both "not now" gates (driver on the buttons, upward-on-`predicted`) are DEFERRALS: they return
+before `_acted_limit_kph` is set, so the limit is reconsidered on the next clear frame. The
+stability counter is compared with `>=`, not `==`. This was a real bug in the first cut — with
+an exact `==`, a button press landing on the single frame the gate fired dropped that limit
+**permanently and silently**, because the counter kept incrementing and `==` was never true
+again. The original test asserted the no-change and blessed it. Caught in review; the test now
+asserts adoption on the following clear frame.
 
 Two design points worth keeping:
 - The [20, 145] km/h band REJECTS rather than clamps. Clamping would launder a garbage value
@@ -710,9 +721,25 @@ Enable on device (no rebuild): `echo 1 > /data/media/0/grt/SmartCruiseControlSet
 Default OFF, and separate from `SmartCruiseControlMap` because this is the first fork feature
 that can ACCELERATE the car on OSM data.
 
-Instrumentation: `/data/media/0/grt/set_speed.log`, one line per DECISION (this is a 100 Hz
-loop — per-frame logging is not an option). Unlike the mapd controller, the OUTCOME here is
-retrospectively analysable: `carState.vCruise` / `vCruiseCluster` are in rlog.
+Instrumentation: `/data/media/0/grt/set_speed.log` — one line per DECISION **plus a 2 s
+heartbeat naming the gate that rejected** (`mapd_not_alive`, `no_tiles`, `way_fail`,
+`no_limit_posted`, `implausible_limit`, `settling`, `already_handled`, `driver_busy`,
+`defer_up_on_predicted`), with the raw m/s limit, `waySelectionType` and the candidate counter.
+Decision-only logging was not enough: if the feature never fires on the road the log would be
+empty and the five possible causes indistinguishable — and `mapdOut` is still not in rlog on a
+prebuilt branch, so there is no retrospective path. One failure mode to look for specifically:
+`_read_limit` returning None resets the stability counter, so a `waySelectionType` flickering
+between `current` and `fail` faster than 1 s means a limit never clears the gate at all.
+Unlike the mapd controller, the OUTCOME here is retrospectively analysable: `carState.vCruise`
+/ `vCruiseCluster` are in rlog.
+
+Also registered `SmartCruiseControlSetSpeed` in `grt_params_keys.inc` for consistency with the
+other two fork keys. It has no effect on this prebuilt branch (never compiled in) — the file
+fallback is what actually works — but the pattern stays uniform.
+
+AFTER DEPLOY, one free check: card is the 100 Hz realtime CAN loop and now carries an extra
+subscriber. `carState.cumLagMs` IS in rlog — compare a post-change segment against a pre-change
+one. plannerd's precedent does not cover this risk.
 
 WHAT IS DELIBERATELY NOT SHIPPED — part (b), the pending/confirm alert. The state machine and
 its tests exist and pass, but `PENDING_ENABLED = False`. A pending limit the driver cannot
@@ -748,7 +775,7 @@ subscribe to `mapdOut` and must not (it gates engagement — worse blast radius 
   3. a file in `/data/media/0/grt` written only on state edges — crude but zero schema risk.
 Pick one deliberately; do not let it default.
 
-Tests: 27/27 set_speed, 18/18 scc_map, 17/17 hooks, 20/20 schema conformance (now covering
+Tests: 33/33 set_speed, 18/18 scc_map, 17/17 hooks, 20/20 schema conformance (now covering
 `mapdOut.speedLimit`/`tileLoaded`/`waySelectionType` and `carState.buttonEvents`/`vCruise`/
 `vCruiseCluster`). `cruise.py` untouched, so `test_cruise_speed.py` is unaffected; it needs the
 full openpilot venv and was not run on the Pi5.

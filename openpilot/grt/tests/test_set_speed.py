@@ -275,15 +275,21 @@ def test_stability_gate_timing():
   check("acts once the limit has held for LIMIT_STABLE_S", out == 60.0, f"got {out}")
 
 
-def test_button_frame_is_skipped():
+def test_button_frame_is_deferred_not_dropped():
+  """Regression: with an exact `_cand_frames == STABLE` gate, a button press landing on that one
+  frame dropped the limit PERMANENTLY and silently — the counter kept incrementing and `==` was
+  never true again. It must defer to the next clear frame instead."""
   t = make_tracker()
   sm = FakeSM(kph_to_ms(60))
   out = 80.0
   for i in range(STABLE + 3):
-    # driver is on the buttons exactly when the gate would fire
-    cs = fake_cs([button(ButtonType.decelCruise, False)]) if i >= STABLE else fake_cs()
+    # driver is on the buttons exactly when the gate would fire, and for 3 frames after
+    cs = fake_cs([button(ButtonType.decelCruise, False)]) if i >= STABLE - 1 else fake_cs()
     out = t.update(sm, cs, out, True)
-  check("stays out of the way on a frame with cruise-button activity", out == 80.0, f"got {out}")
+  check("stays out of the way while the driver is on the buttons", out == 80.0, f"got {out}")
+  out = run(t, sm, out, 2)                   # buttons released
+  check("adopts on the first clear frame afterwards (deferral, not a silent drop)",
+        out == 60.0, f"got {out}")
 
 
 def test_clamped_to_upstream_limits():
@@ -332,6 +338,44 @@ def test_pending_flow_when_enabled():
           f"out {out2} action {t2.last_action}")
   finally:
     ss.PENDING_ENABLED = False
+
+
+def test_up_on_predicted_way_is_deferred():
+  t = make_tracker()
+  sm = FakeSM(kph_to_ms(100), way="predicted")
+  out = run(t, sm, 90.0, STABLE + 5)
+  check("does NOT raise the set speed off a merely PREDICTED way", out == 90.0, f"got {out}")
+  sm.msg.waySelectionType = "current"        # mapd settles on the way we are actually on
+  out = run(t, sm, out, 3)
+  check("...and adopts it once the way selection becomes `current` (deferral, not consumed)",
+        out == 100.0, f"got {out}")
+
+
+def test_down_on_predicted_way_is_allowed():
+  t = make_tracker()
+  sm = FakeSM(kph_to_ms(60), way="predicted")
+  out = run(t, sm, 80.0, STABLE + 2)
+  check("slowing down IS allowed on a predicted way (conservative direction)",
+        out == 60.0, f"got {out}")
+
+
+def test_heartbeat_records_rejection_reason():
+  """A road test where nothing fires must still say WHY."""
+  written = []
+  real_write = ss.SetSpeedLimitTracker._write
+  ss.SetSpeedLimitTracker._write = staticmethod(written.append)
+  old = ss._DEBUG_LOG
+  ss._DEBUG_LOG = "/dev/null"                # enable the throttle path without touching disk
+  try:
+    t = make_tracker()
+    sm = FakeSM(kph_to_ms(60), way="fail")
+    run(t, sm, 80.0, int(ss.HEARTBEAT_S / 0.01) * 3)
+    reasons = {r.get("reason") for r in written}
+    check("heartbeat names the gate that rejected", "way_fail" in reasons, str(reasons))
+    check("heartbeat is throttled, not per-frame", len(written) <= 4, f"{len(written)} lines")
+  finally:
+    ss._DEBUG_LOG = old
+    ss.SetSpeedLimitTracker._write = staticmethod(real_write)
 
 
 def test_pending_disabled_in_production():

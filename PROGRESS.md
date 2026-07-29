@@ -16,16 +16,20 @@ Resume rules:
 
 ## STATE
 
-- **Status:** SET-SPEED TRACKING part (a) IMPLEMENTED, NOT YET DEPLOYED — `grt/set_speed.py` +
+- **Status:** SET-SPEED TRACKING part (a) IMPLEMENTED, NOT YET DEPLOYED — `grt/set_speed.py` (33 tests) +
   a card.py hook; auto-adopt within ±20 km/h, default OFF via
-  `/data/media/0/grt/SmartCruiseControlSetSpeed`. 27/27 tests. Part (b) (>20 km/h pending +
-  RES/+ confirm) is coded but `PENDING_ENABLED = False`, **blocked on one on-device question:
-  can a Python-published onroadEvent with a new EventName render + play a sound on this prebuilt
-  device?** Do not build the alert until that is answered. Prior: APPROACH PROFILE VALIDATED on drive 3 (median decel -0.51 vs -0.50 target; user: "felt perfect"). NEXT: set-speed-tracks-limit feature — DESIGNED and feasibility-verified, NOT implemented; see captains_log 2026-07-29. Prior status: FIRST TEST DRIVE FAILED (feature was a silent no-op) -> ROOT-CAUSED AND FIXED (radarState lead field is `present`, not `status`). Fix deployed; awaiting a SECOND test drive. Prior: ENABLED AND LIVE ON THE CAR (offroad-verified). Speed ceiling ON; hazard braking still OFF. Only the road test remains. Prior: ON-DEVICE IN PROGRESS. Offline block complete; deployed to comma4; Phase 0 gates 1&2 PASS. **Feature is currently INERT on device (params unknown until a C++ build) — this is the safe designed fallback.** Prior status: ✅ **OFFLINE BLOCK COMPLETE.** Phases 1a, 2, 3, 4, 5, 6, 7 all done and committed; Verification 2 done; Verification 1 reassigned to the device (impossible on Pi5). Auto-resume cron cancelled. **Next work requires the car.**
-- **Last action:** Set-speed tracking part (a): `grt/set_speed.py`, hook 3 in card.py, 27 new tests. Committed, not deployed.
+  `/data/media/0/grt/SmartCruiseControlSetSpeed`. Part (b) (>20 km/h pending +
+  RES/+ confirm) is coded but `PENDING_ENABLED = False`. **It is NOT blocked on the alert —
+  `selfdriveState.alertText1` is free-form Text and `alertSound` reuses the existing
+  `AudibleAlert` enum, so no schema addition is needed to render. It is blocked on a DESIGN
+  DECISION: the card→selfdrived channel for the pending state (fork message on a free
+  CustomReserved slot / move the state machine / edge-written file). See captains_log.** Prior: APPROACH PROFILE VALIDATED on drive 3 (median decel -0.51 vs -0.50 target; user: "felt perfect"). NEXT: set-speed-tracks-limit feature — DESIGNED and feasibility-verified, NOT implemented; see captains_log 2026-07-29. Prior status: FIRST TEST DRIVE FAILED (feature was a silent no-op) -> ROOT-CAUSED AND FIXED (radarState lead field is `present`, not `status`). Fix deployed; awaiting a SECOND test drive. Prior: ENABLED AND LIVE ON THE CAR (offroad-verified). Speed ceiling ON; hazard braking still OFF. Only the road test remains. Prior: ON-DEVICE IN PROGRESS. Offline block complete; deployed to comma4; Phase 0 gates 1&2 PASS. **Feature is currently INERT on device (params unknown until a C++ build) — this is the safe designed fallback.** Prior status: ✅ **OFFLINE BLOCK COMPLETE.** Phases 1a, 2, 3, 4, 5, 6, 7 all done and committed; Verification 2 done; Verification 1 reassigned to the device (impossible on Pi5). Auto-resume cron cancelled. **Next work requires the car.**
+- **Last action:** Set-speed tracking part (a): `grt/set_speed.py`, hook 3 in card.py, 33 tests. Committed, not deployed.
 - **Next step:** Deploy set-speed tracking to comma4 via git bundle, enable
   `/data/media/0/grt/SmartCruiseControlSetSpeed`, and road-test that the comma UI MAX and the
-  Staria cluster follow posted limits. While on device, answer the part-(b) alert question above.
+  Staria cluster follow posted limits. Instrument: `/data/media/0/grt/set_speed.log` (decisions
+  + a 2 s heartbeat naming the rejecting gate). Also compare `carState.cumLagMs` against a
+  pre-change segment — card is the 100 Hz CAN loop and now carries an extra subscriber.
 - **Prior next step:** ON-DEVICE BLOCK — requires the Staria powered and SSH-reachable, with the user supervising. Start at Phase -1 (`prebuilt` marker), then deploy, then the Phase 0 gate. **Do NOT auto-run any of it.** Enable `SmartCruiseControlMap` only after Phase 0 passes; leave `SmartCruiseControlMapHazardAccel` OFF until the speed-ceiling behaviour has been driven.
 - **Blockers / gotchas:**
   - **mapdOut is NEVER logged to rlog on this device.** loggerd is C++ and uses the compiled services.h (Jul 23), which has no mapdOut; `should_log=True` only affects python. Drives CANNOT be retrospectively analysed for mapd behaviour — `/data/media/0/mapd_debug.log` is the only instrument.
