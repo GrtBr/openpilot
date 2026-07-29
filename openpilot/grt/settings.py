@@ -42,6 +42,12 @@ DEFAULT_MAPD_SETTINGS: dict = {
   "speed_limit_use_enable_speed": False,
   "speed_limit_change_requires_accept": False,
   "hold_last_seen_speed_limit": False,
+  # OFF on purpose: mapd's own next-limit lookahead steps speedLimitSuggestedSpeed straight
+  # down to the upcoming limit while the sign is still far away, which made the planner brake
+  # ~10x harder than necessary and reach the limit hundreds of metres early. scc_map shapes the
+  # approach itself instead (see APPROACH_DECEL), using nextSpeedLimit/nextSpeedLimitDistance.
+  "slow_down_for_next_speed_limit": False,
+  "speed_up_for_next_speed_limit": False,
   # NOTE: 0.0 means openpilot holds EXACTLY the posted limit, which many drivers find slower
   # than expected. Sanity-check this on a real drive before trusting it; a small positive
   # offset is a legitimate tune.

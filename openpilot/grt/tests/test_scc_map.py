@@ -61,10 +61,19 @@ check("speedLimitSuggestedSpeed wins when lower than curve", abs(c.v_target-13.9
 # 3 hazard engages at close range with no lead, and yields firm decel
 c=scc_map.SmartCruiseControlMap()
 for _ in range(5): c.update(SM(hz="stop",hzd=30.0),True,False,15.0,0.0,25.0)
-check("hazard 'stop' engages -> v_target 5.55, hazard_active", abs(c.v_target-5.55)<1e-6 and c.hazard_active)
+# v_target is now the APPROACH PROFILE, not the raw target: at 30 m from a 5.55 m/s hazard
+# it should be sqrt(5.55^2 + 2*0.5*30) ~ 7.80 m/s, i.e. ABOVE the final target.
+_expect = scc_map.approach_speed(5.55, 30.0)
+check("hazard engages -> v_target is the approach profile (not a step to target)",
+      c.hazard_active and abs(c.v_target-_expect)<1e-6 and c.v_target > 5.55)
 check("hazard yields output_hazard_accel (adaptive, in [-1.5,-0.3])",
       c.output_hazard_accel is not None and -1.5<=c.output_hazard_accel<=-0.3)
-check("MIN_V floor applied to ceiling (20km/h)", abs(c.output_v_target-scc_map.MIN_V)<1e-6)
+# At the hazard itself (distance ~0) the profile collapses to the raw target, and the MIN_V
+# floor then applies.
+c2=scc_map.SmartCruiseControlMap()
+for _ in range(5): c2.update(SM(hz="stop",hzd=0.4),True,False,15.0,0.0,25.0)
+check("at the hazard, profile -> target and MIN_V floor applies",
+      abs(c2.output_v_target-scc_map.MIN_V)<1e-6)
 
 # 4 lead blocks the RISING EDGE only
 c=scc_map.SmartCruiseControlMap()
@@ -103,6 +112,19 @@ check("long_override -> overriding, not active", c.state==scc_map.MapState.overr
 c=scc_map.SmartCruiseControlMap()
 for _ in range(3): c.update(SM(),True,False,25.0,0.0,30.0)
 check("clear road -> UNSET (no-op ceiling)", c.output_v_target==UNSET)
+
+# --- approach profile maths (the fix for "too aggressive / reaches target too early") ---
+ap=scc_map.approach_speed
+check("profile at distance 0 == target exactly", abs(ap(5.55,0.0)-5.55)<1e-9)
+check("profile is monotonically increasing with distance", ap(5.55,10)<ap(5.55,50)<ap(5.55,200))
+# decelerating at APPROACH_DECEL from the profile speed must land ON target at the hazard
+import math as _m
+for d in (30.0,120.0,400.0):
+    v=ap(5.55,d)
+    landed=_m.sqrt(max(0.0,v*v-2*scc_map.APPROACH_DECEL*d))
+    check(f"profile from {d:.0f}m lands on target at the hazard", abs(landed-5.55)<1e-6)
+check("implied decel equals APPROACH_DECEL (gentle, ~3x softer than the first drive)",
+      abs(((ap(5.55,200)**2-5.55**2)/(2*200))-scc_map.APPROACH_DECEL)<1e-9)
 
 print(f"\n{sum(1 for _,c_ in res if c_)}/{len(res)} passed")
 sys.exit(0 if all(c_ for _,c_ in res) else 1)

@@ -601,3 +601,42 @@ Parked it reports waySelectionType=fail with an empty roadName because vEgo=0 an
 
 Ready for a second test drive. mapd_debug.log is the instrument: check map_curve_speed_kmh,
 speed_limit_suggested_kmh, v_target_kmh, state and is_active while moving.
+
+## 2026-07-29 — SECOND DRIVE WORKED; slow-downs far too aggressive -> approach profile
+
+Second drive: the feature engaged (869 active frames; stop, T-Junction, mini_roundabout,
+turning_circle all detected; speed limits and curve speeds all present). User reported the
+slow-downs were much too aggressive and reached target speed well before the hazard.
+
+MEASURED from /data/media/0/mapd_debug.log (2.5 MB, 4,067 frames):
+  turning_circle 69->20 km/h over 586 m: needed -0.28, USED -1.64 m/s^2 (5.8x), target 47 m early
+  stop           63->20 km/h over 830 m: needed -0.17, USED -1.69 m/s^2 (10x),  target 365 m EARLY
+  decel while active: mean -0.48, p10 -1.28, hardest -1.69 m/s^2
+
+ROOT CAUSE: v_target stepped straight to the FINAL target the moment a hazard/limit came into
+range. The planner's P-controller, a_cruise = clip(v_cruise - v_ego, A_CRUISE_MIN=-1.2, ...),
+then saturates at maximum braking to close a huge speed error immediately - so it brakes hard,
+arrives at target far too early, and coasts the rest of the way.
+
+FIX - distance-based approach profile. Command the speed the car should be at RIGHT NOW to
+arrive at the target exactly AT the hazard:
+    v_now = sqrt(v_target^2 + 2 * APPROACH_DECEL * distance)
+APPROACH_DECEL = 0.5 m/s^2 (~3.3x gentler than the -1.64 measured). At distance 0 it equals the
+target exactly; far away it is high and has no effect; if a hazard appears late the formula
+self-escalates (small d -> low command -> harder braking), so safety is preserved.
+Applied to hazards AND to upcoming lower speed limits (nextSpeedLimit/nextSpeedLimitDistance).
+The hazard engagement distance now also uses APPROACH_DECEL so the latch fires at the right point.
+
+Also set "slow_down_for_next_speed_limit": false in MapdSettings. mapd's own lookahead
+(speed_limit.go:111) was stepping speedLimitSuggestedSpeed down to the upcoming limit while the
+sign was still far away - the same harsh step, from the mapd side. Current-limit ceiling still
+comes from speedLimitSuggestedSpeed; the APPROACH is now ours to shape. This deliberately
+reverses the earlier Phase 6 "let mapd do the lookahead" decision, on drive evidence.
+
+Validated against the real drive episodes: at 0.5 m/s^2 braking would start ~336 m out
+(turning_circle) and ~275 m (stop), landing exactly on 20 km/h AT the hazard.
+
+Tests 18/18 incl. profile maths: lands on target at 30/120/400 m, monotonic in distance,
+implied decel == APPROACH_DECEL, and MIN_V floor still applies at the hazard.
+
+TUNING KNOB: APPROACH_DECEL in openpilot/grt/scc_map.py. LOWER = gentler and starts earlier.
