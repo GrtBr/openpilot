@@ -36,6 +36,45 @@ Resume rules:
      heartbeat naming the rejecting gate). Also compare `carState.cumLagMs` against a
      pre-change segment — card is the 100 Hz CAN loop and now carries a subscriber AND a
      publisher.
+### DEPLOY RUNBOOK — set-speed tracking (staged 2026-07-29, NOT yet run: device offline)
+
+Attempted 2026-07-29 ~16:05; comma4 had gone offline ("No route to host", 100% packet loss)
+about 25 min after being reachable — car powered down while parked. Nothing was transferred.
+
+Rebuild the bundle (it is in a session scratchpad and may be gone):
+
+```
+git bundle create /tmp/setspeed.bundle dcb3550cac..nightly-dev   # ~5.8 MB, 22 commits
+git bundle verify /tmp/setspeed.bundle
+scp /tmp/setspeed.bundle comma4:/data/
+```
+
+On device — **car OFFROAD and supervised**:
+
+```
+ssh comma4
+cd /data/openpilot && git status --porcelain      # must be clean; if not, STOP
+pkill -x manager.py                               # NOT pkill -f: it matches the ssh command line
+git fetch /data/setspeed.bundle nightly-dev
+git merge --ff-only FETCH_HEAD                    # fast-forward only; no reset --hard needed
+sudo reboot
+```
+
+**NEVER** run scons (prebuilt branch), and **NEVER** scp `cereal/*.capnp` or `services.py`
+directly — the bundle is the whole point (see repo CLAUDE.md).
+
+Verification order after reboot, all OFFROAD first:
+1. **The car still ENGAGES.** selfdrived's `ignore` list is the only thing here that could
+   block it; if engagement fails, that is the first suspect. Check `selfdriveState` and that
+   no `commIssue` event is raised.
+2. manager + card/plannerd/controlsd/selfdrived/modeld/mapd all up, nothing crash-looping.
+3. `grtSetSpeedState` is being published (msgq socket present, python can sub and decode).
+4. Enable: `echo 1 > /data/media/0/grt/SmartCruiseControlSetSpeed`, then confirm the set speed
+   at engage is the posted limit (or 60), NOT 105.
+5. Force a prompt and confirm the alert TEXT AND CHIME actually reach the driver.
+6. Only then road-test. Instrument `/data/media/0/grt/set_speed.log`; compare
+   `carState.cumLagMs` with a pre-change segment (card now has a subscriber AND a publisher).
+
 - **Prior next step:** ON-DEVICE BLOCK — requires the Staria powered and SSH-reachable, with the user supervising. Start at Phase -1 (`prebuilt` marker), then deploy, then the Phase 0 gate. **Do NOT auto-run any of it.** Enable `SmartCruiseControlMap` only after Phase 0 passes; leave `SmartCruiseControlMapHazardAccel` OFF until the speed-ceiling behaviour has been driven.
 - **Blockers / gotchas:**
   - **mapdOut is NEVER logged to rlog on this device.** loggerd is C++ and uses the compiled services.h (Jul 23), which has no mapdOut; `should_log=True` only affects python. Drives CANNOT be retrospectively analysed for mapd behaviour — `/data/media/0/mapd_debug.log` is the only instrument.
