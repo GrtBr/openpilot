@@ -660,6 +660,53 @@ right at the sign. APPROACH_DECEL stays at 0.5; do not touch it without new evid
 (My episode detector found 0 episodes this drive because it keyed off a large speed error at the
 FIRST frame, which the profile no longer produces. The binding-frames metric replaces it.)
 
+## 2026-07-29 — set-speed test drive: GOOD PRELIMINARY RESULTS; plan doc consolidated
+
+Operator reports **good preliminary results** from the first drive with set-speed tracking live.
+Not yet a validation — see the open item below.
+
+**STILL UNVERIFIED, and it is the one thing that decides whether half the feature works:**
+whether the confirmation prompt actually RENDERS. It only fires while engaged, so it could not
+be checked during deployment. If it never appears, the failure is benign but total — no prompt
+means no confirmation means the set speed simply never moves for any out-of-band limit change,
+which is the same silhouette as the 38,300-exception drive: fine from the driver's seat, doing
+nothing. `/data/media/0/grt/set_speed.log` settles it: `pending` lines prove the tracker offered;
+a `confirm` following one proves the driver could see and answer it. **Offered to pull and
+analyse that log — not yet done.**
+
+### `PORT_MAPD_FROM_SUNNYPILOT.md` rewritten as a two-feature record + reusable recipe
+
+Merged everything learned from the set-speed work into the main plan rather than starting a
+second document, at the operator's request. The doc now covers feature A (mapd control) and
+feature B (set-speed tracking) and shares every constraint between them.
+
+What is new in it:
+- **§0.3** — the session's most important lesson: *a passing suite is evidence your tests agree
+  with your model, not that your model is right.* 104 tests passed over two real defects, and
+  one test actively asserted a bug was correct. Every set-speed defect was caught by review.
+- **§0.4** — settle design questions with device data before choosing thresholds, with the two
+  one-line queries that did so here (set speed sits at 105; limits are only ever multiples of 10).
+- **§0.5** — restate an operator's prose spec as testable predicates and put genuine ambiguity
+  back as a choice. Two of three answers changed the design.
+- **§2 is now SIX bugs, not three** — added §2.4 (the SubMaster mistake in a process where it
+  blocks ENGAGEMENT, with the per-process blast-radius table and the grep that finds it),
+  §2.5 (an exact-frame `==` gate drops the event permanently; deferral vs decision), §2.6 (a
+  terminal "handled" state killed the feature for a drive; single-writer-per-fact). Log flooding
+  folded into §2.1 as the second half of the same rule rather than a seventh entry.
+- **§3.2** — the two speed variables, the full chain from `v_cruise_kph` to the Staria cluster,
+  and why `DT_CTRL` vs `DT_MDL` silently changes every timeout by 5×.
+- **§4.3/§4.4** — the reusable patterns: a fork-owned message on a renamed `CustomReserved` slot,
+  and the finding that a driver-facing alert needs **no schema change at all**.
+- **§5** corrected on two counts I had recorded wrongly: `pkill -f "[m]anager\.py"` (bracket
+  form) DOES work over ssh — only the bare form self-matches — and the flag needs no second
+  reboot, since `update_params()` re-reads every 3 s.
+- **§6** — added the real-import gate (2b) and the engagement gate (6b), and the instruction to
+  run the cheap gates BEFORE the reboot.
+- **§7.1** — instrument the negative case; a benign-sounding heartbeat reason can hide a dead
+  feature.
+- **§9** — an ordered recipe for the next fork feature, plus five rules worth memorising.
+- **§11** — the full feature-B record, including why the first ±20-only design was nearly inert.
+
 ## 2026-07-29 — set-speed tracking DEPLOYED to comma4 and ENABLED
 
 Device is on `dc6e2b5`, AGNOS 18.7, clean tree, feature ON. No reboot loop, no errors.
