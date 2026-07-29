@@ -640,3 +640,53 @@ Tests 18/18 incl. profile maths: lands on target at 30/120/400 m, monotonic in d
 implied decel == APPROACH_DECEL, and MIN_V floor still applies at the hazard.
 
 TUNING KNOB: APPROACH_DECEL in openpilot/grt/scc_map.py. LOWER = gentler and starts earlier.
+
+## 2026-07-29 — THIRD DRIVE: approach profile VALIDATED ("felt perfect")
+
+Measured on the frames where OUR target was actually binding (157 frames), which is the honest
+metric - raw a_ego includes lead-car and driver braking:
+
+               drive 2 (step)      drive 3 (profile)     design target
+  median          -0.23 (spikes to -1.69)   -0.51            -0.50
+  mean            -0.48                      -0.53           -0.50
+  p10             -1.28                      -0.77             -
+  overshoot       5.8x - 10x                 ~1.0x            1.0x
+
+Median -0.51 against a 0.50 target: the profile does exactly what it was designed to do.
+Visible in the raw frames: v_target 45.6 km/h with the hazard still 130 m away (an intermediate
+speed, not a step to 20), and v_target 60.3 with the next limit 2 m ahead - landing on the limit
+right at the sign. APPROACH_DECEL stays at 0.5; do not touch it without new evidence.
+
+(My episode detector found 0 episodes this drive because it keyed off a large speed error at the
+FIRST frame, which the profile no longer produces. The binding-frames metric replaces it.)
+
+## NEXT FEATURE (designed, NOT implemented): set speed tracks the speed limit
+
+User asked for the comma 4 "MAX" and the Staria cluster to follow posted limits. Today we only
+lower v_cruise INSIDE longitudinal_planner - a local planning variable that never reaches
+carState.vCruise, so no display changes. Expected, not a bug.
+
+FEASIBILITY - both displays are achievable (verified on device):
+- CarParams.pcmCruise = False and openpilotLongitudinalControl = True on the Staria, so
+  openpilot owns the set speed via VCruiseHelper._update_v_cruise_non_pcm (cruise.py).
+- VCruiseHelper.v_cruise_kph / v_cruise_cluster_kph -> carState.vCruise / vCruiseCluster
+  -> comma UI hud_renderer AND controlsd.py:166 hudControl.setSpeed
+  -> hyundai/carcontroller.py:86 set_speed_in_units -> the CLUSTER. So the car's dash follows.
+
+AGREED BEHAVIOUR:
+- |new limit - current set speed| <= 20 km/h : adopt automatically, both up AND down.
+- |difference| > 20 km/h : do NOT adopt. Show the new limit as PENDING for 10 s with an alert
+  sound; adopt only if the driver taps RES/+ (ButtonType.accelCruise) within that window.
+
+IMPLEMENTATION NOTES for whoever builds it:
+- New fork module (e.g. openpilot/grt/set_speed.py) owning the pending state machine and the
+  10 s timer. Upstream touch must stay ONE sentinel-wrapped line in cruise.py's non-pcm path.
+- Button press: cruise.py already parses CS.buttonEvents for accelCruise/decelCruise - reuse
+  that, do not add a second parser.
+- Alert/sound: needs an event; check what is available without adding to the compiled alert
+  tables (this is a PREBUILT branch - see the constraints note).
+- SAFETY: this is the first change that lets the feature ACCELERATE the car on OSM data. It must
+  respect V_CRUISE_MIN/MAX clamping, must not fight the driver's own button presses, and must be
+  behind its own flag (/data/media/0/grt/SmartCruiseControlSetSpeed) default OFF.
+- The speed-limit VALUE should come from mapdOut (current limit), not from our v_target, which
+  is an approach profile and deliberately transient.
