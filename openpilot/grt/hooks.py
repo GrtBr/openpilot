@@ -164,6 +164,12 @@ def set_speed_state_msg(v_cruise_helper):
   Published from card because that is where the set speed and the pending state live; consumed
   by selfdrived because that is the only process that can raise a driver-facing alert.
   """
+  try:
+    if v_cruise_helper.CP.pcmCruise:   # symmetric with track_set_speed: nothing to report
+      return None
+  except Exception:
+    return None
+
   tracker = _set_speed_singleton()
   if tracker is None:
     return None

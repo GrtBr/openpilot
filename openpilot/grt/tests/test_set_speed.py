@@ -364,6 +364,71 @@ def test_pending_goes_stale_on_a_new_limit():
   check("...and the new limit is then decided on its own merits", out == 100.0, f"got {out}")
 
 
+def test_expired_prompt_is_reoffered():
+  """Regression: an ignored prompt used to mark the limit `already_handled` FOREVER — leaving
+  the set speed stranded (60 in a 100 zone) with the heartbeat looking benign."""
+  t = make_tracker()
+  sm = FakeSM(100, way="fail")
+  out = run(t, sm, 105.0, SEED_TIMEOUT + 5, engage=True)
+  assert out == 60.0, out
+  sm.msg.waySelectionType = "current"       # map arrives: 100 in a 60-seeded drive
+  out = run(t, sm, out, STABLE + 2)
+  check("first real limit after a no-map seed is offered, not silently taken",
+        out == 60.0 and t.pending_limit_kph == 100.0, f"out {out} pending {t.pending_limit_kph}")
+  out = run(t, sm, out, PENDING + 5)        # driver misses it
+  assert t.pending_limit_kph is None
+  out = run(t, sm, out, 500)
+  check("...not re-offered immediately (no nagging)", t.pending_limit_kph is None)
+  out = run(t, sm, out, int(ss.REOFFER_S / 0.01) + STABLE)
+  check("...but re-offered after the cooldown, so the feature is not dead for the drive",
+        t.pending_limit_kph == 100.0, str(t.pending_limit_kph))
+
+
+def test_declined_prompt_is_not_reoffered():
+  """A SET/- decline is an answer, not a missed prompt."""
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 120.0)
+  sm.set_limit(60.0)
+  out = run(t, sm, 120.0, STABLE + 2)
+  out = t.update(sm, fake_cs([button(ButtonType.decelCruise)]), out, True)
+  assert t.pending_limit_kph is None
+  out = run(t, sm, out, int(ss.REOFFER_S / 0.01) + STABLE + 10)
+  check("a declined limit is never re-offered", t.pending_limit_kph is None, t.last_action)
+
+
+def test_stale_pending_leaves_no_residue():
+  """Regression: a stale offer used to be marked 'acted', so returning to that limit later
+  skipped the decision entirely."""
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 120.0)
+  sm.set_limit(60.0)
+  out = run(t, sm, 120.0, STABLE + 2)
+  assert t.pending_limit_kph == 60.0
+  sm.set_limit(100.0)                       # road changes under the offer
+  out = run(t, sm, out, 2)
+  out = run(t, sm, out, STABLE + 2)
+  assert out == 100.0, out                  # 120 -> 100 is in band, auto-adopted
+  sm.set_limit(60.0)                        # back to the limit that went stale
+  out = run(t, sm, out, STABLE + 2)
+  check("a limit that went stale is still decided properly when it returns",
+        t.pending_limit_kph == 60.0 and out == 100.0,
+        f"out {out} pending {t.pending_limit_kph}")
+
+
+def test_reengage_with_stale_set_speed():
+  """On the car, upstream's initialize_v_cruise runs first and may restore the previous set
+  speed — the seed must override whatever it left behind."""
+  t = make_tracker()
+  sm = FakeSM()
+  out = engaged_at(t, sm, 100.0)
+  run(t, sm, out, 5, enabled=False)
+  sm.set_limit(60.0)
+  out = run(t, sm, 100.0, STABLE + 5, engage=True)   # stale 100 still in v_cruise_kph
+  check("re-engage seeds from the map over a stale restored set speed", out == 60.0, f"got {out}")
+
+
 def test_pending_seconds_left():
   t = make_tracker()
   sm = FakeSM()

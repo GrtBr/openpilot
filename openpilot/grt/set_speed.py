@@ -68,6 +68,13 @@ SEED_TIMEOUT_S = 10.0
 
 PENDING_TIMEOUT_S = 10.0
 
+# How long before a prompt the driver never answered is offered again, while the mismatch
+# persists. Without this, one ignored prompt kills the feature for the whole drive: the limit
+# would stay `already_handled` forever and the set speed could sit far below the posted limit
+# with the driver believing the feature was managing it. A deliberate SET/- decline is NOT
+# re-offered — that was an answer, not a missed prompt.
+REOFFER_S = 60.0
+
 # Confirmation prompts are live: the alert reaches the driver via grtSetSpeedState ->
 # selfdrived -> AlertManager. Set False to fall back to ignoring out-of-band changes.
 PENDING_ENABLED = True
@@ -117,15 +124,24 @@ class SetSpeedLimitTracker:
     self.frame = -1
 
     # --- ownership -------------------------------------------------------------------------
-    self._owned_kph: float | None = None      # the set speed WE last established
-    self._prev_limit_kph: float | None = None  # the posted limit currently in force
+    # Exactly two facts, each written in exactly one place:
+    #   _owned_kph    — the set speed WE last established (seed, adopt, or driver matching the
+    #                   limit by hand). Written only by _take_ownership().
+    #   _in_force_kph — the posted limit currently in force. Written only where the stability
+    #                   gate passes, as a fact about the road, independent of what we decide.
+    # Keeping them separate and single-writer is deliberate: the first version maintained them
+    # on some code paths and not others, and both bugs found in review lived in those seams.
+    self._owned_kph: float | None = None
+    self._in_force_kph: float | None = None
 
     # --- engage seeding --------------------------------------------------------------------
     self._seed_pending = False
     self._seed_frames = 0
 
     # --- stability gate --------------------------------------------------------------------
-    self._acted_limit_kph: float | None = None
+    self._acted_limit_kph: float | None = None   # limit value already decided on
+    self._acted_frame = 0
+    self._acted_declined = False                 # decided by the DRIVER, never re-offer
     self._cand_limit_kph: float | None = None
     self._cand_frames = 0
 
@@ -153,15 +169,27 @@ class SetSpeedLimitTracker:
 
   def _reset(self) -> None:
     self._owned_kph = None
-    self._prev_limit_kph = None
+    self._in_force_kph = None
     self._seed_pending = False
     self._seed_frames = 0
     self._acted_limit_kph = None
+    self._acted_frame = 0
+    self._acted_declined = False
     self._cand_limit_kph = None
     self._cand_frames = 0
     self.pending_limit_kph = None
     self._pending_frames = 0
     self.tracking = False
+
+  def _take_ownership(self, v_set: float) -> None:
+    """Record that this set speed is ours, not the driver's. The ONLY writer of _owned_kph."""
+    self._owned_kph = v_set
+
+  def _mark_acted(self, limit_kph: float, declined: bool = False) -> None:
+    """Record a decision about a limit VALUE so it is not re-decided every frame."""
+    self._acted_limit_kph = limit_kph
+    self._acted_frame = self.frame
+    self._acted_declined = declined
 
   @staticmethod
   def _clamped(limit_kph: float) -> float:
@@ -224,7 +252,7 @@ class SetSpeedLimitTracker:
     the value we ourselves last wrote (which covers the no-map 60 seed, and an adopted limit
     that has since been superseded).
     """
-    return _near(v_set, self._prev_limit_kph) or _near(v_set, self._owned_kph)
+    return _near(v_set, self._in_force_kph) or _near(v_set, self._owned_kph)
 
   # ---------------------------------------------------------------------------------------
 
@@ -267,24 +295,30 @@ class SetSpeedLimitTracker:
       self._pending_frames += 1
       if self._button(CS, "accelCruise"):
         adopted = self._clamped(self.pending_limit_kph)
-        self._owned_kph = adopted
-        self._prev_limit_kph = self.pending_limit_kph
+        self._take_ownership(adopted)
         self.pending_limit_kph = None
         self._log("confirm", limit_kph, v_cruise_kph, adopted)
         return adopted
       if self._button(CS, "decelCruise"):
-        # Driver asserting their own speed instead — take that as a decline.
+        # Driver asserting their own speed instead. That is an ANSWER, so it is never re-offered.
+        self._mark_acted(self.pending_limit_kph, declined=True)
         self._log("decline", limit_kph, v_cruise_kph, None)
-        self._retire_pending()
+        self.pending_limit_kph = None
+        self._pending_frames = 0
         return v_cruise_kph
       if limit_kph is not None and not _near(limit_kph, self.pending_limit_kph):
-        # The road changed under us; the offer is stale. Let the gate re-decide for the new one.
+        # The road changed under us; the offer is stale. It was never DECIDED, so it must not be
+        # marked acted — otherwise returning to that limit later would silently skip a decision.
         self._log("stale", limit_kph, v_cruise_kph, None)
-        self._retire_pending()
+        self.pending_limit_kph = None
+        self._pending_frames = 0
         return v_cruise_kph
       if self._pending_frames > int(PENDING_TIMEOUT_S / DT_CTRL):
+        # Unanswered, not declined: re-offered after REOFFER_S while the mismatch persists.
+        self._mark_acted(self.pending_limit_kph)
         self._log("expire", limit_kph, v_cruise_kph, None)
-        self._retire_pending()
+        self.pending_limit_kph = None
+        self._pending_frames = 0
       return v_cruise_kph
 
     # --- stability gate ---------------------------------------------------------------------
@@ -312,19 +346,30 @@ class SetSpeedLimitTracker:
       self._heartbeat("settling", v_cruise_kph, limit_kph)
       return v_cruise_kph
 
-    # The limit is stable. It is now the one in force, whatever we decide to do about it.
+    # The limit is stable, so it IS the one in force — a fact about the road, independent of
+    # what we go on to decide. This is the single place that fact is recorded; `tracking` above
+    # was computed against the PREVIOUS one, which is what the ownership test needs.
+    self._in_force_kph = limit_kph
+
     if _near(limit_kph, v_cruise_kph):
       # Already at the limit: nothing to change, and this re-establishes tracking for a driver
-      # who dialled the posted number in by hand.
-      self._prev_limit_kph = limit_kph
-      self._acted_limit_kph = limit_kph
+      # who dialled the posted number in by hand — so the NEXT change auto-adopts.
+      self._take_ownership(v_cruise_kph)
+      self._mark_acted(limit_kph)
       self.tracking = True
       self._heartbeat("at_limit", v_cruise_kph, limit_kph)
       return v_cruise_kph
 
     if limit_kph == self._acted_limit_kph:
-      self._heartbeat("already_handled", v_cruise_kph, limit_kph)
-      return v_cruise_kph
+      # Re-offer a prompt the driver never answered, once the cooldown has passed. Without this
+      # a single missed prompt would leave the set speed stranded — 60 in a 100 zone — with the
+      # heartbeat reporting a benign-looking `already_handled` for the rest of the drive.
+      stale_decision = (not self._acted_declined and
+                        self.frame - self._acted_frame >= int(REOFFER_S / DT_CTRL))
+      if not stale_decision:
+        self._heartbeat("already_handled", v_cruise_kph, limit_kph)
+        return v_cruise_kph
+      self._acted_limit_kph = None
 
     # --- one-shot decision for this limit value -----------------------------------------------
     # Never decide on a frame the driver is working the buttons: upstream is mid-adjustment and
@@ -344,26 +389,22 @@ class SetSpeedLimitTracker:
       self._heartbeat("defer_up_on_predicted", v_cruise_kph, limit_kph)
       return v_cruise_kph
 
-    self._acted_limit_kph = limit_kph
-    prev_limit = self._prev_limit_kph
-    self._prev_limit_kph = limit_kph
+    self._mark_acted(limit_kph)
 
     auto = self.tracking and _is_round(v_cruise_kph) and abs(delta) <= AUTO_ADOPT_BAND_KPH
     if auto:
       adopted = self._clamped(limit_kph)
-      self._owned_kph = adopted
+      self._take_ownership(adopted)
       self._log("adopt", limit_kph, v_cruise_kph, adopted)
       return adopted
 
+    why = self._why_not_auto(v_cruise_kph, delta)
     if PENDING_ENABLED:
       self.pending_limit_kph = limit_kph
-      self._prev_limit_kph = prev_limit   # not in force until the driver decides
       self._pending_frames = 0
-      self._log("pending", limit_kph, v_cruise_kph, None,
-                why=self._why_not_auto(v_cruise_kph, delta))
+      self._log("pending", limit_kph, v_cruise_kph, None, why=why)
     else:
-      self._log("ignore", limit_kph, v_cruise_kph, None,
-                why=self._why_not_auto(v_cruise_kph, delta))
+      self._log("ignore", limit_kph, v_cruise_kph, None, why=why)
     return v_cruise_kph
 
   def _why_not_auto(self, v_set: float, delta: float) -> str:
@@ -373,18 +414,23 @@ class SetSpeedLimitTracker:
       return "set_speed_not_multiple_of_10"
     return f"delta_{abs(delta):.0f}_over_{AUTO_ADOPT_BAND_KPH:.0f}"
 
-  def _retire_pending(self) -> None:
-    self._acted_limit_kph = self.pending_limit_kph
-    self.pending_limit_kph = None
-    self._pending_frames = 0
-
   def _seed(self, limit_kph: float, action: str, v_cruise_kph: float) -> float:
+    """Establish the set speed at engage. From the map, or the no-map default.
+
+    On the no-map path `_in_force_kph` and `_acted_limit_kph` stay None on purpose: 60 is our
+    placeholder, not a posted limit, so the first real limit that turns up must still be
+    decided on its merits.
+    """
     self._seed_pending = False
     self._seed_frames = 0
     seeded = self._clamped(limit_kph)
-    self._owned_kph = seeded
-    self._prev_limit_kph = limit_kph if action == "seed_from_map" else None
-    self._acted_limit_kph = limit_kph if action == "seed_from_map" else None
+    self._take_ownership(seeded)
+    from_map = action == "seed_from_map"
+    self._in_force_kph = limit_kph if from_map else None
+    if from_map:
+      self._mark_acted(limit_kph)
+    else:
+      self._acted_limit_kph = None
     self.tracking = True
     self._log(action, limit_kph, v_cruise_kph, seeded)
     return seeded
@@ -410,7 +456,8 @@ class SetSpeedLimitTracker:
       "way": self._way,
       "tracking": self.tracking,
       "owned_kph": self._owned_kph,
-      "prev_limit_kph": self._prev_limit_kph,
+      "in_force_kph": self._in_force_kph,
+      "acted_kph": self._acted_limit_kph,
       "cand_frames": self._cand_frames,
     })
 

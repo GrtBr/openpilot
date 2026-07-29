@@ -723,7 +723,26 @@ seed WAITS up to 10 s for a first fix before falling back to 60. Without the wai
 would start on 60 and immediately prompt to move to the real limit. Upstream's own value stands
 during the window.
 
-Tests: 45 set_speed (rewritten — the ±20-only assertions were wrong, not failing), 35 hooks
+**TWO BUGS IN THE OWNERSHIP LOGIC, both found in review, both in the seams between state
+variables that were maintained on some code paths and not others:**
+
+1. **An ignored prompt killed the feature for the rest of the drive.** Seeding 60 with no map,
+   then meeting a 100 zone, gives |Δ|=40 → prompt. If the driver missed it, the limit was
+   marked handled *permanently*: no further prompt, no adopt, set speed stranded at 60 in a
+   100 zone — with the heartbeat reporting a benign-looking `already_handled` forever. Fixed
+   with `REOFFER_S = 60 s`: an UNANSWERED prompt is offered again while the mismatch persists.
+   A deliberate SET/− decline is never re-offered, because that was an answer.
+2. **A stale prompt left residue.** When the road changed under an open prompt, the offer was
+   marked "acted", so returning to that limit later skipped the decision entirely. A stale
+   offer was never decided and is now not recorded as one.
+
+The fix was structural, not three patches: `_owned_kph` ("the set speed WE established") and
+`_in_force_kph` ("the posted limit in force") each now have exactly ONE writer, and the limit
+in force is recorded at a single point — right after the stability gate, as a fact about the
+road, independent of what we decide about it. The old `_prev_limit_kph` juggling, including a
+save/restore around prompt creation, is gone.
+
+Tests: 51 set_speed (rewritten — the ±20-only assertions were wrong, not failing), 35 hooks
 (hook 3 + the new hook 4 alert), 18 scc_map, 25/25 schema conformance including the four wire
 discriminants. NOT YET ON THE CAR.
 
