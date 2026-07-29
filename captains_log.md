@@ -567,3 +567,25 @@ reality, so 29/29 passed while the car raised on every frame. Two fixes:
      drift from the schema silently.
 
 Note dRel was fine - it does exist. Only `status` was wrong.
+
+## 2026-07-29 — test drive forensics + a second prebuilt-branch limitation
+
+Drive identified as route 00000034--aa6306c38e (28 segments): 167,025 carState frames, 58%
+moving, max 66 km/h, average 35 km/h while moving, and carControl.enabled for 60,543 frames -
+so openpilot WAS engaged and the drive was a valid test. Route 00000035--da076d2e95 is just
+post-drive idling (0 moving, 0 engaged). The feature failed purely because of the per-frame
+AttributeError, now fixed.
+
+SECOND PREBUILT LIMITATION FOUND: **mapdOut is never written to rlog on this device** - 0 frames
+across the whole drive, while carState had 2,738 per segment. Cause: loggerd is C++ and reads
+the COMPILED services.h, generated back on Jul 23, which has no mapdOut. `should_log=True` in
+services.py only affects the python view. So the earlier claim that "mapdOut is logged so drives
+can be replayed for tuning" is FALSE on a prebuilt branch, and drives cannot be retrospectively
+analysed for mapd behaviour.
+
+Consequence: `/data/media/0/mapd_debug.log` is now the ONLY instrument for tuning and
+diagnosis. It was absent after the failed drive because update_calculations() threw before
+_write_debug() could run; with the fix in, it will be written from the next drive onward.
+
+Still unknown and only answerable by driving: whether mapd's way selection succeeds in motion.
+Parked it reports waySelectionType=fail with an empty roadName because vEgo=0 and bearingDeg=0.
