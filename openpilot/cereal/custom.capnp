@@ -58,8 +58,20 @@ struct CustomReserved14 @0xb057204d7deadf3f {
 struct CustomReserved15 @0xbd443b539493bc68 {
 }
 
-struct CustomReserved16 @0xfc6241ed8877b611 {
+# GRT-MOD-START — set-speed tracking (openpilot/grt/set_speed.py).
+# Reserved slot 16 renamed IN PLACE. Struct ID UNCHANGED, and the log.capnp union member keeps
+# ordinal @142, so the wire discriminant does not move. Unlike the mapd structs below, nothing
+# outside this repo consumes it: it is a card -> selfdrived channel, both ends Python.
+# Speeds are km/h (not m/s) — this message is entirely about driver-facing set-speed values,
+# which are km/h everywhere in VCruiseHelper and on the cluster.
+struct GrtSetSpeedState @0xfc6241ed8877b611 {
+  pending @0 :Bool;             # a limit change is awaiting driver confirmation
+  pendingLimit @1 :Float32;     # the limit being offered, km/h
+  secondsLeft @2 :Float32;      # remaining confirmation window
+  setSpeed @3 :Float32;         # current set speed, km/h (0 when unset)
+  tracking @4 :Bool;            # set speed still matches the posted limit (feature in charge)
 }
+# GRT-MOD-END
 
 # GRT-MOD-START — mapd (OSM map-based speed control), see PORT_MAPD_FROM_SUNNYPILOT.md
 # Reserved slots 17/18/19 renamed IN PLACE for mapd. Struct IDs are UNCHANGED and must

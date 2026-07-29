@@ -46,7 +46,23 @@ REQUIRED = [
   ("carState", "buttonEvents"),
   ("carState", "vCruise"),
   ("carState", "vCruiseCluster"),
+  # grtSetSpeedState — the fork's own card -> selfdrived channel (hooks.set_speed_alerts)
+  ("grtSetSpeedState", "pending"),
+  ("grtSetSpeedState", "pendingLimit"),
+  ("grtSetSpeedState", "secondsLeft"),
+  ("grtSetSpeedState", "setSpeed"),
+  ("grtSetSpeedState", "tracking"),
 ]
+
+# Union discriminants are POSITIONAL, not the @N ordinal, and they are what actually goes on the
+# wire. The prebuilt Go mapd binary has these compiled in, so they must never move — renaming
+# customReserved16 in place for grtSetSpeedState must not disturb them.
+REQUIRED_DISCRIMINANTS = {
+  "mapdExtendedOut": 141,
+  "mapdIn": 142,
+  "mapdOut": 143,
+  "grtSetSpeedState": 140,
+}
 
 
 def resolve(schema, dotted: str):
@@ -90,6 +106,13 @@ def main() -> int:
     print(f"  {status:9s} {msg}.{path}")
     if not ok:
       failures.append((msg, path, detail))
+
+  for name, want in REQUIRED_DISCRIMINANTS.items():
+    got = event.fields[name].proto.discriminantValue if name in event.fields else None
+    ok = got == want
+    print(f"  {'PASS' if ok else '**FAIL**':9s} {name} wire discriminant == {want}")
+    if not ok:
+      failures.append((name, "discriminant", f"expected {want}, got {got}"))
 
   print()
   if failures:

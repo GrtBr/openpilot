@@ -46,6 +46,17 @@ GRT_SUB: list[str] = ["mapdOut"]
 # mapd only runs when OSM tiles exist, and a fork service must never fail a base-system check.
 GRT_SUB_CARD: list[str] = ["mapdOut"]
 
+# Fork services card PUBLISHES. Both ends are Python, so this needs no C++ build — the same
+# mechanism that already carries mapdIn from openpilot python to the Go mapd binary.
+GRT_PUB_CARD: list[str] = ["grtSetSpeedState"]
+
+# Fork services spliced into selfdrived's SubMaster, for the confirmation prompt.
+# THE IGNORE LISTS ARE NOT OPTIONAL HERE, and this is the worst of the three cases:
+# selfdrived calls `sm.all_checks()` UNSCOPED at selfdrived.py:381 (raises commIssue) and again
+# at :469, where it gates `self.initialized`. A fork service missing from the publisher would
+# therefore BLOCK ENGAGEMENT ENTIRELY, not merely mark one message invalid.
+GRT_SUB_SELFDRIVED: list[str] = ["grtSetSpeedState"]
+
 # Processes that should not raise the processNotRunning safety event when absent.
 # mapd is not a normal openpilot process: it is a standalone Go binary that only runs when
 # the tile directory exists.

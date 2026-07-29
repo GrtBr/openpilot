@@ -158,7 +158,72 @@ def _set_speed_singleton():
   return _set_speed
 
 
-def track_set_speed(sm, CS, v_cruise_helper, enabled: bool) -> None:
+def set_speed_state_msg(v_cruise_helper):
+  """Build the fork's card -> selfdrived status message, or None if there is nothing to say.
+
+  Published from card because that is where the set speed and the pending state live; consumed
+  by selfdrived because that is the only process that can raise a driver-facing alert.
+  """
+  tracker = _set_speed_singleton()
+  if tracker is None:
+    return None
+  try:
+    import openpilot.cereal.messaging as messaging
+    msg = messaging.new_message('grtSetSpeedState')
+    msg.valid = True
+    s = msg.grtSetSpeedState
+    s.pending = tracker.pending_limit_kph is not None
+    s.pendingLimit = float(tracker.pending_limit_kph or 0.0)
+    s.secondsLeft = float(tracker.pending_seconds_left)
+    s.setSpeed = float(v_cruise_helper.v_cruise_kph)
+    s.tracking = bool(tracker.tracking)
+    return msg
+  except Exception:
+    _log_exception("set_speed state publish")
+    return None
+
+
+def set_speed_alerts(sm, is_metric: bool) -> list:
+  """Hook 4. Alerts to fold into selfdrived's AlertManager. Returns [] unless a limit change is
+  awaiting confirmation.
+
+  Deliberately builds a plain `Alert` with a fork-owned `alert_type` string rather than adding
+  an `EventName` enumerant: `AlertManager.add_many` keys on `alert.alert_type`, and
+  `selfdriveState.alertText1` is free-form Text with `alertSound` reusing the existing
+  `AudibleAlert` enum. So the driver gets text and a chime with NO schema addition — which
+  matters on a prebuilt branch where nothing can be recompiled.
+
+  `ET.WARNING` is correct here: `update_alerts` only clears WARNING when the state machine is
+  not in a warning-capable state, i.e. when not engaged, and this feature only runs engaged.
+  """
+  try:
+    if not sm.alive.get('grtSetSpeedState', False):
+      return []
+    s = sm['grtSetSpeedState']
+    if not s.pending:
+      return []
+
+    from openpilot.selfdrive.selfdrived.events import Alert, AlertStatus, AlertSize, Priority
+    from openpilot.selfdrive.selfdrived.events import AudibleAlert, VisualAlert
+    from openpilot.common.constants import CV
+
+    limit = s.pendingLimit if is_metric else s.pendingLimit * CV.KPH_TO_MPH
+    unit = "km/h" if is_metric else "mph"
+    alert = Alert(
+      f"Speed limit {round(limit)} {unit}",
+      "Press RES/+ to accept",
+      AlertStatus.normal, AlertSize.mid, Priority.LOW,
+      VisualAlert.none, AudibleAlert.prompt, 1.0,
+    )
+    alert.alert_type = "grtSetSpeedPending"
+    alert.event_type = "warning"
+    return [alert]
+  except Exception:
+    _log_exception("set_speed alert")
+    return []
+
+
+def track_set_speed(sm, CS, v_cruise_helper, enabled: bool, engage_edge: bool = False) -> None:
   """Hook 3. Runs in `card`, after `update_v_cruise`/`initialize_v_cruise` and before the
   `CS.vCruise` assignment, so an adopted limit is what gets published for this frame.
 
@@ -183,7 +248,7 @@ def track_set_speed(sm, CS, v_cruise_helper, enabled: bool) -> None:
     return
   try:
     v_cruise = float(v_cruise_helper.v_cruise_kph)
-    new_v_cruise = tracker.update(sm, CS, v_cruise, enabled)
+    new_v_cruise = tracker.update(sm, CS, v_cruise, enabled, engage_edge)
     if new_v_cruise != v_cruise:
       v_cruise_helper.v_cruise_kph = new_v_cruise
       v_cruise_helper.v_cruise_cluster_kph = new_v_cruise

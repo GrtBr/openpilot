@@ -98,6 +98,10 @@ _services: dict[str, tuple] = {
   "mapdOut": (True, 20., 20, QueueSize.MEDIUM),
   "mapdIn": (False, 0., None, QueueSize.MEDIUM),
   "mapdExtendedOut": (False, 1., 1, QueueSize.MEDIUM),
+  # Fork-owned card -> selfdrived channel for the set-speed confirmation prompt. Both ends are
+  # Python, so this works without a C++ build (same mechanism that already carries mapdIn).
+  # should_log stays False: loggerd is C++ and reads the stale compiled services.h anyway.
+  "grtSetSpeedState": (False, 20., 20, QueueSize.SMALL),
   # GRT-MOD-END
 }
 SERVICE_LIST = {name: Service(*vals) for

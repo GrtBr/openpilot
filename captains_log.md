@@ -660,7 +660,74 @@ right at the sign. APPROACH_DECEL stays at 0.5; do not touch it without new evid
 (My episode detector found 0 episodes this drive because it keyed off a large speed error at the
 FIRST frame, which the profile no longer produces. The binding-frames metric replaces it.)
 
-## 2026-07-29 — set speed tracks the posted limit: adoption core IMPLEMENTED (part a)
+## 2026-07-29 — set-speed tracking REDESIGNED to the user's spec, and part (b) BUILT
+
+The user replaced the ±20-only design below after seeing the measurement that the set speed
+sits at 105 km/h all drive (ExperimentalMode initial), which made part (a) nearly inert on the
+roads actually driven. The new rules fix the cause rather than the symptom.
+
+**AGREED RULES (this supersedes the "AGREED BEHAVIOUR" further down):**
+
+1. **At engage, seed the set speed from the posted limit**, or **60 km/h if there is no map
+   data** — replacing upstream's fixed `V_CRUISE_INITIAL` (40) / `V_CRUISE_INITIAL_EXPERIMENTAL_
+   MODE` (105). The user chose that this wins even on a RES/resume engage, which upstream would
+   otherwise answer with the previous set speed.
+2. **A later limit change is adopted automatically only if ALL of:**
+   a. the feature still OWNS the set speed — it equals the limit in force, or the value we
+      ourselves last wrote;
+   b. the set speed is a **multiple of 10** (60, 70, ... 120) — a non-round value is hand-tuned;
+   c. the change is **within ±20 km/h**.
+3. **Otherwise the new limit is offered as a PENDING prompt for 10 s**, adopted only on a RES/+
+   tap. SET/− declines it; a limit change under it retires it as stale.
+
+The >20 km/h rule is absolute — it applies even while the feature owns the set speed. On these
+roads limits of 20 and 40 exist, so 120→80 and 60→20 both prompt. That is the user's explicit
+safety call, and it means prompts will be common; that is intended, not a defect.
+
+Rule 2a is what makes "set your own speed and keep it" work: dial in 103 in a 100 zone and the
+feature never touches it again — it only asks. Dial back to exactly 100 and tracking resumes.
+
+**THE ALERT COST NOTHING IN THE END.** `AlertManager.add_many(frame, alerts)` keys on
+`alert.alert_type`, a plain string, and `selfdriveState.alertText1` is free-form Text with
+`alertSound` reusing the existing `AudibleAlert` enum. So the prompt is a plain `Alert` object
+with a fork-owned `alert_type` — **no `EventName` enumerant, no schema addition, nothing to
+recompile**. That kills the on-device experiment the previous entry called for. `ET.WARNING` is
+the right event type: `update_alerts` only clears WARNING when not engaged, and this feature
+only runs engaged.
+
+**THE REAL WORK WAS THE CHANNEL.** The pending state lives in `card`; only `selfdrived` can
+raise an alert. Added a fork-owned message on reserved slot 16 — `CustomReserved16` →
+`GrtSetSpeedState` renamed IN PLACE (struct ID kept, `log.capnp` ordinal `@142` kept), so the
+wire discriminant stays 140 and **mapd's 141/142/143 do not move**. Now asserted permanently by
+`test_schema_conformance.py` rather than checked by hand. card publishes at 20 Hz (not 100 — it
+must not spend its CAN budget on a status message); selfdrived subscribes.
+
+**THE DANGEROUS BIT, caught before writing it.** selfdrived calls `sm.all_checks()` **unscoped**
+at `:381` and again at `:469` where it gates `self.initialized`. Adding `grtSetSpeedState` to
+its SubMaster without the `ignore` list would have **blocked engagement entirely** on any device
+where card doesn't publish it — strictly worse than the `longitudinalPlan` invalidation bug from
+earlier today, and the third instance of the same class. The service is in selfdrived's `ignore`
+list, and GRT_MODS.md now flags that row as the most safety-critical in the table.
+
+Also settled empirically, not assumed:
+- 11 MB of on-device `mapd_debug.log`: every limit seen is 20/40/60/80/120 — all multiples of
+  10 — so rule 2b cannot latch the feature into permanent-prompt mode by itself.
+- `mapdIn` already proves Python can publish on a service absent from the compiled
+  `services.h`, so `grtSetSpeedState` needs no device experiment.
+- Float comparisons use a 0.5 km/h epsilon. An `==` on values that have been through
+  `round()`, `+=` and `clip()` would end tracking permanently after one wobble, and the symptom
+  would read as "the feature got annoying", not as a bug.
+
+Seeding detail worth knowing: engaging from standstill reports `waySelectionType=fail`, so the
+seed WAITS up to 10 s for a first fix before falling back to 60. Without the wait every drive
+would start on 60 and immediately prompt to move to the real limit. Upstream's own value stands
+during the window.
+
+Tests: 45 set_speed (rewritten — the ±20-only assertions were wrong, not failing), 35 hooks
+(hook 3 + the new hook 4 alert), 18 scc_map, 25/25 schema conformance including the four wire
+discriminants. NOT YET ON THE CAR.
+
+## 2026-07-29 — set speed tracks the posted limit: adoption core IMPLEMENTED (part a, SUPERSEDED ABOVE)
 
 Implemented the auto-adopt half of the feature designed below. **Part (b), the >20 km/h
 PENDING + RES/+ confirmation, is coded but shipped DISABLED** — see "what is deliberately not

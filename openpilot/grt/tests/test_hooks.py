@@ -46,7 +46,23 @@ class FakeParams:
 
 
 _stub("openpilot.cereal.messaging", SubMaster=object)
-_stub("openpilot.common.constants", CV=NS(KPH_TO_MS=1 / 3.6))
+_stub("openpilot.common.constants", CV=NS(KPH_TO_MS=1 / 3.6, KPH_TO_MPH=1 / 1.609344))
+
+
+class FakeAlert:
+  def __init__(self, t1, t2, status, size, priority, visual, audible, duration, creation_delay=0.):
+    self.alert_text_1, self.alert_text_2 = t1, t2
+    self.audible_alert = audible
+    self.priority = priority
+    self.alert_type = ""
+    self.event_type = None
+
+
+for _p in ("openpilot.selfdrive.selfdrived",):
+  sys.modules.setdefault(_p, types.ModuleType(_p))
+_stub("openpilot.selfdrive.selfdrived.events", Alert=FakeAlert,
+      AlertStatus=NS(normal=0), AlertSize=NS(mid=2), Priority=NS(LOW=2),
+      AudibleAlert=NS(prompt="prompt"), VisualAlert=NS(none=0))
 _stub("openpilot.common.params", Params=FakeParams)
 _stub("openpilot.common.realtime", DT_MDL=0.05, DT_CTRL=0.01)
 
@@ -119,15 +135,16 @@ class FakeHelper:
 
 
 class SM3:
-  """Minimal SubMaster carrying only mapdOut, with the real field names."""
+  """Minimal SubMaster carrying mapdOut (+ grtSetSpeedState for the alert hook)."""
 
-  def __init__(self, limit_kph=60.0, way="current", alive=True):
+  def __init__(self, limit_kph=60.0, way="current", alive=True, state=None):
     self.msg = NS(speedLimit=limit_kph / 3.6, tileLoaded=True, waySelectionType=way)
-    self.alive = {'mapdOut': alive}
-    self.valid = {'mapdOut': True}
+    self.state = state
+    self.alive = {'mapdOut': alive, 'grtSetSpeedState': state is not None}
+    self.valid = {'mapdOut': True, 'grtSetSpeedState': True}
 
   def __getitem__(self, k):
-    return self.msg
+    return self.state if k == 'grtSetSpeedState' else self.msg
 
 
 def _reset_hook3():
@@ -143,13 +160,12 @@ def test_hook3():
   FakeParams.vals["SmartCruiseControlSetSpeed"] = True
   CS = NS(buttonEvents=[])
 
-  # adoption writes BOTH fields — the one property the tracker's own tests cannot see
+  # the engage seed writes BOTH fields — the one property the tracker's own tests cannot see
   _reset_hook3()
-  h = FakeHelper(80.0)
+  h = FakeHelper(105.0)
   sm = SM3(60.0)
-  for _ in range(int(ss.LIMIT_STABLE_S / 0.01) + 2):
-    hooks.track_set_speed(sm, CS, h, True)
-  check("hook3 adopts and writes v_cruise_kph AND v_cruise_cluster_kph",
+  hooks.track_set_speed(sm, CS, h, True, True)          # engage edge
+  check("hook3 seeds and writes v_cruise_kph AND v_cruise_cluster_kph",
         h.v_cruise_kph == 60.0 and h.v_cruise_cluster_kph == 60.0)
 
   # no decision -> neither field touched
@@ -188,12 +204,47 @@ def test_hook3():
   _reset_hook3()
   h = FakeHelper(80.0, pcm=True)
   for _ in range(int(ss.LIMIT_STABLE_S / 0.01) + 2):
-    hooks.track_set_speed(SM3(60.0), CS, h, True)
+    hooks.track_set_speed(SM3(60.0), CS, h, True, True)
   check("hook3 is inert on a pcmCruise car", h.v_cruise_kph == 80.0)
+
+  test_hook4()
 
   _reset_hook3()
   FakeParams.vals.clear()
   FakeParams.vals.update(saved)
+
+
+def test_hook4():
+  """The confirmation alert. Built as a plain Alert with a fork-owned alert_type string, so no
+  EventName enumerant and no schema change — which is what makes it work on a prebuilt branch."""
+  no_state = SM3(60.0)
+  check("hook4 returns [] when card is not publishing the state",
+        hooks.set_speed_alerts(no_state, True) == [])
+
+  idle = SM3(60.0, state=NS(pending=False, pendingLimit=0.0, secondsLeft=0.0,
+                            setSpeed=100.0, tracking=True))
+  check("hook4 returns [] when nothing is pending", hooks.set_speed_alerts(idle, True) == [])
+
+  pend = SM3(60.0, state=NS(pending=True, pendingLimit=80.0, secondsLeft=7.5,
+                            setSpeed=120.0, tracking=True))
+  alerts = hooks.set_speed_alerts(pend, True)
+  check("hook4 emits exactly one alert while pending", len(alerts) == 1)
+  a = alerts[0]
+  check("hook4 alert names the limit in km/h when metric",
+        "80" in a.alert_text_1 and "km/h" in a.alert_text_1)
+  check("hook4 alert tells the driver what to press", "RES" in a.alert_text_2)
+  check("hook4 alert makes a sound", a.audible_alert == "prompt")
+  check("hook4 alert_type is fork-owned (AlertManager keys on it, not on an EventName)",
+        a.alert_type == "grtSetSpeedPending")
+  check("hook4 alert is ET.WARNING (survives clear_event_types while engaged)",
+        a.event_type == "warning")
+
+  imperial = hooks.set_speed_alerts(pend, False)
+  check("hook4 converts to mph when the driver is imperial",
+        "50" in imperial[0].alert_text_1 and "mph" in imperial[0].alert_text_1)
+
+  broken = NS(alive={'grtSetSpeedState': True})
+  check("hook4 cannot raise into selfdrived", hooks.set_speed_alerts(broken, True) == [])
 
 
 def main():

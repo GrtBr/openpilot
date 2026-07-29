@@ -21,7 +21,7 @@ from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.grt import hooks as grt_hooks  # GRT-MOD
-from openpilot.grt.registry import GRT_SUB_CARD  # GRT-MOD
+from openpilot.grt.registry import GRT_PUB_CARD, GRT_SUB_CARD  # GRT-MOD
 
 REPLAY = "REPLAY" in os.environ
 
@@ -73,7 +73,8 @@ class Car:
                                   ignore_alive=GRT_SUB_CARD, ignore_valid=GRT_SUB_CARD,
                                   ignore_avg_freq=GRT_SUB_CARD)
     # GRT-MOD-END
-    self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'liveTracks'])
+    self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'liveTracks']
+                                  + GRT_PUB_CARD)  # GRT-MOD
 
     self.can_rcv_cum_timeout_counter = 0
 
@@ -188,13 +189,15 @@ class Car:
       self.can_log_mono_time = messaging.log_from_bytes(can_strs[0]).logMonoTime
 
     self.v_cruise_helper.update_v_cruise(CS, self.sm['carControl'].enabled, self.is_metric)
+    grt_engage_edge = self.sm['carControl'].enabled and not self.CC_prev.enabled  # GRT-MOD
     if self.sm['carControl'].enabled and not self.CC_prev.enabled:
       # Use CarState w/ buttons from the step selfdrived enables on
       self.v_cruise_helper.initialize_v_cruise(self.CS_prev, self.experimental_mode)
 
     # GRT-MOD-START: set speed follows the posted limit. Must stay AFTER initialize_v_cruise
     # (which resets v_cruise on the engage edge) and BEFORE the CS.vCruise assignment below.
-    grt_hooks.track_set_speed(self.sm, CS, self.v_cruise_helper, self.sm['carControl'].enabled)
+    grt_hooks.track_set_speed(self.sm, CS, self.v_cruise_helper, self.sm['carControl'].enabled,
+                              grt_engage_edge)
     # GRT-MOD-END
 
     # TODO: mirror the carState.cruiseState struct?
@@ -226,6 +229,14 @@ class Car:
     cs_send.carState.canErrorCounter = self.can_rcv_cum_timeout_counter
     cs_send.carState.cumLagMs = -self.rk.remaining * 1000.
     self.pm.send('carState', cs_send)
+
+    # GRT-MOD-START: set-speed state for selfdrived's confirmation prompt. 20 Hz, not 100 —
+    # this is a status message and card must not spend its CAN budget on it.
+    if self.sm.frame % 5 == 0:
+      grt_msg = grt_hooks.set_speed_state_msg(self.v_cruise_helper)
+      if grt_msg is not None:
+        self.pm.send('grtSetSpeedState', grt_msg)
+    # GRT-MOD-END
 
     if RD is not None:
       tracks_msg = messaging.new_message('liveTracks')

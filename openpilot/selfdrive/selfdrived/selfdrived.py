@@ -21,6 +21,8 @@ from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
+from openpilot.grt import hooks as grt_hooks  # GRT-MOD
+from openpilot.grt.registry import GRT_SUB_SELFDRIVED  # GRT-MOD
 
 from openpilot.common.version import get_build_metadata
 from openpilot.common.hardware import HARDWARE
@@ -81,7 +83,11 @@ class SelfdriveD:
     # TODO: de-couple selfdrived with card/conflate on carState without introducing controls mismatches
     self.car_state_sock = messaging.sub_sock('carState', timeout=20)
 
-    ignore = self.sensor_packets + self.gps_packets + ['alertDebug', 'lateralManeuverPlan']
+    # GRT-MOD: fork services MUST be in `ignore` — sm.all_checks() is called UNSCOPED below
+    # (~:381 raises commIssue, ~:469 gates self.initialized), so a missing fork publisher would
+    # block engagement entirely. See GRT_MODS.md.
+    ignore = self.sensor_packets + self.gps_packets + ['alertDebug', 'lateralManeuverPlan'] \
+             + GRT_SUB_SELFDRIVED
     if SIMULATION:
       ignore += ['driverCameraState', 'managerState']
     if REPLAY:
@@ -91,7 +97,7 @@ class SelfdriveD:
                                    'carOutput', 'driverMonitoringState', 'longitudinalPlan', 'livePose', 'liveDelay',
                                    'managerState', 'liveParameters', 'radarState', 'liveTorqueParameters',
                                    'controlsState', 'carControl', 'driverAssistance', 'alertDebug', 'userBookmark',
-                                   'lateralManeuverPlan'] + \
+                                   'lateralManeuverPlan'] + GRT_SUB_SELFDRIVED + \
                                    self.camera_packets + self.sensor_packets + self.gps_packets,
                                   ignore_alive=ignore, ignore_avg_freq=ignore,
                                   ignore_valid=ignore, frequency=int(1/DT_CTRL))
@@ -517,6 +523,10 @@ class SelfdriveD:
     alerts = self.events.create_alerts(self.state_machine.current_alert_types, [self.CP, CS, self.sm, self.is_metric,
                                                                                 self.state_machine.soft_disable_timer, pers])
     self.AM.add_many(self.sm.frame, alerts)
+    # GRT-MOD-START: set-speed confirmation prompt. A plain Alert with a fork-owned alert_type
+    # string — no EventName enumerant, so nothing in the compiled schema changes.
+    self.AM.add_many(self.sm.frame, grt_hooks.set_speed_alerts(self.sm, self.is_metric))
+    # GRT-MOD-END
     self.AM.process_alerts(self.sm.frame, clear_event_types)
 
   def publish_selfdriveState(self, CS):

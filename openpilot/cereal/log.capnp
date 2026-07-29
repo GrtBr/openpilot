@@ -2622,7 +2622,7 @@ struct Event {
     customReserved13 @139 :Custom.CustomReserved13;
     customReserved14 @140 :Custom.CustomReserved14;
     customReserved15 @141 :Custom.CustomReserved15;
-    customReserved16 @142 :Custom.CustomReserved16;
+    grtSetSpeedState @142 :Custom.GrtSetSpeedState;  # GRT-MOD (was customReserved16; ordinal unchanged)
     # GRT-MOD-START — mapd. Union ordinals @143/@144/@145 UNCHANGED (wire-compat with the
     # prebuilt Go binary); only the member names and struct names changed.
     mapdExtendedOut @143 :Custom.MapdExtendedOut;

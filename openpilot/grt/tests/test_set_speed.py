@@ -8,14 +8,17 @@ Field names in the stubs MIRROR THE REAL SCHEMA — see tests/test_schema_confor
 checks that claim against the actual log.capnp. (A stub that invented `lead.status` is exactly
 how the mapd controller shipped a silent 38,300-exception no-op to the car.)
 
+The behaviour under test (user spec, 2026-07-29):
+  * at engage, seed the set speed from the posted limit, else 60 km/h if no map data;
+  * afterwards adopt a limit change automatically ONLY if the feature still owns the set speed
+    AND that speed is a multiple of 10 AND the change is within ±20 km/h;
+  * otherwise offer it for 10 s and adopt only on RES/+.
+
 Safety-relevant properties asserted here:
-  * INERT by default — SmartCruiseControlSetSpeed defaults off, and an unregistered param
-    degrades to off rather than raising;
-  * never acts while disengaged, while the set speed is UNSET, or on an untrusted mapd fix
-    (tiles not loaded / waySelectionType fail);
-  * edge-triggered: one decision per limit VALUE, so a driver override is never re-adopted;
-  * a limit outside the plausible band, or lost entirely, changes nothing;
-  * the result is always inside upstream's [V_CRUISE_MIN, V_CRUISE_MAX].
+  * INERT by default, and an unregistered param degrades to off rather than raising;
+  * a driver-set speed is NEVER silently overwritten;
+  * any change beyond ±20 km/h prompts, even while the feature owns the set speed;
+  * float comparisons tolerate rounding (an == would end tracking permanently).
 """
 import pathlib
 import sys
@@ -80,6 +83,8 @@ ss = _load("openpilot.grt.set_speed", str(GRT / "set_speed.py"))
 
 ss._DEBUG_LOG = None          # no file writes during tests
 STABLE = int(ss.LIMIT_STABLE_S / 0.01)
+SEED_TIMEOUT = int(ss.SEED_TIMEOUT_S / 0.01)
+PENDING = int(ss.PENDING_TIMEOUT_S / 0.01)
 
 
 # ------------------------------------------------------------------------------------------
@@ -89,17 +94,20 @@ STABLE = int(ss.LIMIT_STABLE_S / 0.01)
 class FakeSM:
   """Minimal SubMaster: mapdOut only, with the real field names."""
 
-  def __init__(self, speed_limit_ms=0.0, tile_loaded=True, way="current", alive=True):
-    self.msg = NS(speedLimit=speed_limit_ms, tileLoaded=tile_loaded, waySelectionType=way)
+  def __init__(self, speed_limit_kph=0.0, tile_loaded=True, way="current", alive=True):
+    self.msg = NS(speedLimit=speed_limit_kph / 3.6, tileLoaded=tile_loaded, waySelectionType=way)
     self.alive = {'mapdOut': alive}
     self.valid = {'mapdOut': True}
+
+  def set_limit(self, kph):
+    self.msg.speedLimit = kph / 3.6
 
   def __getitem__(self, k):
     assert k == 'mapdOut'
     return self.msg
 
 
-def button(btn_type, pressed):
+def button(btn_type, pressed=False):
   return NS(type=NS(raw=btn_type), pressed=pressed)
 
 
@@ -107,26 +115,26 @@ def fake_cs(buttons=()):
   return NS(buttonEvents=list(buttons))
 
 
-def kph_to_ms(kph):
-  return kph / 3.6
-
-
 def make_tracker(enabled=True):
-  FakeParams.vals = {"SmartCruiseControlSetSpeed": enabled} if enabled is not None else {}
-  t = ss.SetSpeedLimitTracker()
-  return t
+  FakeParams.vals = {"SmartCruiseControlSetSpeed": enabled}
+  return ss.SetSpeedLimitTracker()
 
 
-def run(tracker, sm, v_cruise, frames, CS=None, enabled=True):
-  """Drive the tracker `frames` times; return the final set speed."""
+def run(tracker, sm, v_cruise, frames, CS=None, enabled=True, engage=False):
   out = v_cruise
-  for _ in range(frames):
-    out = tracker.update(sm, CS if CS is not None else fake_cs(), out, enabled)
+  for i in range(frames):
+    out = tracker.update(sm, CS if CS is not None else fake_cs(), out, enabled,
+                         engage and i == 0)
   return out
 
 
+def engaged_at(tracker, sm, limit_kph, start=105.0):
+  """Engage and let the seed settle. Returns the seeded set speed."""
+  sm.set_limit(limit_kph)
+  return run(tracker, sm, start, STABLE + 5, engage=True)
+
+
 # ------------------------------------------------------------------------------------------
-# tests
 
 results = []
 
@@ -136,251 +144,375 @@ def check(name, cond, detail=""):
   print(f"  {'PASS' if cond else '**FAIL**':9s} {name}" + (f"   {detail}" if detail else ""))
 
 
+# --- inertness ----------------------------------------------------------------------------
+
 def test_disabled_by_default():
   FakeParams.vals = {}                      # every key raises, as on the prebuilt device
   t = ss.SetSpeedLimitTracker()
-  sm = FakeSM(kph_to_ms(60))
-  out = run(t, sm, 80.0, STABLE + 10)
-  check("inert when the param is unregistered (degrades to off, no raise)", out == 80.0, f"got {out}")
+  out = run(t, FakeSM(60), 105.0, STABLE + 10, engage=True)
+  check("inert when the param is unregistered (degrades to off, no raise)",
+        out == 105.0, f"got {out}")
 
 
 def test_disabled_flag():
   t = make_tracker(enabled=False)
-  sm = FakeSM(kph_to_ms(60))
-  out = run(t, sm, 80.0, STABLE + 10)
-  check("inert when the flag is off", out == 80.0, f"got {out}")
-
-
-def test_adopt_within_band_down():
-  t = make_tracker()
-  sm = FakeSM(kph_to_ms(60))
-  out = run(t, sm, 80.0, STABLE + 2)
-  check("adopts 80 -> 60 (delta 20, on the band edge)", out == 60.0, f"got {out}")
-
-
-def test_adopt_within_band_up():
-  t = make_tracker()
-  sm = FakeSM(kph_to_ms(100))
-  out = run(t, sm, 90.0, STABLE + 2)
-  check("adopts upward 90 -> 100", out == 100.0, f"got {out}")
-
-
-def test_reject_outside_band():
-  t = make_tracker()
-  sm = FakeSM(kph_to_ms(60))
-  out = run(t, sm, 120.0, STABLE + 5)
-  check("does NOT adopt a >20 km/h drop (120 -> 60)", out == 120.0, f"got {out}")
-  check("...and records it as ignored while PENDING_ENABLED is False",
-        t.last_action == "ignore" and t.pending_limit_kph is None, t.last_action)
-
-
-def test_one_shot_then_driver_override():
-  """The whole point of edge-triggering: we must not fight the driver."""
-  t = make_tracker()
-  sm = FakeSM(kph_to_ms(60))
-  out = run(t, sm, 80.0, STABLE + 2)
-  assert out == 60.0
-  out = 75.0                                # driver raises the set speed manually
-  out = run(t, sm, out, 500)                # same limit still posted, for 5 seconds
-  check("does not re-adopt after a driver override (one decision per limit value)",
-        out == 75.0, f"got {out}")
-
-
-def test_new_limit_after_override_is_adopted():
-  t = make_tracker()
-  sm = FakeSM(kph_to_ms(60))
-  run(t, sm, 80.0, STABLE + 2)
-  sm.msg.speedLimit = kph_to_ms(80)         # genuinely new posted limit
-  out = run(t, sm, 75.0, STABLE + 2)
-  check("a NEW limit value is still adopted after an override", out == 80.0, f"got {out}")
+  out = run(t, FakeSM(60), 105.0, STABLE + 10, engage=True)
+  check("inert when the flag is off", out == 105.0, f"got {out}")
 
 
 def test_not_engaged():
   t = make_tracker()
-  sm = FakeSM(kph_to_ms(60))
-  out = run(t, sm, 80.0, STABLE + 5, enabled=False)
-  check("inert while openpilot is not engaged", out == 80.0, f"got {out}")
+  out = run(t, FakeSM(60), 105.0, STABLE + 10, enabled=False)
+  check("inert while openpilot is not engaged", out == 105.0, f"got {out}")
 
 
-def test_v_cruise_unset():
+# --- engage seeding -----------------------------------------------------------------------
+
+def test_seed_from_map():
   t = make_tracker()
-  sm = FakeSM(kph_to_ms(60))
-  out = run(t, sm, 255.0, STABLE + 5)
-  check("inert while the set speed is UNSET", out == 255.0, f"got {out}")
+  out = engaged_at(t, FakeSM(), 100.0)
+  check("engage seeds the set speed from the posted limit (not 105)", out == 100.0, f"got {out}")
 
+
+def test_seed_no_map_falls_back_to_60():
+  t = make_tracker()
+  sm = FakeSM(100, way="fail")              # parked: way selection fails
+  out = run(t, sm, 105.0, SEED_TIMEOUT + 5, engage=True)
+  check("no map data at engage -> seeds 60 after the timeout", out == 60.0, f"got {out}")
+
+
+def test_seed_waits_before_falling_back():
+  """Engaging from standstill reports way=fail; without the wait every drive would start on 60
+  and immediately prompt to move to the real limit."""
+  t = make_tracker()
+  sm = FakeSM(100, way="fail")
+  out = run(t, sm, 105.0, SEED_TIMEOUT - 20, engage=True)
+  check("upstream's value stands while waiting for a first fix", out == 105.0, f"got {out}")
+  sm.msg.waySelectionType = "current"
+  out = run(t, sm, out, 2)
+  check("...and the real limit wins if it arrives inside the window", out == 100.0, f"got {out}")
+
+
+def test_seed_overrides_resume():
+  """User chose 'OSM limit always wins' over upstream's resume-previous-speed behaviour."""
+  t = make_tracker()
+  sm = FakeSM(80)
+  out = run(t, sm, 120.0, STABLE + 5, CS=fake_cs([button(ButtonType.accelCruise)]), engage=True)
+  check("a RES/resume engage still seeds from the map", out == 80.0, f"got {out}")
+
+
+# --- auto-adopt while the feature owns the set speed --------------------------------------
+
+def test_auto_adopt_in_band():
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  sm.set_limit(80.0)
+  out = run(t, sm, 100.0, STABLE + 2)
+  check("tracking + round + within 20 -> auto-adopts 100 -> 80", out == 80.0, f"got {out}")
+
+
+def test_auto_adopt_upward():
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  sm.set_limit(120.0)
+  out = run(t, sm, 100.0, STABLE + 2)
+  check("adopts upward 100 -> 120 while tracking", out == 120.0, f"got {out}")
+
+
+def test_chained_adoptions():
+  t = make_tracker()
+  sm = FakeSM()
+  out = engaged_at(t, sm, 120.0)
+  for nxt in (100.0, 80.0, 60.0):
+    sm.set_limit(nxt)
+    out = run(t, sm, out, STABLE + 2)
+  check("tracks a graduated route 120 -> 100 -> 80 -> 60", out == 60.0, f"got {out}")
+
+
+def test_big_drop_prompts_even_while_tracking():
+  """The user's absolute safety rule: >20 km/h always asks, tracking or not."""
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 120.0)
+  sm.set_limit(80.0)
+  out = run(t, sm, 120.0, STABLE + 2)
+  check("120 -> 80 (delta 40) does NOT auto-adopt", out == 120.0, f"got {out}")
+  check("...it prompts for confirmation instead",
+        t.pending_limit_kph == 80.0 and t.last_action == "pending", t.last_action)
+  check("...and says why", t.tracking is True)
+
+
+def test_confirm_restores_tracking():
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 120.0)
+  sm.set_limit(80.0)
+  out = run(t, sm, 120.0, STABLE + 2)
+  out = t.update(sm, fake_cs([button(ButtonType.accelCruise)]), out, True)
+  check("RES/+ confirms the pending limit", out == 80.0, f"got {out}")
+  sm.set_limit(60.0)
+  out = run(t, sm, out, STABLE + 2)
+  check("...and the next in-band change auto-adopts again (tracking restored)",
+        out == 60.0, f"got {out}")
+
+
+# --- driver ownership ----------------------------------------------------------------------
+
+def test_driver_set_speed_is_never_overwritten():
+  """The user's example: 103 in a 100 zone, then the limit moves. Must ask, never act."""
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  out = 103.0                               # driver dials in their own number
+  sm.set_limit(90.0)
+  out = run(t, sm, out, STABLE + 2)
+  check("a driver-set 103 is not overwritten when the limit drops to 90",
+        out == 103.0, f"got {out}")
+  check("...it prompts instead", t.pending_limit_kph == 90.0, str(t.pending_limit_kph))
+  check("...for the right reason", t.tracking is False)
+
+
+def test_driver_set_speed_up_also_prompts():
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  sm.set_limit(110.0)
+  out = run(t, sm, 103.0, STABLE + 2)
+  check("a driver-set 103 is not raised to 110 either", out == 103.0, f"got {out}")
+  check("...it prompts", t.pending_limit_kph == 110.0, str(t.pending_limit_kph))
+
+
+def test_non_round_set_speed_prompts_even_if_owned():
+  """set % 10 != 0 means hand-tuned, so no silent change even within band."""
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  t._owned_kph = 105.0                      # pretend we own a non-round value
+  t._prev_limit_kph = 105.0
+  sm.set_limit(110.0)
+  out = run(t, sm, 105.0, STABLE + 2)
+  check("a non-multiple-of-10 set speed prompts even when owned and in band",
+        out == 105.0 and t.pending_limit_kph == 110.0, f"out {out} pending {t.pending_limit_kph}")
+
+
+def test_driver_matching_the_limit_resumes_tracking():
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  out = 103.0
+  sm.set_limit(100.0)
+  out = run(t, sm, out, STABLE + 2)         # limit unchanged; driver still owns
+  out = 100.0                               # driver dials back to the posted limit
+  out = run(t, sm, out, STABLE + 2)
+  check("dialling the posted limit by hand re-establishes tracking", t.tracking is True)
+  sm.set_limit(90.0)
+  out = run(t, sm, out, STABLE + 2)
+  check("...so the next in-band change auto-adopts", out == 90.0, f"got {out}")
+
+
+def test_float_drift_does_not_end_tracking():
+  """An == comparison here would silently end tracking forever after one rounding wobble."""
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  out = 100.0 - 1e-9
+  sm.set_limit(90.0)
+  out = run(t, sm, out, STABLE + 2)
+  check("a float wobble in the set speed does not end tracking", out == 90.0, f"got {out}")
+
+
+# --- pending window -------------------------------------------------------------------------
+
+def test_pending_expires():
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 120.0)
+  sm.set_limit(60.0)
+  out = run(t, sm, 120.0, STABLE + 2)
+  assert t.pending_limit_kph == 60.0
+  out = run(t, sm, out, PENDING + 5)
+  check("an unconfirmed prompt expires without acting",
+        out == 120.0 and t.pending_limit_kph is None and t.last_action == "expire",
+        f"out {out} action {t.last_action}")
+
+
+def test_pending_declined_by_set_button():
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 120.0)
+  sm.set_limit(60.0)
+  out = run(t, sm, 120.0, STABLE + 2)
+  out = t.update(sm, fake_cs([button(ButtonType.decelCruise)]), out, True)
+  check("SET/- declines the prompt", out == 120.0 and t.pending_limit_kph is None,
+        f"out {out} action {t.last_action}")
+
+
+def test_pending_goes_stale_on_a_new_limit():
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 120.0)
+  sm.set_limit(60.0)
+  out = run(t, sm, 120.0, STABLE + 2)
+  assert t.pending_limit_kph == 60.0
+  sm.set_limit(100.0)                       # road changed under us
+  out = run(t, sm, out, 2)
+  check("a prompt is retired when the road changes under it",
+        t.pending_limit_kph is None and t.last_action == "stale", t.last_action)
+  out = run(t, sm, out, STABLE + 2)
+  check("...and the new limit is then decided on its own merits", out == 100.0, f"got {out}")
+
+
+def test_pending_seconds_left():
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 120.0)
+  sm.set_limit(60.0)
+  run(t, sm, 120.0, STABLE + 2)
+  full = t.pending_seconds_left
+  run(t, sm, 120.0, 200)
+  check("pending_seconds_left counts down for the UI",
+        abs(full - ss.PENDING_TIMEOUT_S) < 0.1 and t.pending_seconds_left < full,
+        f"{full} -> {t.pending_seconds_left}")
+
+
+# --- data-quality gates ---------------------------------------------------------------------
 
 def test_way_selection_fail():
   t = make_tracker()
-  sm = FakeSM(kph_to_ms(60), way="fail")
-  out = run(t, sm, 80.0, STABLE + 5)
-  check("ignores a limit from a FAILED way selection (what parking reports)",
-        out == 80.0, f"got {out}")
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  sm.set_limit(80.0)
+  sm.msg.waySelectionType = "fail"
+  out = run(t, sm, 100.0, STABLE + 5)
+  check("ignores a limit from a FAILED way selection", out == 100.0, f"got {out}")
 
 
 def test_tiles_not_loaded():
   t = make_tracker()
-  sm = FakeSM(kph_to_ms(60), tile_loaded=False)
-  out = run(t, sm, 80.0, STABLE + 5)
-  check("ignores a limit when tiles are not loaded", out == 80.0, f"got {out}")
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  sm.set_limit(80.0)
+  sm.msg.tileLoaded = False
+  out = run(t, sm, 100.0, STABLE + 5)
+  check("ignores a limit when tiles are not loaded", out == 100.0, f"got {out}")
 
 
 def test_mapd_not_alive():
   t = make_tracker()
-  sm = FakeSM(kph_to_ms(60), alive=False)
-  out = run(t, sm, 80.0, STABLE + 5)
-  check("ignores mapdOut when the service is not alive (mapd absent)", out == 80.0, f"got {out}")
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  sm.set_limit(80.0)
+  sm.alive['mapdOut'] = False
+  out = run(t, sm, 100.0, STABLE + 5)
+  check("ignores mapdOut when the service is not alive (mapd absent)", out == 100.0, f"got {out}")
 
 
 def test_implausible_limit_units_trap():
-  """A km/h value leaking into an m/s field reads ~3.6x high — must be rejected, not clamped."""
+  """A km/h value leaking into an m/s field reads ~3.6x high — reject, do not clamp."""
   t = make_tracker()
-  sm = FakeSM(60.0)                          # 60 m/s == 216 km/h
-  out = run(t, sm, 120.0, STABLE + 5)
-  check("rejects an implausible limit outright (units-error trap)", out == 120.0, f"got {out}")
-
-
-def test_zero_limit_does_nothing():
-  t = make_tracker()
-  sm = FakeSM(0.0)
-  out = run(t, sm, 80.0, STABLE + 5)
-  check("no limit posted -> no change", out == 80.0, f"got {out}")
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  sm.msg.speedLimit = 60.0                  # 60 m/s == 216 km/h
+  out = run(t, sm, 100.0, STABLE + 5)
+  check("rejects an implausible limit outright (units-error trap)", out == 100.0, f"got {out}")
 
 
 def test_losing_a_limit_does_not_trigger():
   t = make_tracker()
-  sm = FakeSM(kph_to_ms(60))
-  out = run(t, sm, 80.0, STABLE + 2)
-  assert out == 60.0
-  sm.msg.speedLimit = 0.0                    # limit disappears
+  sm = FakeSM()
+  out = engaged_at(t, sm, 100.0)
+  sm.set_limit(0.0)
   out = run(t, sm, out, 300)
-  check("X -> 0 (limit lost) changes nothing", out == 60.0, f"got {out}")
+  check("X -> 0 (limit lost) changes nothing", out == 100.0, f"got {out}")
 
 
 def test_flapping_limit_never_settles():
   t = make_tracker()
-  sm = FakeSM(kph_to_ms(60))
-  out = 100.0
+  sm = FakeSM()
+  out = engaged_at(t, sm, 100.0)
   for i in range(STABLE * 4):
-    sm.msg.speedLimit = kph_to_ms(60 if i % 2 else 80)
+    sm.set_limit(80.0 if i % 2 else 90.0)
     out = t.update(sm, fake_cs(), out, True)
   check("a flapping limit never reaches the stability gate", out == 100.0, f"got {out}")
 
 
-def test_stability_gate_timing():
+def test_up_on_predicted_way_is_deferred():
   t = make_tracker()
-  sm = FakeSM(kph_to_ms(60))
-  out = run(t, sm, 80.0, STABLE - 1)
-  check("does not act before LIMIT_STABLE_S has elapsed", out == 80.0, f"got {out}")
-  out = run(t, sm, out, 2)
-  check("acts once the limit has held for LIMIT_STABLE_S", out == 60.0, f"got {out}")
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  sm.set_limit(110.0)
+  sm.msg.waySelectionType = "predicted"
+  out = run(t, sm, 100.0, STABLE + 5)
+  check("does NOT raise the set speed off a merely PREDICTED way", out == 100.0, f"got {out}")
+  sm.msg.waySelectionType = "current"
+  out = run(t, sm, out, 3)
+  check("...and adopts it once the way selection becomes `current`", out == 110.0, f"got {out}")
 
 
 def test_button_frame_is_deferred_not_dropped():
-  """Regression: with an exact `_cand_frames == STABLE` gate, a button press landing on that one
-  frame dropped the limit PERMANENTLY and silently — the counter kept incrementing and `==` was
-  never true again. It must defer to the next clear frame instead."""
+  """Regression: an exact `_cand_frames == STABLE` gate dropped the limit PERMANENTLY when a
+  button landed on that one frame."""
   t = make_tracker()
-  sm = FakeSM(kph_to_ms(60))
-  out = 80.0
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  sm.set_limit(80.0)
+  out = 100.0
   for i in range(STABLE + 3):
-    # driver is on the buttons exactly when the gate would fire, and for 3 frames after
-    cs = fake_cs([button(ButtonType.decelCruise, False)]) if i >= STABLE - 1 else fake_cs()
+    cs = fake_cs([button(ButtonType.decelCruise)]) if i >= STABLE - 1 else fake_cs()
     out = t.update(sm, cs, out, True)
-  check("stays out of the way while the driver is on the buttons", out == 80.0, f"got {out}")
-  out = run(t, sm, out, 2)                   # buttons released
+  check("stays out of the way while the driver is on the buttons", out == 100.0, f"got {out}")
+  out = run(t, sm, out, 2)
   check("adopts on the first clear frame afterwards (deferral, not a silent drop)",
-        out == 60.0, f"got {out}")
+        out == 80.0, f"got {out}")
 
 
 def test_clamped_to_upstream_limits():
   t = make_tracker()
-  sm = FakeSM(kph_to_ms(144))
-  out = run(t, sm, 145.0, STABLE + 2)
-  check("adopted value stays within [V_CRUISE_MIN, V_CRUISE_MAX]",
+  sm = FakeSM()
+  out = engaged_at(t, sm, 144.0)
+  check("seeded value stays within [V_CRUISE_MIN, V_CRUISE_MAX]",
         ss.V_CRUISE_MIN <= out <= ss.V_CRUISE_MAX, f"got {out}")
 
 
 def test_mph_limit_is_rounded():
   t = make_tracker()
-  sm = FakeSM(kph_to_ms(96.56))              # 60 mph
-  out = run(t, sm, 100.0, STABLE + 2)
+  sm = FakeSM()
+  out = engaged_at(t, sm, 96.56)            # 60 mph
   check("an mph-derived limit lands on a whole km/h", out == 97.0, f"got {out}")
 
 
 def test_disengage_resets():
   t = make_tracker()
-  sm = FakeSM(kph_to_ms(60))
-  out = run(t, sm, 80.0, STABLE + 2)
-  assert out == 60.0
-  run(t, sm, out, 5, enabled=False)          # disengage
-  out = run(t, sm, 80.0, STABLE + 2)         # re-engage with a stale set speed
-  check("re-engaging takes a fresh look at the current limit", out == 60.0, f"got {out}")
-
-
-def test_pending_flow_when_enabled():
-  """PENDING_ENABLED is False in production; exercise the machinery anyway so it is not rotten."""
-  ss.PENDING_ENABLED = True
-  try:
-    t = make_tracker()
-    sm = FakeSM(kph_to_ms(60))
-    out = run(t, sm, 120.0, STABLE + 2)
-    check("a >band change goes PENDING, not adopted",
-          out == 120.0 and t.pending_limit_kph == 60.0, f"out {out} pending {t.pending_limit_kph}")
-    out = t.update(sm, fake_cs([button(ButtonType.accelCruise, False)]), out, True)
-    check("RES/+ within the window confirms the pending limit", out == 60.0, f"got {out}")
-
-    t2 = make_tracker()
-    sm2 = FakeSM(kph_to_ms(60))
-    out2 = run(t2, sm2, 120.0, STABLE + 2)
-    out2 = run(t2, sm2, out2, int(ss.PENDING_TIMEOUT_S / 0.01) + 5)
-    check("an unconfirmed pending limit expires without acting",
-          out2 == 120.0 and t2.pending_limit_kph is None and t2.last_action == "expire",
-          f"out {out2} action {t2.last_action}")
-  finally:
-    ss.PENDING_ENABLED = False
-
-
-def test_up_on_predicted_way_is_deferred():
-  t = make_tracker()
-  sm = FakeSM(kph_to_ms(100), way="predicted")
-  out = run(t, sm, 90.0, STABLE + 5)
-  check("does NOT raise the set speed off a merely PREDICTED way", out == 90.0, f"got {out}")
-  sm.msg.waySelectionType = "current"        # mapd settles on the way we are actually on
-  out = run(t, sm, out, 3)
-  check("...and adopts it once the way selection becomes `current` (deferral, not consumed)",
-        out == 100.0, f"got {out}")
-
-
-def test_down_on_predicted_way_is_allowed():
-  t = make_tracker()
-  sm = FakeSM(kph_to_ms(60), way="predicted")
-  out = run(t, sm, 80.0, STABLE + 2)
-  check("slowing down IS allowed on a predicted way (conservative direction)",
-        out == 60.0, f"got {out}")
+  sm = FakeSM()
+  out = engaged_at(t, sm, 100.0)
+  run(t, sm, out, 5, enabled=False)
+  sm.set_limit(60.0)
+  out = engaged_at(t, sm, 60.0, start=105.0)
+  check("re-engaging seeds afresh from the current limit", out == 60.0, f"got {out}")
 
 
 def test_heartbeat_records_rejection_reason():
-  """A road test where nothing fires must still say WHY."""
   written = []
   real_write = ss.SetSpeedLimitTracker._write
   ss.SetSpeedLimitTracker._write = staticmethod(written.append)
   old = ss._DEBUG_LOG
-  ss._DEBUG_LOG = "/dev/null"                # enable the throttle path without touching disk
+  ss._DEBUG_LOG = "/dev/null"
   try:
     t = make_tracker()
-    sm = FakeSM(kph_to_ms(60), way="fail")
-    run(t, sm, 80.0, int(ss.HEARTBEAT_S / 0.01) * 3)
+    sm = FakeSM()
+    engaged_at(t, sm, 100.0)
+    sm.set_limit(80.0)
+    sm.msg.waySelectionType = "fail"
+    written.clear()
+    run(t, sm, 100.0, int(ss.HEARTBEAT_S / 0.01) * 3)
     reasons = {r.get("reason") for r in written}
     check("heartbeat names the gate that rejected", "way_fail" in reasons, str(reasons))
     check("heartbeat is throttled, not per-frame", len(written) <= 4, f"{len(written)} lines")
   finally:
     ss._DEBUG_LOG = old
     ss.SetSpeedLimitTracker._write = staticmethod(real_write)
-
-
-def test_pending_disabled_in_production():
-  check("PENDING_ENABLED ships False (no alert mechanism verified yet)",
-        ss.PENDING_ENABLED is False)
 
 
 def main():
