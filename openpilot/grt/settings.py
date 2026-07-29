@@ -8,10 +8,17 @@ mapd reads this JSON at startup and whenever it receives a `mapdIn` message of t
     python3 -m openpilot.grt.settings --force  # overwrite an existing blob
     python3 -m openpilot.grt.settings --show   # print what is currently stored
 
-Unlike sunnypilot -- which rewrites this file every second from mapd_manager.py because
-openpilot's Params::clear_all() deletes any param not listed in params_keys.h -- we register
-`MapdSettings` as PERSISTENT (openpilot/common/grt_params_keys.inc), so a single write
-survives manager restarts and ignition/offroad transitions. Do NOT reintroduce the loop.
+Two write paths, because `nightly-dev` is a PREBUILT branch:
+
+* `write_settings()` uses the Params API. Correct once `grt_params_keys.inc` is compiled into
+  params_keys.h, which registers MapdSettings PERSISTENT so clear_all() spares it.
+* `write_settings_file()` bypasses Params and writes the file directly. This is what actually
+  runs today: on a prebuilt branch the key is NOT in the compiled table, so Params.put()
+  raises UnknownKeyName and clear_all() deletes the file on every manager start and
+  ignition/offroad transition. mapd's launch command calls this immediately before exec'ing
+  mapd, so mapd always reads a correct file at startup and keeps the values in memory after.
+
+Note this is NOT sunnypilot's 1 Hz rewrite loop -- it is a single write per mapd start.
 """
 import argparse
 import json
@@ -68,6 +75,27 @@ DEFAULT_MAPD_SETTINGS: dict = {
 }
 
 PARAM_KEY = "MapdSettings"
+
+
+def write_settings_file(overrides: dict | None = None, path: str | None = None) -> str:
+  """Write the settings JSON straight to disk, bypassing the Params API entirely.
+
+  Used on a PREBUILT branch, where MapdSettings is not in the compiled params_keys.h table so
+  Params.put() raises UnknownKeyName AND Params::clear_all() deletes the file. This is invoked
+  from mapd's own launch command, so mapd always starts with a correct settings file.
+  """
+  import os
+  from openpilot.grt.registry import MAPD_SETTINGS_PATH
+  path = path or MAPD_SETTINGS_PATH
+  settings = dict(DEFAULT_MAPD_SETTINGS)
+  if overrides:
+    settings.update(overrides)
+  os.makedirs(os.path.dirname(path), exist_ok=True)
+  tmp = path + ".tmp"
+  with open(tmp, "w") as f:
+    f.write(json.dumps(settings))
+  os.replace(tmp, path)   # atomic: mapd never sees a half-written file
+  return path
 
 
 def write_settings(overrides: dict | None = None, force: bool = False, notify: bool = True) -> dict:

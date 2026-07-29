@@ -40,17 +40,34 @@ MIN_V = 20 * CV.KPH_TO_MS  # do not operate under 20 km/h
 
 
 def get_bool_safe(params, key: str) -> bool:
-  """Read a bool param, treating ANY failure as False (feature off).
+  """Read a fork bool setting: Params first, then a plain file, else False.
 
-  Critical: openpilot's Params raises UnknownKeyName for a key that is not in the COMPILED
-  params_keys.h table. Our keys live in grt_params_keys.inc, which only takes effect after a
-  C++ rebuild — so on a device running prebuilt binaries these keys raise. A fork feature must
-  never be able to break the base system, so the failure mode here is "disabled", not "crash".
+  openpilot's Params raises UnknownKeyName for any key not in the COMPILED params_keys.h
+  table. Our keys live in grt_params_keys.inc, which only takes effect after a C++ rebuild —
+  and `nightly-dev` is a PREBUILT branch that runs committed binaries and must not be built
+  (see captains_log). So on device these keys always raise.
+
+  Fallback: a plain file at <GRT_CONFIG_DIR>/<key> containing 1/true/on/yes. That directory
+  lives outside /data/params, so Params::clear_all() can never delete it. Params is still
+  preferred when available, so this keeps working unchanged if the keys are ever compiled in.
+
+  Any failure at all yields False: a fork feature must never break the base system, so the
+  failure mode is "disabled", not "crash".
   """
   try:
     return bool(params.get_bool(key))
   except Exception:
-    return False
+    pass
+  try:
+    import os
+    from openpilot.grt.registry import GRT_CONFIG_DIR
+    path = os.path.join(GRT_CONFIG_DIR, key)
+    if os.path.isfile(path):
+      with open(path) as f:
+        return f.read().strip().lower() in ("1", "true", "on", "yes")
+  except Exception:
+    pass
+  return False
 
 
 class MapState(IntEnum):

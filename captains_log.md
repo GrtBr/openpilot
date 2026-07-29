@@ -467,3 +467,35 @@ data" with tileLoaded=False. Deploying -36 fixed it immediately. Deployed: -34 (
 STILL OPEN: waySelectionType=fail and roadName empty because the car is stationary (vEgo=0.0,
 bearingDeg=0.0) - way selection needs a heading. Resolves once driving. GATE-3 therefore needs
 a road test.
+
+## 2026-07-29 — mapd port: file-based config (works on a PREBUILT branch)
+
+Resolved the params blocker properly, after re-reading this log's own warning: `nightly-dev` is
+a PREBUILT branch that runs committed binaries and must NOT be built. So `grt_params_keys.inc`
+will never be compiled into params_keys.h, and every fork param raises UnknownKeyName forever.
+Fixing "the build" was therefore the wrong goal; the fork must simply not need a compiler.
+
+(For the record: driving_supercombo.onnx is the build *input* that compiles into the shipped
+driving_tinygrad.pkl chunks. Both machines have the outputs, neither has the input - it is
+git-LFS and never fetched. Nothing is broken; this branch is just not meant to be built. I did
+repeat the documented scons mistake, which dirtied panda/board/obj/{gitversion.h,version} on
+the device; restored with git checkout -- and the device tree is clean again.)
+
+Changes:
+- `grt/registry.py` — GRT_CONFIG_DIR = /data/media/0/grt, deliberately OUTSIDE /data/params so
+  Params::clear_all() can never delete it. Added MAPD_SETTINGS_PATH.
+- `grt/scc_map.py` — get_bool_safe() now reads Params FIRST, then falls back to a plain file at
+  <GRT_CONFIG_DIR>/<key> (1/true/on/yes). Params stays preferred, so this keeps working
+  unchanged if the keys are ever compiled in. Any failure still yields False.
+- `grt/settings.py` — added write_settings_file(): writes the JSON directly, atomically
+  (tmp + os.replace, so mapd never sees a half-written file), bypassing Params entirely.
+- `grt/registry.py` grt_procs() — mapd's launch command now runs write_settings_file()
+  immediately before exec'ing mapd. clear_all() deleting MapdSettings no longer matters: mapd
+  always reads a correct file at startup and keeps the values in memory. This is a single write
+  per mapd start, NOT sunnypilot's 1 Hz rewrite loop.
+
+To enable on device (no rebuild, no reflash):
+  mkdir -p /data/media/0/grt && echo 1 > /data/media/0/grt/SmartCruiseControlMap
+Hazard braking stays off until /data/media/0/grt/SmartCruiseControlMapHazardAccel is set to 1.
+
+Tests: 29/29 (12 scc_map + 17 hooks), including both fallback polarities and absent-file.

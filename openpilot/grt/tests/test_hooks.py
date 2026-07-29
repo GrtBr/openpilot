@@ -161,6 +161,23 @@ def main():
   hooks._scc = None
   hooks._scc_broken = False
 
+  # File-based fallback: on a prebuilt branch the params are unknown, so a plain file under
+  # GRT_CONFIG_DIR is the only way to enable the feature. Verify both polarities.
+  import tempfile, os
+  _reg = _load("openpilot.grt.registry", str(GRT / "registry.py"))
+  get_bool_safe = scc.get_bool_safe
+  FakeParams.vals.clear()                      # force the Params path to fail
+  with tempfile.TemporaryDirectory() as d:
+    _reg.GRT_CONFIG_DIR = d
+    check("file fallback: absent file -> False", get_bool_safe(FakeParams(), "SmartCruiseControlMap") is False)
+    with open(os.path.join(d, "SmartCruiseControlMap"), "w") as f:
+      f.write("1\n")
+    check("file fallback: '1' -> True", get_bool_safe(FakeParams(), "SmartCruiseControlMap") is True)
+    with open(os.path.join(d, "SmartCruiseControlMap"), "w") as f:
+      f.write("0\n")
+    check("file fallback: '0' -> False", get_bool_safe(FakeParams(), "SmartCruiseControlMap") is False)
+  FakeParams.vals.update(saved)
+
   print(f"\n{sum(results)}/{len(results)} passed")
   return 0 if all(results) else 1
 

@@ -20,6 +20,14 @@ _MEDIUM = 2 * 1024 * 1024
 # upstream Paths class needs no fork edit at all.
 MAPD_ROOT = "/data/media/0/osm"
 
+# Fork-owned config dir. Deliberately OUTSIDE /data/params so Params::clear_all() cannot
+# delete anything in it. This is what makes the fork work on a PREBUILT branch, where
+# grt_params_keys.inc is never compiled in and every fork param raises UnknownKeyName.
+GRT_CONFIG_DIR = "/data/media/0/grt"
+
+# Where mapd reads its settings. Fixed path, compiled into the Go binary.
+MAPD_SETTINGS_PATH = "/data/params/d/MapdSettings"
+
 # Path of the vendored mapd binary, relative to the repo root (BASEDIR).
 MAPD_BINARY_RELPATH = "third_party/mapd/mapd"
 
@@ -40,6 +48,7 @@ GRT_IGNORED_PROCESSES: set[str] = {"mapd"}
 def grt_procs() -> list:
   """Build the fork's manager process list. Imports are local: see module docstring."""
   import os
+  import sys
   from openpilot.common.basedir import BASEDIR
   from openpilot.system.manager.process import NativeProcess
 
@@ -50,6 +59,14 @@ def grt_procs() -> list:
     # before the car moves so it has a map fix ready.
     return os.path.exists(MAPD_ROOT) and os.path.exists(mapd_path)
 
+  # Rewrite MapdSettings immediately before exec'ing mapd. On a prebuilt branch MapdSettings
+  # is not in the compiled params_keys.h table, so Params::clear_all() deletes it on manager
+  # start and on every ignition/offroad transition. Writing it here means mapd always reads a
+  # correct file at startup regardless; mapd keeps the values in memory afterwards.
+  ensure = (f"{sys.executable} -c "
+            f"'from openpilot.grt.settings import write_settings_file; write_settings_file()'")
+  cmd = f"{ensure} >/dev/null 2>&1; exec {mapd_path} >/dev/null 2>&1"
+
   return [
-    NativeProcess("mapd", MAPD_ROOT, ["bash", "-c", f"{mapd_path} > /dev/null 2>&1"], mapd_ready),
+    NativeProcess("mapd", MAPD_ROOT, ["bash", "-c", cmd], mapd_ready),
   ]
