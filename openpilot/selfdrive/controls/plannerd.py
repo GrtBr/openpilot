@@ -22,7 +22,14 @@ def main():
   pm = messaging.PubMaster(['longitudinalPlan', 'driverAssistance'])
   sm = messaging.SubMaster(['carControl', 'carState', 'controlsState', 'liveParameters', 'radarState', 'modelV2', 'selfdriveState']
                            + GRT_SUB,  # GRT-MOD
-                           poll='modelV2')
+                           poll='modelV2',
+                           # GRT-MOD-START — mapd is optional: it only runs when OSM tiles are
+                           # installed. Without these ignores, a missing mapdOut would make
+                           # sm.all_checks() False and mark longitudinalPlan INVALID, faulting
+                           # longitudinal control on any device that has no tiles. The fork
+                           # must never degrade the base system when its process is absent.
+                           ignore_alive=GRT_SUB, ignore_valid=GRT_SUB, ignore_avg_freq=GRT_SUB)
+                           # GRT-MOD-END
 
   while True:
     sm.update()

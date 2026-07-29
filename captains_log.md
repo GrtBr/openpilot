@@ -499,3 +499,20 @@ To enable on device (no rebuild, no reflash):
 Hazard braking stays off until /data/media/0/grt/SmartCruiseControlMapHazardAccel is set to 1.
 
 Tests: 29/29 (12 scc_map + 17 hooks), including both fallback polarities and absent-file.
+
+## 2026-07-29 — mapd port: plannerd must ignore mapdOut in its SubMaster checks
+
+Second latent bug caught on the car, same class as the params one: the fork degrading the base
+system when its own process is absent.
+
+plannerd's SubMaster gained 'mapdOut'. `LongitudinalPlanner.publish()` and plannerd both set
+message .valid from `sm.all_checks()`, and all_checks() = all_alive() and all_freq_ok() and
+all_valid(). mapd only runs when OSM tiles are installed, so on any device without tiles
+mapdOut is never alive -> all_checks() False -> longitudinalPlan marked INVALID -> longitudinal
+control faults. Nothing to do with whether the mapd feature is switched on.
+
+Fix: pass ignore_alive / ignore_valid / ignore_avg_freq = GRT_SUB in plannerd's SubMaster.
+
+Verified empirically on device with mapd stopped:
+  WITHOUT ignores -> all_checks() = False
+  WITH    ignores -> all_checks() = True
