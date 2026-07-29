@@ -726,6 +726,28 @@ the cheaper route is reusing an existing enumerant the Staria can never raise an
 text in the Python `EVENTS` dict — zero schema change. Nothing about part (b) should be built
 until that question is answered on device.
 
+FOLLOW-UP FINDING (local, reduces that risk a lot): the alert the driver actually sees and hears
+does NOT travel as an EventName. `selfdrived.publish_selfdriveState` puts
+`AM.current_alert.alert_text_1` into `selfdriveState.alertText1` (plain Text) and
+`audible_alert` into `selfdriveState.alertSound`, an **existing** `AudibleAlert` enum whose
+`prompt` enumerant already maps to `warning.wav` in `ui/soundd.py`. The UI and soundd consume
+`selfdriveState`, not `onroadEvents`. So the text is free-form and the sound can reuse an
+existing enumerant — **no schema addition is needed for rendering**. An `EventName` is only the
+dict key that selects the Alert inside selfdrived, and that whole path (events.py, selfdrived,
+ui, soundd) is Python on this branch.
+
+THE REAL REMAINING PROBLEM for part (b) is therefore not the alert — it is the CHANNEL. The
+pending state lives in `card`; the alert must be raised in `selfdrived`, which does not
+subscribe to `mapdOut` and must not (it gates engagement — worse blast radius than the
+`longitudinalPlan` invalidation bug). Options, in rough order of preference:
+  1. a fork-owned message on one of the 17 free `CustomReserved0..16` slots (rename in place,
+     struct ID and ordinal unchanged — the pattern already proven wire-neutral for mapd),
+     published by card, subscribed by selfdrived WITH ignore lists;
+  2. move the whole pending state machine into selfdrived and have it drive card — worse, splits
+     ownership of the set speed;
+  3. a file in `/data/media/0/grt` written only on state edges — crude but zero schema risk.
+Pick one deliberately; do not let it default.
+
 Tests: 27/27 set_speed, 18/18 scc_map, 17/17 hooks, 20/20 schema conformance (now covering
 `mapdOut.speedLimit`/`tileLoaded`/`waySelectionType` and `carState.buttonEvents`/`vCruise`/
 `vCruiseCluster`). `cruise.py` untouched, so `test_cruise_speed.py` is unaffected; it needs the
