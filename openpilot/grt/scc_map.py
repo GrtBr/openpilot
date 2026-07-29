@@ -198,7 +198,10 @@ class SmartCruiseControlMap:
     # MPC encodes the right brake authority. Cached for the firm-decel gate below.
     lead1 = sm['radarState'].leadOne
     lead2 = sm['radarState'].leadTwo
-    raw_has_lead = lead1.status or lead2.status
+    # NOTE: openpilot's radarState.LeadData uses `present` ("true if a lead is present").
+    # sunnypilot's schema called this `status`; porting that name verbatim made this raise
+    # AttributeError on EVERY frame on the car. Verified by tests/test_schema_conformance.py.
+    raw_has_lead = lead1.present or lead2.present
     self._has_lead = raw_has_lead
 
     # Lead-past-hazard refinement: a lead already beyond the hazard line (plus margin) is not
@@ -206,9 +209,9 @@ class SmartCruiseControlMap:
     has_lead_for_engage = raw_has_lead
     if raw_has_lead and next_hazard_distance > 0:
       blocking = False
-      if lead1.status and lead1.dRel <= next_hazard_distance + LEAD_PAST_HAZARD_MARGIN_M:
+      if lead1.present and lead1.dRel <= next_hazard_distance + LEAD_PAST_HAZARD_MARGIN_M:
         blocking = True
-      if lead2.status and lead2.dRel <= next_hazard_distance + LEAD_PAST_HAZARD_MARGIN_M:
+      if lead2.present and lead2.dRel <= next_hazard_distance + LEAD_PAST_HAZARD_MARGIN_M:
         blocking = True
       if not blocking:
         has_lead_for_engage = False
@@ -279,8 +282,8 @@ class SmartCruiseControlMap:
       "next_hazard_str": next_hazard_str,
       "next_hazard_speed_target": next_hazard_speed_target,
       "next_hazard_distance": next_hazard_distance,
-      "lead1_d_rel": lead1.dRel if lead1.status else 0.0,
-      "lead2_d_rel": lead2.dRel if lead2.status else 0.0,
+      "lead1_d_rel": lead1.dRel if lead1.present else 0.0,
+      "lead2_d_rel": lead2.dRel if lead2.present else 0.0,
     }
 
   def _update_state_machine(self) -> tuple[bool, bool]:

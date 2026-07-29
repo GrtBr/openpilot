@@ -37,7 +37,8 @@ scc_map=importlib.util.module_from_spec(spec); spec.loader.exec_module(scc_map)
 scc_map._DEBUG_LOG=None  # don't write logs during tests
 
 def SM(curve=0.,sl=0.,hz="",hzd=0.,l1=None,l2=None,nsl=0.,nsld=0.):
-    lead=lambda d:NS(status=(d is not None),dRel=(d or 0.))
+    # field names MUST match the real cereal schema (radarState.LeadData.present)
+    lead=lambda d:NS(present=(d is not None),dRel=(d or 0.))
     return {'mapdOut':NS(mapCurveSpeed=curve,speedLimitSuggestedSpeed=sl,nextHazard=hz,
                          nextHazardDistance=hzd,nextSpeedLimit=nsl,nextSpeedLimitDistance=nsld,
                          suggestedSpeed=99.),

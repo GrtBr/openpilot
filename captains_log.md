@@ -541,3 +541,29 @@ STILL OUTSTANDING - THE ROAD TEST. waySelectionType=fail and roadName empty beca
 stationary (vEgo=0, bearingDeg=0); way selection needs a heading. Nothing more can be proven
 parked. Drive order: (a) known curve, (b) posted speed-limit change, (c) stop sign with no lead
 car. Hand near the wheel, ready to override. Then pull /data/media/0/mapd_debug.log.
+
+## 2026-07-29 — ROOT CAUSE of the failed test drive: radarState lead field name
+
+Test drive: neither speed-limit nor curve slow-downs happened. Root cause found in swaglog.
+
+`scc_map.update_calculations()` did `raw_has_lead = lead1.status or lead2.status`. openpilot's
+`radarState.LeadData` has NO `status` field - it is `present` ("true if a lead is present").
+sunnypilot's schema used `status`, and I ported the line verbatim without checking. Result:
+AttributeError on EVERY frame - 38,300 of them in that drive. hooks.limit_v_cruise caught each
+one and returned v_cruise unchanged, so the feature was a silent, complete no-op. The car drove
+normally throughout, which is the fail-safe design working exactly as intended, but the feature
+never ran. It also explains the missing mapd_debug.log: update_calculations() throws before
+_write_debug() is ever reached.
+
+Fixed .status -> .present in all four places (lead gate, both lead-past-hazard checks, debug log).
+
+THE REAL LESSON - why the tests did not catch it: the unit tests stub cereal with
+SimpleNamespace, and my stub used `status` too. The tests were validating my own assumption, not
+reality, so 29/29 passed while the car raised on every frame. Two fixes:
+  1. the stubs now use `present`, mirroring the real schema;
+  2. new `openpilot/grt/tests/test_schema_conformance.py` loads the ACTUAL log.capnp via pycapnp
+     and asserts all 14 cereal fields the fork reads really exist. Verified it FAILS on `status`
+     (listing the available field names) and passes on `present`. Stubbed tests can no longer
+     drift from the schema silently.
+
+Note dRel was fine - it does exist. Only `status` was wrong.

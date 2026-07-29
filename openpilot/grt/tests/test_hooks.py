@@ -75,7 +75,8 @@ A_CRUISE_MIN = -1.2  # must track longitudinal_planner.A_CRUISE_MIN
 
 
 def SM(curve=0., hz="", hzd=0., l1=None):
-  lead = lambda d: NS(status=(d is not None), dRel=(d or 0.))
+  # field names MUST match the real cereal schema (radarState.LeadData.present)
+  lead = lambda d: NS(present=(d is not None), dRel=(d or 0.))
   return {'mapdOut': NS(mapCurveSpeed=curve, speedLimitSuggestedSpeed=0., nextHazard=hz,
                         nextHazardDistance=hzd, nextSpeedLimit=0.,
                         nextSpeedLimitDistance=0., suggestedSpeed=0.),
