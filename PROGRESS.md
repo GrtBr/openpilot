@@ -27,7 +27,7 @@ Resume rules:
 - **Last action:** Set-speed tracking part (a): `grt/set_speed.py`, hook 3 in card.py, 33 tests. Committed, not deployed.
 - **Next step:** Deploy set-speed tracking to comma4 via git bundle, enable
   `/data/media/0/grt/SmartCruiseControlSetSpeed`, and road-test that the comma UI MAX and the
-  Staria cluster follow posted limits. Instrument: `/data/media/0/grt/set_speed.log` (decisions
+  Staria cluster follow posted limits. **Pick a 100 or 120 km/h zone**: the set speed on this car sits at 105 (ExperimentalMode initial, measured 1,918 frames), so a +/-20 band only reaches [85,125] and urban 60/80 zones will log `ignore`. Instrument: `/data/media/0/grt/set_speed.log` (decisions
   + a 2 s heartbeat naming the rejecting gate). Also compare `carState.cumLagMs` against a
   pre-change segment — card is the 100 Hz CAN loop and now carries an extra subscriber.
 - **Prior next step:** ON-DEVICE BLOCK — requires the Staria powered and SSH-reachable, with the user supervising. Start at Phase -1 (`prebuilt` marker), then deploy, then the Phase 0 gate. **Do NOT auto-run any of it.** Enable `SmartCruiseControlMap` only after Phase 0 passes; leave `SmartCruiseControlMapHazardAccel` OFF until the speed-ceiling behaviour has been driven.

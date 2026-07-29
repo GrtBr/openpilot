@@ -47,6 +47,25 @@ _hazard_accel_enabled: bool | None = None
 _set_speed = None
 _set_speed_broken = False
 
+# Per-hook exception counters. A bug that throws every frame must not also flood swaglog: the
+# `lead.status` incident logged 38,300 exceptions in one drive from a 20 Hz loop, and hook 3
+# runs at 100 Hz in the process that has to hold the CAN deadline. Log the first, then rarely,
+# carrying the running count so nothing is hidden.
+_exc_counts: dict[str, int] = {}
+_EXC_LOG_EVERY = 2000        # 20 s at 100 Hz, 100 s at 20 Hz
+
+
+def _log_exception(tag: str) -> None:
+  n = _exc_counts.get(tag, 0) + 1
+  _exc_counts[tag] = n
+  if n != 1 and n % _EXC_LOG_EVERY != 0:
+    return
+  try:
+    from openpilot.common.swaglog import cloudlog
+    cloudlog.exception(f"grt: {tag} failed (occurrence {n})")
+  except Exception:
+    pass
+
 
 def _scc_singleton():
   """Return the controller, or None if it cannot be built.
@@ -89,8 +108,7 @@ def limit_v_cruise(sm, v_cruise: float, v_ego: float, long_enabled: bool,
     scc.update(sm, long_enabled, long_override, v_ego, a_ego, v_cruise)
   except Exception:
     # Never let the fork's controller take down plannerd.
-    from openpilot.common.swaglog import cloudlog
-    cloudlog.exception("grt: scc_map update failed")
+    _log_exception("scc_map update")
     return v_cruise
 
   target = scc.output_v_target
@@ -135,11 +153,7 @@ def _set_speed_singleton():
       _set_speed = SetSpeedLimitTracker()
     except Exception:
       _set_speed_broken = True
-      try:
-        from openpilot.common.swaglog import cloudlog
-        cloudlog.exception("grt: set_speed unavailable; set-speed tracking disabled")
-      except Exception:
-        pass
+      _log_exception("set_speed construction; set-speed tracking disabled")
       return None
   return _set_speed
 
@@ -152,8 +166,18 @@ def track_set_speed(sm, CS, v_cruise_helper, enabled: bool) -> None:
   non-pcm path (cruise.py sets cluster = kph inside `update_v_cruise`), and we run after that,
   so setting only one would make the cluster and the planner disagree.
 
-  No-op on any failure — this must never be able to break the car daemon.
+  No-op on any failure — this must never be able to break the car daemon. `card` publishes
+  carState; if it dies, everything downstream dies with it.
   """
+  try:
+    # PCM cars read the set speed off CAN every frame, so an adopted value would be overwritten
+    # immediately and flap. The Staria is pcmCruise=False (verified), but card.py is shared by
+    # every car and this hook has to survive a rebase.
+    if v_cruise_helper.CP.pcmCruise:
+      return
+  except Exception:
+    return
+
   tracker = _set_speed_singleton()
   if tracker is None:
     return
@@ -164,5 +188,4 @@ def track_set_speed(sm, CS, v_cruise_helper, enabled: bool) -> None:
       v_cruise_helper.v_cruise_kph = new_v_cruise
       v_cruise_helper.v_cruise_cluster_kph = new_v_cruise
   except Exception:
-    from openpilot.common.swaglog import cloudlog
-    cloudlog.exception("grt: set_speed update failed")
+    _log_exception("set_speed update")

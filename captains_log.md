@@ -741,6 +741,23 @@ AFTER DEPLOY, one free check: card is the 100 Hz realtime CAN loop and now carri
 subscriber. `carState.cumLagMs` IS in rlog — compare a post-change segment against a pre-change
 one. plannerd's precedent does not cover this risk.
 
+HOW OFTEN WILL IT ACTUALLY FIRE? Measured, not guessed. `ExperimentalMode=1` on the device, so
+`V_CRUISE_INITIAL_EXPERIMENTAL_MODE = 105` is the set speed at engage — and from
+`mapd_debug.log`, while moving the set speed was **105 km/h for 1,918 frames and 145 for 26**.
+The driver essentially never changes it. With a ±20 band off 105 that adopts limits in
+**[85, 125]**: 100 and 120 zones fire, 80 and 60 zones do not.
+
+Drive 3 was urban (max 66 km/h, mean 35 while moving), so on the roads actually driven,
+**part (a) alone will mostly log `ignore` and do nothing.** It is not inert in principle — the
+band applies to the CURRENT set speed, so a route that steps down gradually ratchets:
+105 → 100 (adopt) → 80 (adopt) → 60 (adopt). But a direct 105-to-60 transition is out of band.
+
+Two consequences: (1) design the first road test around a 100 or 120 zone, or a route with
+graduated limits, otherwise "nothing happened" is the expected result and proves nothing;
+(2) part (b) is the MAJORITY case on this car's roads, not an edge case — which raises its
+priority above where the original design put it. Widening the band is the alternative, but that
+trades away exactly the confirmation step the >20 rule exists to provide.
+
 WHAT IS DELIBERATELY NOT SHIPPED — part (b), the pending/confirm alert. The state machine and
 its tests exist and pass, but `PENDING_ENABLED = False`. A pending limit the driver cannot
 perceive is worse than not offering one, and the alert needs an event that this PREBUILT branch

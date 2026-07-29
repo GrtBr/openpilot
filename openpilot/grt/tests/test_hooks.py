@@ -48,8 +48,16 @@ class FakeParams:
 _stub("openpilot.cereal.messaging", SubMaster=object)
 _stub("openpilot.common.constants", CV=NS(KPH_TO_MS=1 / 3.6))
 _stub("openpilot.common.params", Params=FakeParams)
-_stub("openpilot.common.realtime", DT_MDL=0.05)
-_stub("openpilot.selfdrive.car.cruise", V_CRUISE_UNSET=255.0)
+_stub("openpilot.common.realtime", DT_MDL=0.05, DT_CTRL=0.01)
+
+
+class ButtonType:
+  accelCruise = 1
+  decelCruise = 2
+
+
+_stub("openpilot.selfdrive.car.cruise", V_CRUISE_UNSET=255.0, V_CRUISE_MIN=8, V_CRUISE_MAX=145,
+      ButtonType=ButtonType)
 _stub("openpilot.common.swaglog", cloudlog=NS(exception=lambda *a, **k: None))
 _stub("openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc",
       LongitudinalPlanSource=NS(cruise="cruise"))
@@ -67,8 +75,11 @@ def _load(name, path):
   return mod
 
 
+_load("openpilot.grt.registry", str(GRT / "registry.py"))
 scc = _load("openpilot.grt.scc_map", str(GRT / "scc_map.py"))
 scc._DEBUG_LOG = None
+ss = _load("openpilot.grt.set_speed", str(GRT / "set_speed.py"))
+ss._DEBUG_LOG = None
 hooks = _load("openpilot.grt.hooks", str(GRT / "hooks.py"))
 
 A_CRUISE_MIN = -1.2  # must track longitudinal_planner.A_CRUISE_MIN
@@ -96,6 +107,93 @@ def settle(sm, frames=5, v_cruise=30., v_ego=15.):
   for _ in range(frames):
     out = hooks.limit_v_cruise(sm, v_cruise, v_ego, True, False, 0.)
   return out
+
+
+class FakeHelper:
+  """Stand-in for VCruiseHelper — only what hook 3 touches."""
+
+  def __init__(self, v_cruise=80.0, pcm=False):
+    self.CP = NS(pcmCruise=pcm)
+    self.v_cruise_kph = v_cruise
+    self.v_cruise_cluster_kph = v_cruise
+
+
+class SM3:
+  """Minimal SubMaster carrying only mapdOut, with the real field names."""
+
+  def __init__(self, limit_kph=60.0, way="current", alive=True):
+    self.msg = NS(speedLimit=limit_kph / 3.6, tileLoaded=True, waySelectionType=way)
+    self.alive = {'mapdOut': alive}
+    self.valid = {'mapdOut': True}
+
+  def __getitem__(self, k):
+    return self.msg
+
+
+def _reset_hook3():
+  hooks._set_speed = None
+  hooks._set_speed_broken = False
+  hooks._exc_counts.clear()
+
+
+def test_hook3():
+  """Hook 3 runs in `card`, which publishes carState — if it dies, everything downstream dies.
+  Same guarantees as hooks 1/2, asserted on the shim rather than on the tracker."""
+  saved = dict(FakeParams.vals)
+  FakeParams.vals["SmartCruiseControlSetSpeed"] = True
+  CS = NS(buttonEvents=[])
+
+  # adoption writes BOTH fields — the one property the tracker's own tests cannot see
+  _reset_hook3()
+  h = FakeHelper(80.0)
+  sm = SM3(60.0)
+  for _ in range(int(ss.LIMIT_STABLE_S / 0.01) + 2):
+    hooks.track_set_speed(sm, CS, h, True)
+  check("hook3 adopts and writes v_cruise_kph AND v_cruise_cluster_kph",
+        h.v_cruise_kph == 60.0 and h.v_cruise_cluster_kph == 60.0)
+
+  # no decision -> neither field touched
+  _reset_hook3()
+  h = FakeHelper(80.0)
+  hooks.track_set_speed(SM3(60.0), CS, h, True)
+  check("hook3 leaves both fields alone when there is no decision",
+        h.v_cruise_kph == 80.0 and h.v_cruise_cluster_kph == 80.0)
+
+  # a raising tracker must not propagate into card
+  _reset_hook3()
+  hooks._set_speed = NS(update=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+  h = FakeHelper(80.0)
+  hooks.track_set_speed(SM3(60.0), CS, h, True)
+  check("hook3 swallows a tracker exception (card must never die)",
+        h.v_cruise_kph == 80.0 and h.v_cruise_cluster_kph == 80.0)
+  check("hook3 counts the exception instead of logging every frame",
+        hooks._exc_counts.get("set_speed update") == 1)
+  for _ in range(50):
+    hooks.track_set_speed(SM3(60.0), CS, h, True)
+  check("hook3 exception logging is rate-limited (38,300-in-one-drive lesson)",
+        hooks._exc_counts["set_speed update"] == 51)
+
+  # hard construction failure must latch, exactly like hooks 1/2
+  _reset_hook3()
+  orig = ss.SetSpeedLimitTracker
+  ss.SetSpeedLimitTracker = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+  h = FakeHelper(80.0)
+  hooks.track_set_speed(SM3(60.0), CS, h, True)
+  check("hook3 hard construction failure -> no-op, no raise", h.v_cruise_kph == 80.0)
+  check("hook3 construction failure is latched (not retried every frame)",
+        hooks._set_speed_broken is True)
+  ss.SetSpeedLimitTracker = orig
+
+  # PCM cars read the set speed off CAN; adopting there would flap
+  _reset_hook3()
+  h = FakeHelper(80.0, pcm=True)
+  for _ in range(int(ss.LIMIT_STABLE_S / 0.01) + 2):
+    hooks.track_set_speed(SM3(60.0), CS, h, True)
+  check("hook3 is inert on a pcmCruise car", h.v_cruise_kph == 80.0)
+
+  _reset_hook3()
+  FakeParams.vals.clear()
+  FakeParams.vals.update(saved)
 
 
 def main():
@@ -178,6 +276,8 @@ def main():
       f.write("0\n")
     check("file fallback: '0' -> False", get_bool_safe(FakeParams(), "SmartCruiseControlMap") is False)
   FakeParams.vals.update(saved)
+
+  test_hook3()
 
   print(f"\n{sum(results)}/{len(results)} passed")
   return 0 if all(results) else 1
