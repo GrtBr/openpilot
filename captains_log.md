@@ -660,7 +660,80 @@ right at the sign. APPROACH_DECEL stays at 0.5; do not touch it without new evid
 (My episode detector found 0 episodes this drive because it keyed off a large speed error at the
 FIRST frame, which the profile no longer produces. The binding-frames metric replaces it.)
 
-## NEXT FEATURE (designed, NOT implemented): set speed tracks the speed limit
+## 2026-07-29 — set speed tracks the posted limit: adoption core IMPLEMENTED (part a)
+
+Implemented the auto-adopt half of the feature designed below. **Part (b), the >20 km/h
+PENDING + RES/+ confirmation, is coded but shipped DISABLED** — see "what is deliberately not
+shipped" at the end.
+
+New (fork-owned): `openpilot/grt/set_speed.py` — `SetSpeedLimitTracker`, plus
+`grt/tests/test_set_speed.py` (27 tests).
+
+Upstream hook (category C, sentinel-wrapped) — `selfdrive/car/card.py`, +12 lines:
+- `SubMaster` gains `mapdOut` via `GRT_SUB_CARD`, **with `ignore_alive`/`ignore_valid`/
+  `ignore_avg_freq`**, exactly as plannerd needed. card's own checks are scoped to
+  `all_checks(['carControl'])` / `all_alive(['carControl'])`, verified, so `mapdOut` cannot
+  invalidate `carOutput` — the ignores are belt-and-braces for the same bug class.
+- One line `grt_hooks.track_set_speed(...)` after `initialize_v_cruise` and before the
+  `CS.vCruise` assignment.
+
+DEVIATION FROM THE DESIGN BELOW, deliberate: the design said "ONE sentinel-wrapped line in
+cruise.py's non-pcm path". The hook is in card.py instead. `VCruiseHelper.update_v_cruise` has
+no access to a SubMaster, and `selfdrive/car/tests/test_cruise_speed.py` calls
+`update_v_cruise(CS, enabled, is_metric)` directly in five places — changing that signature
+would break an upstream test suite. card.py already owns both the helper and a SubMaster, so
+`cruise.py` is now untouched by the fork.
+
+BEHAVIOUR (what actually ships):
+- Edge-triggered on a CHANGE of `mapdOut.speedLimit`, never continuous. One decision per limit
+  VALUE. A driver who overrides an adopted speed is never overridden back.
+- |new limit − set speed| ≤ 20 km/h → adopt automatically, up AND down. Writes BOTH
+  `v_cruise_kph` and `v_cruise_cluster_kph` (upstream keeps them equal in the non-pcm path and
+  we run after it), so the comma UI MAX and the Staria cluster both follow.
+- |difference| > 20 km/h → currently IGNORED, logged as `ignore`.
+- Gates: feature flag on, openpilot engaged, set speed initialised, `mapdOut` alive+valid,
+  `tileLoaded`, `waySelectionType` ∈ {current, predicted, extended} (parked reports `fail`),
+  limit stable for 1.0 s, limit within [20, 145] km/h, and no cruise-button activity that frame.
+- Result clamped to upstream's `[V_CRUISE_MIN, V_CRUISE_MAX]`.
+
+Two design points worth keeping:
+- The [20, 145] km/h band REJECTS rather than clamps. Clamping would launder a garbage value
+  into a legal set speed, and the band doubles as a units-error trap: mapd publishes m/s, so a
+  km/h value leaking through reads ~3.6× high and gets rejected. Confirmed with pycapnp that
+  `speedLimit` 16.667 → 60 km/h and that `str(waySelectionType)` yields the enumerant name.
+- Confirmation/adoption acts on button RELEASE, the same edge upstream's `+1` bump uses. Our
+  hook runs after it and assigns an absolute value, so the adopted limit wins cleanly instead
+  of landing on limit+1. Staria RES/+ → `ButtonType.accelCruise`, verified statically in
+  `opendbc/car/hyundai/carstate.py` `BUTTONS_DICT`, not assumed.
+
+Enable on device (no rebuild): `echo 1 > /data/media/0/grt/SmartCruiseControlSetSpeed`.
+Default OFF, and separate from `SmartCruiseControlMap` because this is the first fork feature
+that can ACCELERATE the car on OSM data.
+
+Instrumentation: `/data/media/0/grt/set_speed.log`, one line per DECISION (this is a 100 Hz
+loop — per-frame logging is not an option). Unlike the mapd controller, the OUTCOME here is
+retrospectively analysable: `carState.vCruise` / `vCruiseCluster` are in rlog.
+
+WHAT IS DELIBERATELY NOT SHIPPED — part (b), the pending/confirm alert. The state machine and
+its tests exist and pass, but `PENDING_ENABLED = False`. A pending limit the driver cannot
+perceive is worse than not offering one, and the alert needs an event that this PREBUILT branch
+can actually render. Adding an `EventName` enumerant is NOT the same claim as the in-place
+struct renames we proved wire-neutral — those kept struct IDs and ordinals; a new enumerant is
+a genuine schema addition on a device whose compiled artefacts are frozen. The discriminating
+check, to run on the car before building anything: **can a Python-published `onroadEvent`
+carrying an EventName the compiled side does not know about reach the UI and soundd?** If not,
+the cheaper route is reusing an existing enumerant the Staria can never raise and overriding its
+text in the Python `EVENTS` dict — zero schema change. Nothing about part (b) should be built
+until that question is answered on device.
+
+Tests: 27/27 set_speed, 18/18 scc_map, 17/17 hooks, 20/20 schema conformance (now covering
+`mapdOut.speedLimit`/`tileLoaded`/`waySelectionType` and `carState.buttonEvents`/`vCruise`/
+`vCruiseCluster`). `cruise.py` untouched, so `test_cruise_speed.py` is unaffected; it needs the
+full openpilot venv and was not run on the Pi5.
+
+NOT YET ON THE CAR. Deploy + road test outstanding.
+
+## FEATURE DESIGN (part a now implemented above): set speed tracks the speed limit
 
 User asked for the comma 4 "MAX" and the Staria cluster to follow posted limits. Today we only
 lower v_cruise INSIDE longitudinal_planner - a local planning variable that never reaches

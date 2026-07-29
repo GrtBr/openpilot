@@ -20,6 +20,8 @@ from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
+from openpilot.grt import hooks as grt_hooks  # GRT-MOD
+from openpilot.grt.registry import GRT_SUB_CARD  # GRT-MOD
 
 REPLAY = "REPLAY" in os.environ
 
@@ -65,7 +67,12 @@ class Car:
 
   def __init__(self, CI=None, RI=None) -> None:
     self.can_sock = messaging.sub_sock('can', timeout=20)
-    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'])
+    # GRT-MOD-START: mapdOut for the set-speed tracker. Ignores are mandatory — mapd only runs
+    # when OSM tiles are installed (see GRT_MODS.md / plannerd).
+    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'] + GRT_SUB_CARD,
+                                  ignore_alive=GRT_SUB_CARD, ignore_valid=GRT_SUB_CARD,
+                                  ignore_avg_freq=GRT_SUB_CARD)
+    # GRT-MOD-END
     self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'liveTracks'])
 
     self.can_rcv_cum_timeout_counter = 0
@@ -184,6 +191,11 @@ class Car:
     if self.sm['carControl'].enabled and not self.CC_prev.enabled:
       # Use CarState w/ buttons from the step selfdrived enables on
       self.v_cruise_helper.initialize_v_cruise(self.CS_prev, self.experimental_mode)
+
+    # GRT-MOD-START: set speed follows the posted limit. Must stay AFTER initialize_v_cruise
+    # (which resets v_cruise on the engage edge) and BEFORE the CS.vCruise assignment below.
+    grt_hooks.track_set_speed(self.sm, CS, self.v_cruise_helper, self.sm['carControl'].enabled)
+    # GRT-MOD-END
 
     # TODO: mirror the carState.cruiseState struct?
     CS.vCruise = float(self.v_cruise_helper.v_cruise_kph)

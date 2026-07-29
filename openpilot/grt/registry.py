@@ -39,6 +39,13 @@ MAPD_BINARY_RELPATH = "third_party/mapd/mapd"
 # Services spliced into plannerd's SubMaster. Never add modelV2-sized (BIG) services here.
 GRT_SUB: list[str] = ["mapdOut"]
 
+# Services spliced into card's SubMaster, for the set-speed tracker (grt/set_speed.py).
+# Separate name from GRT_SUB so the two consumers can diverge without a silent surprise.
+# card's own health checks are scoped (`all_checks(['carControl'])`), so this cannot mark
+# carOutput invalid — but the ignore lists are still passed, for the same reason as plannerd:
+# mapd only runs when OSM tiles exist, and a fork service must never fail a base-system check.
+GRT_SUB_CARD: list[str] = ["mapdOut"]
+
 # Processes that should not raise the processNotRunning safety event when absent.
 # mapd is not a normal openpilot process: it is a standalone Go binary that only runs when
 # the tile directory exists.

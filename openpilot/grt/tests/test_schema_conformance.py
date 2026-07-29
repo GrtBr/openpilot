@@ -23,7 +23,7 @@ REPO = pathlib.Path(__file__).resolve().parents[3]
 CEREAL = REPO / "openpilot" / "cereal"
 
 # Every cereal field openpilot/grt reads, as (message, dotted path).
-# Keep this in sync with scc_map.update_calculations().
+# Keep this in sync with scc_map.update_calculations() and set_speed.SetSpeedLimitTracker.
 REQUIRED = [
   ("mapdOut", "mapCurveSpeed"),
   ("mapdOut", "speedLimitSuggestedSpeed"),
@@ -39,6 +39,13 @@ REQUIRED = [
   ("carState", "vEgo"),
   ("carControl", "enabled"),
   ("carControl", "cruiseControl.override"),
+  # set_speed.py (hook 3, runs in card)
+  ("mapdOut", "speedLimit"),
+  ("mapdOut", "tileLoaded"),
+  ("mapdOut", "waySelectionType"),
+  ("carState", "buttonEvents"),
+  ("carState", "vCruise"),
+  ("carState", "vCruiseCluster"),
 ]
 
 

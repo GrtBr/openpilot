@@ -31,12 +31,21 @@ ACCEL_MIN downstream.
 
 Hook 2 is gated behind its own param (`SmartCruiseControlMapHazardAccel`, default off) so it
 can be enabled separately during on-car testing, per the phased rollout.
+
+  hook 3  `track_set_speed()`          — a DIFFERENT process (card, 100 Hz) and a different
+                                        variable: it moves the driver-facing set speed
+                                        (`VCruiseHelper.v_cruise_kph`) to follow the posted
+                                        limit. See grt/set_speed.py. Hooks 1/2 shape how the
+                                        car drives; hook 3 changes what the driver reads.
 """
 from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 
 _scc = None
 _scc_broken = False          # set if the controller cannot even be constructed
 _hazard_accel_enabled: bool | None = None
+
+_set_speed = None
+_set_speed_broken = False
 
 
 def _scc_singleton():
@@ -113,3 +122,47 @@ def extra_accel_candidates(v_ego: float) -> list:
   from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalPlanSource
   from openpilot.selfdrive.controls.lib.drive_helpers import should_stop
   return [(float(a), LongitudinalPlanSource.cruise, should_stop(v_ego, float(a)))]
+
+
+def _set_speed_singleton():
+  """Return the set-speed tracker, or None if it cannot be built (latched, as above)."""
+  global _set_speed, _set_speed_broken
+  if _set_speed_broken:
+    return None
+  if _set_speed is None:
+    try:
+      from openpilot.grt.set_speed import SetSpeedLimitTracker
+      _set_speed = SetSpeedLimitTracker()
+    except Exception:
+      _set_speed_broken = True
+      try:
+        from openpilot.common.swaglog import cloudlog
+        cloudlog.exception("grt: set_speed unavailable; set-speed tracking disabled")
+      except Exception:
+        pass
+      return None
+  return _set_speed
+
+
+def track_set_speed(sm, CS, v_cruise_helper, enabled: bool) -> None:
+  """Hook 3. Runs in `card`, after `update_v_cruise`/`initialize_v_cruise` and before the
+  `CS.vCruise` assignment, so an adopted limit is what gets published for this frame.
+
+  Writes BOTH `v_cruise_kph` and `v_cruise_cluster_kph`: upstream keeps them equal in the
+  non-pcm path (cruise.py sets cluster = kph inside `update_v_cruise`), and we run after that,
+  so setting only one would make the cluster and the planner disagree.
+
+  No-op on any failure — this must never be able to break the car daemon.
+  """
+  tracker = _set_speed_singleton()
+  if tracker is None:
+    return
+  try:
+    v_cruise = float(v_cruise_helper.v_cruise_kph)
+    new_v_cruise = tracker.update(sm, CS, v_cruise, enabled)
+    if new_v_cruise != v_cruise:
+      v_cruise_helper.v_cruise_kph = new_v_cruise
+      v_cruise_helper.v_cruise_cluster_kph = new_v_cruise
+  except Exception:
+    from openpilot.common.swaglog import cloudlog
+    cloudlog.exception("grt: set_speed update failed")
