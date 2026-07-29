@@ -16,7 +16,7 @@ Resume rules:
 
 ## STATE
 
-- **Status:** SET-SPEED TRACKING **COMPLETE (parts a AND b), NOT YET DEPLOYED.** Engage seeds
+- **Status:** SET-SPEED TRACKING **DEPLOYED TO comma4 AND ENABLED** (device on `dc6e2b5`, AGNOS 18.7, healthy, engagement verified unblocked). **ROAD TEST OUTSTANDING** — the confirmation ALERT could not be verified parked (it only fires engaged), so first drive must confirm the text + chime appear. Feature complete (parts a AND b). Engage seeds
   the set speed from the posted limit (60 if no map data); a later change auto-adopts only if
   the feature owns the set speed AND that speed is a multiple of 10 AND |Δ| ≤ 20; otherwise a
   10 s RES/+ confirmation prompt. Alert needs NO schema addition (plain `Alert` +
@@ -36,10 +36,11 @@ Resume rules:
      heartbeat naming the rejecting gate). Also compare `carState.cumLagMs` against a
      pre-change segment — card is the 100 Hz CAN loop and now carries a subscriber AND a
      publisher.
-### DEPLOY RUNBOOK — set-speed tracking (staged 2026-07-29, NOT yet run: device offline)
+### DEPLOY RUNBOOK — set-speed tracking (RUN SUCCESSFULLY 2026-07-29; kept for reuse)
 
-Attempted 2026-07-29 ~16:05; comma4 had gone offline ("No route to host", 100% packet loss)
-about 25 min after being reachable — car powered down while parked. Nothing was transferred.
+First attempt at ~16:05 found comma4 offline (car powered down while parked); it returned a
+few minutes later and the deploy completed. Device went cbe0818 -> dc6e2b5, clean fast-forward,
+back up in ~120 s. See captains_log for the full verification record.
 
 Rebuild the bundle (it is in a session scratchpad and may be gone):
 

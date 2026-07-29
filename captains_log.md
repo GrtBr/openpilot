@@ -660,6 +660,54 @@ right at the sign. APPROACH_DECEL stays at 0.5; do not touch it without new evid
 (My episode detector found 0 episodes this drive because it keyed off a large speed error at the
 FIRST frame, which the profile no longer produces. The binding-frames metric replaces it.)
 
+## 2026-07-29 — set-speed tracking DEPLOYED to comma4 and ENABLED
+
+Device is on `dc6e2b5`, AGNOS 18.7, clean tree, feature ON. No reboot loop, no errors.
+
+Sequence: git bundle `dcb3550cac..nightly-dev` (5.8 MB) → scp → `pkill -f "[m]anager\.py"` →
+`git fetch <bundle> && git merge --ff-only` → reboot. Device was 8 commits behind at `cbe0818`;
+fast-forward was clean, 16 files / +2044 −352. No scons, no cereal SCP. Bundle deleted after.
+
+Device came back in ~120 s. AGNOS_VERSION 18.7 == /VERSION 18.7, so no OS update was triggered
+this time (unlike the Jul 28 deploy).
+
+**Verified ON DEVICE, before the reboot:**
+- `test_schema_conformance.py` against the device's own log.capnp: **25/25**, including the four
+  wire discriminants — mapdExtendedOut/mapdIn/mapdOut still **141/142/143**, so renaming
+  `customReserved16` did not move mapd's slots. `grtSetSpeedState` = 140.
+- Real imports with the actual openpilot deps (not the test stubs — the class of check the
+  `.status` bug proved is necessary): `grt.hooks`, `grt.set_speed`, `grt.registry` all import,
+  `grtSetSpeedState` is in `SERVICE_LIST`, `messaging.new_message('grtSetSpeedState')` builds,
+  and `SetSpeedLimitTracker()` constructs reporting `enabled = False` (flag absent = safe
+  default).
+
+**Verified AFTER the reboot:**
+- manager, card, plannerd, controlsd, selfdrived, modeld and mapd all up; managerState reports
+  **nothing shouldBeRunning-but-not-running**; 0 Traceback/CRITICAL in the newest swaglog.
+- `msgq_grtSetSpeedState` exists and `grtSetSpeedState` arrives at exactly **20 Hz** (240 msgs
+  in 12 s) — card's `frame % 5` publish is behaving.
+- **THE CRITICAL ONE — engagement is not blocked.** `onroadEvents` carries only `wrongGear` and
+  `seatbeltNotLatched`, i.e. the legitimate physical blockers for a parked car. **No
+  `commIssue`, no `commIssueAvgFreq`** — so adding `grtSetSpeedState` to selfdrived's SubMaster
+  did not trip its unscoped `all_checks()` at `:381`/`:469`. That was the single highest-risk
+  edit in this change and it is clean.
+- `carState.vCruise` 255 (UNSET, not engaged); `grtSetSpeedState` pending=False tracking=False.
+
+Then enabled: `echo 1 > /data/media/0/grt/SmartCruiseControlSetSpeed`, confirmed the tracker
+reads `enabled = True`. No restart needed — `update_params()` re-reads every 3 s.
+
+**WHAT COULD NOT BE VERIFIED PARKED, and must be watched on the first drive:**
+1. **Does the alert actually render?** The prompt only fires while ENGAGED, and `ET.WARNING`
+   alerts are cleared when the state machine is not in a warning-capable state — so a parked
+   car cannot show one. The failure mode is benign (no visible prompt → no confirmation → the
+   set speed simply does not change), but it would make every out-of-band limit change a silent
+   no-op. **Watch for the text "Speed limit N km/h / Press RES/+ to accept" plus a chime.**
+2. The set speed at engage being the posted limit (or 60) rather than 105.
+3. `carState.cumLagMs` vs a pre-change segment — card now carries a subscriber AND a publisher.
+
+Disable at any time with `rm /data/media/0/grt/SmartCruiseControlSetSpeed` (takes effect within
+3 s, no restart). The device is one docs-only commit behind the Pi5 (`08aedfa`, PROGRESS.md).
+
 ## 2026-07-29 — set-speed tracking REDESIGNED to the user's spec, and part (b) BUILT
 
 The user replaced the ±20-only design below after seeing the measurement that the set speed
