@@ -91,7 +91,10 @@ def _load(name, path):
   return mod
 
 
-_load("openpilot.grt.registry", str(GRT / "registry.py"))
+_reg0 = _load("openpilot.grt.registry", str(GRT / "registry.py"))
+# See test_set_speed.py: isolate from the device's real /data/media/0/grt flag files.
+import tempfile as _tf  # noqa: E402
+_reg0.GRT_CONFIG_DIR = _tf.mkdtemp(prefix="grt-test-")
 scc = _load("openpilot.grt.scc_map", str(GRT / "scc_map.py"))
 scc._DEBUG_LOG = None
 ss = _load("openpilot.grt.set_speed", str(GRT / "set_speed.py"))

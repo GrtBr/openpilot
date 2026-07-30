@@ -77,7 +77,13 @@ def _load(name, path):
   return mod
 
 
-_load("openpilot.grt.registry", str(GRT / "registry.py"))
+_reg = _load("openpilot.grt.registry", str(GRT / "registry.py"))
+# Point the fork config dir at an empty temp dir. get_bool_safe() falls back to a FILE under
+# GRT_CONFIG_DIR when Params raises, and on the device that directory holds the live feature
+# flags — so without this the suite reads production config and "unregistered param" tests see
+# an ENABLED feature. Found by running these tests on the car, not on the dev box.
+import tempfile as _tf  # noqa: E402
+_reg.GRT_CONFIG_DIR = _tf.mkdtemp(prefix="grt-test-")
 _load("openpilot.grt.scc_map", str(GRT / "scc_map.py"))
 ss = _load("openpilot.grt.set_speed", str(GRT / "set_speed.py"))
 
