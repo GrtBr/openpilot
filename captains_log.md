@@ -660,6 +660,66 @@ right at the sign. APPROACH_DECEL stays at 0.5; do not touch it without new evid
 (My episode detector found 0 episodes this drive because it keyed off a large speed error at the
 FIRST frame, which the profile no longer produces. The binding-frames metric replaces it.)
 
+## 2026-07-30 — ramp restored when no confirmation is needed + gentle coast-down to set speed
+
+Operator review of the authorisation gate, two requirements.
+
+### 1. The pre-sign ramp must be ON whenever confirmation is not required
+
+The gate had switched the approach ramp off wholesale, because an UPCOMING limit cannot be
+authorised before it becomes current. Correct observation from the operator: when the auto rules
+already say no confirmation is needed, there is nothing to wait for.
+
+`set_speed` now PRE-AUTHORISES an upcoming limit that passes the **same three rules** as a normal
+auto-adopt (feature owns the set speed AND it is a multiple of 10 AND |Δ| ≤ 20), and `scc_map`
+lets the ramp shape the run-up at `APPROACH_DECEL = 0.5 m/s²` again. A change that WOULD prompt
+is still not pre-authorised, so the confirmation flow is untouched.
+
+**Published in its own field, `authorisedNextLimit`, deliberately NOT reusing `authorisedLimit`.**
+That separation is the entire point: if the CEILING saw the upcoming value, the target would drop
+to the new limit while the sign was still hundreds of metres away — exactly the harsh step the
+ramp exists to prevent. There is a test asserting the pre-authorised value is not used as a
+ceiling.
+
+### 2. Gentle coast-down to the set speed (hook 5, new)
+
+Operator's example: driving 110 to overtake with cruise set to 100, lift off the throttle, and
+the car should ease back to 100 rather than braking hard. Stock clips `a_cruise` at
+`A_CRUISE_MIN = -1.2 m/s²`, and a 10 km/h error saturates it, so it braked at the full −1.2.
+
+`COAST_DECEL = 0.5` raises that floor for PLAIN overspeed only. One line in
+`longitudinal_planner`, right after `get_cruise_accel`.
+
+**Why this cannot make the car less able to stop** (each asserted by test):
+- it only ever RAISES `a_cruise`, and `a_cruise` is one candidate in the planner's `min()` — with
+  a lead the MPC candidate is harder and wins; with a hazard, hook 2's candidate wins. So it can
+  only bind when the cruise branch is the sole reason for braking, i.e. plain overspeed on a
+  clear road;
+- skipped entirely when hook 1 lowered `v_cruise`, so the map approach profile keeps full
+  authority and its late-hazard self-escalation still works;
+- skipped when `v_cruise ≈ 0`, which is how `forceDecel` demands a stop.
+
+`COAST_DECEL = 1.2` restores stock behaviour exactly. Trade-off worth knowing: the car now spends
+longer above its set speed after an overtake.
+
+### One spec ambiguity resolved by precedent, not by asking again
+
+The operator's parenthetical read "auto change if <=20 km/h **OR** cruise set speed is a factor
+of 10". The earlier explicit statement was AND — *"auto-adopt only changes within ±20 km/h if set
+max speed is a factor of 10"* — and AND is what is implemented. OR would let a hand-tuned 103 be
+overwritten silently, which rule 2a exists to prevent. Flagged rather than silently chosen.
+
+Tests: 31 scc_map, 44 hooks, 59 set_speed, 29/29 schema conformance. **NOT YET DEPLOYED.**
+
+### Device note
+
+The `micd`/`soundd` processes were down after the deploy reboot, raising `processNotRunning`
+(which is `ET.NO_ENTRY` and blocks engagement). The operator rebooted and it cleared — a boot-time
+audio-init transient, not caused by the fork (neither file is touched by it). **Correction to what
+I said at the time:** I claimed the qlog proved this pre-existed the deploy, but the route I
+checked (`00000043`) was created at 08:50, *after* the 08:48 reboot — so it proved nothing. The
+claim was unsupported; the reboot resolved it either way.
+
 ## 2026-07-30 — drive 2 of set-speed: two issues root-caused from the logs and FIXED (not deployed)
 
 **The alert DOES render** — the operator saw the confirmation box, which closes the one open
