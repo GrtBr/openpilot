@@ -101,12 +101,17 @@ class FakeSM:
   """Minimal SubMaster: mapdOut only, with the real field names."""
 
   def __init__(self, speed_limit_kph=0.0, tile_loaded=True, way="current", alive=True):
-    self.msg = NS(speedLimit=speed_limit_kph / 3.6, tileLoaded=tile_loaded, waySelectionType=way)
+    self.msg = NS(speedLimit=speed_limit_kph / 3.6, tileLoaded=tile_loaded, waySelectionType=way,
+                  nextSpeedLimit=0.0, nextSpeedLimitDistance=0.0)
     self.alive = {'mapdOut': alive}
     self.valid = {'mapdOut': True}
 
   def set_limit(self, kph):
     self.msg.speedLimit = kph / 3.6
+
+  def set_next(self, kph, dist_m=200.0):
+    self.msg.nextSpeedLimit = kph / 3.6
+    self.msg.nextSpeedLimitDistance = dist_m
 
   def __getitem__(self, k):
     assert k == 'mapdOut'
@@ -346,6 +351,40 @@ def test_upward_prompt_is_confirmed_with_res():
   out2 = run(t2, sm2, 60.0, STABLE + 2)
   out2 = t2.update(sm2, fake_cs([button(ButtonType.accelCruise)]), out2, True)
   check("...and confirmed by RES/+", out2 == 120.0, f"got {out2}")
+
+
+def test_upcoming_limit_preauthorised_when_it_would_auto_adopt():
+  """Operator, 2026-07-30: the pre-sign ramp must be ON whenever no confirmation is needed, so
+  the run-up is shaped at APPROACH_DECEL instead of stepping at the sign."""
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)                   # tracking, set speed 100 (round)
+  sm.set_next(80.0, 250.0)                   # -20: inside the band -> would auto-adopt
+  run(t, sm, 100.0, 5)
+  check("an upcoming in-band limit is PRE-AUTHORISED for the ramp",
+        t.authorised_next_limit_kph == 80.0, str(t.authorised_next_limit_kph))
+  check("...and the CEILING authorisation is untouched (still the current limit)",
+        t.authorised_limit_kph == 100.0, str(t.authorised_limit_kph))
+
+
+def test_upcoming_limit_not_preauthorised_when_it_would_prompt():
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  sm.set_next(60.0, 250.0)                   # -40: out of band -> needs confirmation
+  run(t, sm, 100.0, 5)
+  check("an out-of-band upcoming limit is NOT pre-authorised",
+        t.authorised_next_limit_kph == 0.0, str(t.authorised_next_limit_kph))
+
+
+def test_no_preauthorisation_when_driver_owns_set_speed():
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  sm.set_next(90.0, 250.0)                   # in band, but the driver owns a non-round 103
+  run(t, sm, 103.0, 5)
+  check("no pre-authorisation while the driver owns the set speed",
+        t.authorised_next_limit_kph == 0.0, str(t.authorised_next_limit_kph))
 
 
 def test_pending_expires():

@@ -47,6 +47,12 @@ _hazard_accel_enabled: bool | None = None
 _set_speed = None
 _set_speed_broken = False
 
+# Set by limit_v_cruise() each frame: True when the mapd controller actually LOWERED v_cruise
+# (curve / speed limit / hazard). soften_cruise_decel() must not soften in that case — the
+# approach profile relies on being able to escalate to full braking authority if a hazard shows
+# up late.
+_v_cruise_lowered = False
+
 # Per-hook exception counters. A bug that throws every frame must not also flood swaglog: the
 # `lead.status` incident logged 38,300 exceptions in one drive from a 20 Hz loop, and hook 3
 # runs at 100 Hz in the process that has to hold the CAN deadline. Log the first, then rarely,
@@ -111,8 +117,11 @@ def limit_v_cruise(sm, v_cruise: float, v_ego: float, long_enabled: bool,
     _log_exception("scc_map update")
     return v_cruise
 
+  global _v_cruise_lowered
+  _v_cruise_lowered = False
   target = scc.output_v_target
   if 0 < target < V_CRUISE_UNSET:
+    _v_cruise_lowered = target < v_cruise
     return min(v_cruise, target)
   return v_cruise
 
@@ -158,6 +167,42 @@ def _set_speed_singleton():
   return _set_speed
 
 
+# Deceleration floor when the car is simply ABOVE its set speed and coasting back down to it.
+# Stock openpilot clips a_cruise at A_CRUISE_MIN = -1.2 m/s^2, so letting off the throttle at
+# 110 with cruise set to 100 brakes at the full -1.2 — the operator asked for the same gentle
+# rate the map approach profile uses. Set this to 1.2 to restore stock behaviour exactly.
+COAST_DECEL = 0.5          # m/s^2, magnitude
+
+# Below this v_cruise we never soften: forceDecel sets v_cruise = 0.0 to demand a stop, and that
+# must keep full braking authority.
+_COAST_MIN_V_CRUISE = 1.0  # m/s
+
+
+def soften_cruise_decel(a_cruise: float, v_cruise: float, v_ego: float) -> float:
+  """Hook 5. Limit how hard the CRUISE branch brakes when merely returning to the set speed.
+
+  Safety argument, and why this cannot make the car less able to stop:
+    * it only ever RAISES a_cruise (softer), and a_cruise is one candidate in the planner's
+      `min()`. With a lead the MPC candidate is harder and wins; with a hazard, hook 2's
+      candidate wins. So this can only bind when the cruise branch is already the sole reason
+      for braking — i.e. plain overspeed on a clear road.
+    * it is skipped entirely when the mapd controller lowered v_cruise this frame, so the
+      approach profile keeps full authority and its late-hazard self-escalation still works.
+    * it is skipped when v_cruise is ~0, which is how `forceDecel` demands a stop.
+  """
+  try:
+    if a_cruise >= -COAST_DECEL:
+      return a_cruise                     # already gentler than the floor
+    if _v_cruise_lowered:
+      return a_cruise                     # map/curve/hazard is shaping this — do not touch
+    if v_cruise < _COAST_MIN_V_CRUISE:
+      return a_cruise                     # forceDecel / stop request
+    return -COAST_DECEL
+  except Exception:
+    _log_exception("soften_cruise_decel")
+    return a_cruise
+
+
 def set_speed_state_msg(v_cruise_helper):
   """Build the fork's card -> selfdrived status message, or None if there is nothing to say.
 
@@ -186,6 +231,7 @@ def set_speed_state_msg(v_cruise_helper):
     s.authorisedLimit = tracker.authorised_limit_kph
     s.active = bool(tracker.enabled)
     s.pendingIsIncrease = bool(tracker._pending_is_increase)
+    s.authorisedNextLimit = tracker.authorised_next_limit_kph
     return msg
   except Exception:
     _log_exception("set_speed state publish")

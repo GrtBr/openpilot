@@ -211,10 +211,41 @@ def test_hook3():
   check("hook3 is inert on a pcmCruise car", h.v_cruise_kph == 80.0)
 
   test_hook4()
+  test_hook5()
 
   _reset_hook3()
   FakeParams.vals.clear()
   FakeParams.vals.update(saved)
+
+
+def test_hook5():
+  """Coast-down softening. The safety property is that it can only ever RAISE a_cruise, and only
+  when the cruise branch is the sole reason for braking."""
+  hooks._v_cruise_lowered = False
+  A = A_CRUISE_MIN                                   # -1.2, the stock floor
+  check("hook5 softens plain overspeed decel to -COAST_DECEL",
+        hooks.soften_cruise_decel(A, 27.8, 30.6) == -hooks.COAST_DECEL)
+  check("hook5 leaves an already-gentle a_cruise alone",
+        hooks.soften_cruise_decel(-0.2, 27.8, 30.6) == -0.2)
+  check("hook5 never makes braking HARDER", hooks.soften_cruise_decel(A, 27.8, 30.6) > A)
+  check("hook5 does not touch acceleration", hooks.soften_cruise_decel(0.8, 27.8, 20.0) == 0.8)
+  # forceDecel demands a stop with v_cruise = 0 -- full authority must remain
+  check("hook5 skipped when v_cruise ~ 0 (forceDecel)",
+        hooks.soften_cruise_decel(A, 0.0, 20.0) == A)
+  # while the map controller is shaping the slow-down, the approach profile keeps full authority
+  # so its late-hazard self-escalation still works
+  hooks._v_cruise_lowered = True
+  check("hook5 skipped while hook 1 lowered v_cruise (map/curve/hazard)",
+        hooks.soften_cruise_decel(A, 15.0, 25.0) == A)
+  hooks._v_cruise_lowered = False
+  # and hook 1 sets that flag correctly
+  _reset_hook3()
+  FakeParams.vals["SmartCruiseControlMap"] = True
+  settle(SM(hz="stop", hzd=30.0))
+  check("hook1 records that it lowered v_cruise", hooks._v_cruise_lowered is True)
+  settle(SM())                                       # clear road -> no lowering
+  check("hook1 clears the flag on a clear road", hooks._v_cruise_lowered is False)
+  check("hook5 cannot raise into plannerd", hooks.soften_cruise_decel(None, 27.8, 30.6) is None)
 
 
 def test_hook4():
@@ -226,12 +257,14 @@ def test_hook4():
 
   idle = SM3(60.0, state=NS(pending=False, pendingLimit=0.0, secondsLeft=0.0,
                             setSpeed=100.0, tracking=True, authorisedLimit=100.0,
-                            active=True, pendingIsIncrease=False))
+                            active=True, pendingIsIncrease=False,
+                            authorisedNextLimit=0.0))
   check("hook4 returns [] when nothing is pending", hooks.set_speed_alerts(idle, True) == [])
 
   pend = SM3(60.0, state=NS(pending=True, pendingLimit=80.0, secondsLeft=7.5,
                             setSpeed=120.0, tracking=True, authorisedLimit=120.0,
-                            active=True, pendingIsIncrease=False))
+                            active=True, pendingIsIncrease=False,
+                            authorisedNextLimit=0.0))
   alerts = hooks.set_speed_alerts(pend, True)
   check("hook4 emits exactly one alert while pending", len(alerts) == 1)
   a = alerts[0]

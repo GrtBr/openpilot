@@ -134,11 +134,12 @@ check("implied decel equals APPROACH_DECEL (gentle, ~3x softer than the first dr
 # still at 105 awaiting confirmation.
 class GSM(dict):
     """SubMaster stub that also carries grtSetSpeedState."""
-    def __init__(self, base, authorised_kph=None, active=True, alive=True):
+    def __init__(self, base, authorised_kph=None, active=True, alive=True, next_kph=None):
         super().__init__(base)
         self['grtSetSpeedState'] = NS(authorisedLimit=(authorised_kph or 0.0), active=active,
                                      pending=False, pendingLimit=0.0, secondsLeft=0.0,
-                                     setSpeed=0.0, tracking=True, pendingIsIncrease=False)
+                                     setSpeed=0.0, tracking=True, pendingIsIncrease=False,
+                                     authorisedNextLimit=(next_kph or 0.0))
         self.alive = {'mapdOut': True, 'grtSetSpeedState': alive}
         self.valid = {'mapdOut': True, 'grtSetSpeedState': True}
 
@@ -189,6 +190,22 @@ check("curve braking is NOT gated by authorisation", abs(c.v_target-15.0)<1e-6)
 c=scc_map.SmartCruiseControlMap()
 for _ in range(5): c.update(GSM(SM(hz="stop",hzd=30.0),authorised_kph=0.0),True,False,15.0,0.0,25.0)
 check("hazard braking is NOT gated by authorisation", c.hazard_active)
+
+
+# The ramp comes BACK when the upcoming limit is pre-authorised (it would auto-adopt anyway).
+# 5.55 m/s == 20 km/h.
+c=scc_map.SmartCruiseControlMap()
+for _ in range(3): c.update(GSM(SM(nsl=5.55,nsld=80.0),authorised_kph=0.0,next_kph=20.0),True,False,20.0,0.0,30.0)
+check("gated + PRE-AUTHORISED upcoming limit -> the ramp fires again",
+      c.v_target>5.55 and c.v_target<20.0)
+# the pre-authorised value must NOT act as a ceiling -- that would be the harsh step
+c=scc_map.SmartCruiseControlMap()
+for _ in range(3): c.update(GSM(SM(sl=5.55),authorised_kph=0.0,next_kph=20.0),True,False,20.0,0.0,30.0)
+check("a PRE-authorised upcoming limit is NOT used as a ceiling", c.v_target==0.0)
+# a pre-authorisation for a DIFFERENT value must not unlock the ramp
+c=scc_map.SmartCruiseControlMap()
+for _ in range(3): c.update(GSM(SM(nsl=5.55,nsld=80.0),authorised_kph=0.0,next_kph=60.0),True,False,20.0,0.0,30.0)
+check("a pre-authorisation for a different limit does not unlock the ramp", c.v_target==0.0)
 
 print(f"\n{sum(1 for _,c_ in res if c_)}/{len(res)} passed")
 sys.exit(0 if all(c_ for _,c_ in res) else 1)

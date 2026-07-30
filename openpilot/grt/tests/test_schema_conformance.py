@@ -55,6 +55,7 @@ REQUIRED = [
   ("grtSetSpeedState", "authorisedLimit"),
   ("grtSetSpeedState", "active"),
   ("grtSetSpeedState", "pendingIsIncrease"),
+  ("grtSetSpeedState", "authorisedNextLimit"),
 ]
 
 # Union discriminants are POSITIONAL, not the @N ordinal, and they are what actually goes on the

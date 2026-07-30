@@ -150,6 +150,8 @@ class SetSpeedLimitTracker:
     # unanswered or declined change means the car keeps the previous limit. Written only by
     # _authorise().
     self._authorised_kph: float | None = None
+    # An UPCOMING limit pre-authorised for the approach ramp only (never the ceiling).
+    self._authorised_next_kph: float | None = None
 
     # --- engage seeding --------------------------------------------------------------------
     self._seed_pending = False
@@ -192,6 +194,7 @@ class SetSpeedLimitTracker:
     self._in_force_kph = None
     self._established_kph = None
     self._authorised_kph = None
+    self._authorised_next_kph = None
     self._seed_pending = False
     self._seed_frames = 0
     self._acted_limit_kph = None
@@ -203,6 +206,44 @@ class SetSpeedLimitTracker:
     self._pending_frames = 0
     self._pending_is_increase = False
     self.tracking = False
+
+  def _preauthorise_upcoming(self, sm, v_cruise_kph: float) -> None:
+    """Pre-authorise an UPCOMING limit when it would be auto-adopted anyway.
+
+    Why this exists (operator, 2026-07-30): gating physical compliance on authorisation switched
+    the pre-sign approach ramp off, because an upcoming limit cannot be authorised before it
+    becomes current. But when the auto rules already say "no confirmation needed", there is
+    nothing to wait for — so authorise it early and let `scc_map` shape the run-up at
+    APPROACH_DECEL instead of stepping at the sign.
+
+    Deliberately published in its OWN field: this must unlock the ramp only, never the ceiling.
+    If the ceiling saw it, the target would drop to the new limit while the sign was still far
+    away — exactly the harsh step the ramp exists to prevent.
+
+    The rules are the same three as a normal auto-adopt, so a change that WOULD prompt is not
+    silently pre-authorised here.
+    """
+    self._authorised_next_kph = None
+    try:
+      mapd = sm['mapdOut']
+      nl = round(float(mapd.nextSpeedLimit) * 3.6)
+      nd = float(mapd.nextSpeedLimitDistance)
+    except Exception:
+      return
+    if nd <= 0 or not (MIN_LIMIT_KPH <= nl <= MAX_LIMIT_KPH):
+      return
+    if self._way not in GOOD_WAY_SELECTION:
+      return
+    delta = nl - v_cruise_kph
+    if delta > 0 and self._way not in GOOD_WAY_SELECTION_UP:
+      return
+    if self.tracking and _is_round(v_cruise_kph) and abs(delta) <= AUTO_ADOPT_BAND_KPH:
+      self._authorised_next_kph = float(nl)
+
+  @property
+  def authorised_next_limit_kph(self) -> float:
+    """Upcoming limit pre-authorised for the approach ramp only. 0.0 = none."""
+    return float(self._authorised_next_kph or 0.0)
 
   @property
   def authorised_limit_kph(self) -> float:
@@ -358,6 +399,10 @@ class SetSpeedLimitTracker:
     # become established in its own right, and it cannot know that if the tracker stops while an
     # offer is outstanding.
     gate = self._track_established(limit_kph)
+
+    # Pre-authorise an upcoming limit that needs no confirmation, so the approach ramp can shape
+    # the run-up. Runs every frame, including while a prompt is open for the CURRENT limit.
+    self._preauthorise_upcoming(sm, v_cruise_kph)
 
     # --- a pending limit is awaiting confirmation --------------------------------------------
     if self.pending_limit_kph is not None:

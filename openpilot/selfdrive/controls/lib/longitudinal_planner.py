@@ -145,6 +145,14 @@ class LongitudinalPlanner:
     self.a_cruise = get_cruise_accel(sm['selfdriveState'].experimentalMode, v_cruise, v_ego,
                                      self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
                                      accel_coast, self.allow_throttle)
+    # GRT-MOD-START — gentle coast-down to the set speed. Stock clips a_cruise at A_CRUISE_MIN
+    # (-1.2), so letting off the throttle at 110 with cruise set to 100 brakes at the full -1.2.
+    # This raises that floor to COAST_DECEL for PLAIN overspeed only: it is skipped when hook 1
+    # lowered v_cruise (map/curve/hazard keep full authority) and when v_cruise ~ 0 (forceDecel).
+    # Because a_cruise is only one candidate in the min() below, it can never make braking
+    # weaker than the MPC (lead) or hook 2 (hazard) branches.
+    self.a_cruise = grt_hooks.soften_cruise_decel(self.a_cruise, v_cruise, v_ego)
+    # GRT-MOD-END
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
     candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),

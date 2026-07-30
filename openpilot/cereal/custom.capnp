@@ -75,6 +75,11 @@ struct GrtSetSpeedState @0xfc6241ed8877b611 {
   authorisedLimit @5 :Float32;  # limit the driver/auto rules accepted, km/h (0 = none)
   active @6 :Bool;              # feature enabled AND engaged. False => scc_map FAILS OPEN.
   pendingIsIncrease @7 :Bool;   # which button accepts: True => RES/+, False => SET/-
+  # An UPCOMING limit pre-authorised because it WOULD auto-adopt anyway (no confirmation needed).
+  # Kept separate from authorisedLimit on purpose: this one only unlocks the pre-sign approach
+  # ramp in scc_map. Using authorisedLimit for it would let the CEILING drop to the new limit
+  # before the sign, which is the harsh step the ramp exists to avoid.
+  authorisedNextLimit @8 :Float32;  # km/h (0 = none)
 }
 # GRT-MOD-END
 

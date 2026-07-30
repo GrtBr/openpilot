@@ -221,7 +221,7 @@ class SmartCruiseControlMap:
     # So when the set-speed feature is ACTIVE, obey only the limit it has authorised. When it is
     # not active (flag off, not engaged, or the message is missing/stale) FAIL OPEN to mapd's own
     # value — infrastructure failure must not silently stop the car obeying speed limits.
-    authorised_ms, gated = self._authorised_limit(sm)
+    authorised_ms, gated, authorised_next_ms = self._authorised_limit(sm)
 
     speed_limit_suggested = float(mapd.speedLimitSuggestedSpeed)
     if gated:
@@ -248,7 +248,10 @@ class SmartCruiseControlMap:
     # set speed at the sign). That is the follow-up if braking at signs now feels abrupt.
     # Consequence today: the slow-down happens AT the sign via the ceiling, giving the planner's
     # a_cruise floor of -1.2 m/s² rather than the shaped 0.5 m/s² ramp.
-    if gated:
+    # ...unless the upcoming limit has been PRE-AUTHORISED because it would auto-adopt anyway
+    # (no confirmation needed). Then the ramp is exactly what we want: it shapes the run-up at
+    # APPROACH_DECEL instead of stepping at the sign.
+    if gated and not (authorised_next_ms > 0 and abs(next_speed_limit - authorised_next_ms) < 0.3):
       next_speed_limit = 0.0
     if 0 < next_speed_limit < self.v_ego and next_speed_limit_distance > 0:
       v_sl_now = approach_speed(next_speed_limit, next_speed_limit_distance)
@@ -356,8 +359,10 @@ class SmartCruiseControlMap:
       "lead2_d_rel": lead2.dRel if lead2.present else 0.0,
     }
 
-  def _authorised_limit(self, sm) -> tuple[float, bool]:
+  def _authorised_limit(self, sm) -> tuple[float, bool, float]:
     """(authorised limit in m/s, gated?) from the set-speed feature.
+
+Third element is an UPCOMING limit pre-authorised for the approach ramp ONLY.
 
     `gated=False` means **fail open**: obey mapd exactly as before this gate existed. That is the
     right failure mode for infrastructure problems — a dropped message must never silently stop
@@ -366,13 +371,14 @@ class SmartCruiseControlMap:
     """
     try:
       if not sm.alive.get('grtSetSpeedState', False):
-        return 0.0, False
+        return 0.0, False, 0.0
       s = sm['grtSetSpeedState']
       if not s.active:
-        return 0.0, False
-      return float(s.authorisedLimit) * CV.KPH_TO_MS, True
+        return 0.0, False, 0.0
+      return (float(s.authorisedLimit) * CV.KPH_TO_MS, True,
+              float(s.authorisedNextLimit) * CV.KPH_TO_MS)
     except Exception:
-      return 0.0, False
+      return 0.0, False, 0.0
 
   def _update_state_machine(self) -> tuple[bool, bool]:
     if self.state != MapState.disabled:
