@@ -660,6 +660,89 @@ right at the sign. APPROACH_DECEL stays at 0.5; do not touch it without new evid
 (My episode detector found 0 episodes this drive because it keyed off a large speed error at the
 FIRST frame, which the profile no longer produces. The binding-frames metric replaces it.)
 
+## 2026-07-30 — drive 2 of set-speed: two issues root-caused from the logs and FIXED (not deployed)
+
+**The alert DOES render** — the operator saw the confirmation box, which closes the one open
+question from yesterday. `set_speed.log`: 782 lines, 12 engagements all seeded from the map,
+**544 heartbeats reporting `at_limit`** (set speed sitting exactly on the posted limit), 2 clean
+auto-adopts (40→20, 60→80). The core works.
+
+### ISSUE 1 — the car obeyed the posted limit while the display waited for confirmation
+
+Root cause is **feature A, not feature B**: `scc_map` applies the posted limit as a ceiling inside
+the planner and knew nothing about feature B's confirmation state. Two independent notions of
+"the limit". Measured in `mapd_debug.log` (34,001 frames):
+
+| binding source | frames |
+|---|---|
+| current-limit **ceiling** (`speedLimitSuggestedSpeed`) | **1,069** |
+| upcoming-limit **approach ramp** (`nextSpeedLimit`) | **95** |
+
+Example frames: set speed 105, no hazard, commanded target pinned at the posted 40. And the ramp
+at 80 m from a 20 zone commanding 37.9 — literally "it slowed down before the sign".
+
+**Fix (operator chose "confirmation gates behaviour"):** card publishes `authorisedLimit` +
+`active` on `grtSetSpeedState`; plannerd subscribes via `GRT_SUB` (already passed as all three
+ignore lists — plannerd calls `all_checks()` UNSCOPED, §2.2 of the plan); `scc_map` obeys only
+authorised limits. **Fails OPEN** to mapd's own value when the feature is inactive or the message
+is missing/stale — infrastructure failure must never silently stop the car obeying limits.
+Curve and hazard braking are deliberately **not** gated; they are not speed limits.
+
+**⚠️ Accepted consequence, stated for the record:** a declined or unanswered limit change means
+the car does **not** slow for that sign. openpilot stops being an automatic speed-limit follower
+and becomes one the driver authorises.
+
+**⚠️ Documented trade-off:** the pre-sign approach ramp is now OFF while gated, because it acts on
+the *upcoming* limit, which by definition cannot be authorised yet — the driver is only asked once
+it becomes current. Slow-downs therefore happen AT the sign via the ceiling, at the planner's
+`A_CRUISE_MIN = -1.2 m/s²` floor instead of the validated 0.5 m/s² ramp. **If that feels abrupt,
+the follow-up is two-stage pre-authorisation: authorise the upcoming limit early, move the set
+speed at the sign.** Deliberately not built blind — it needs a drive to know if it is warranted.
+
+### ISSUE 2 — the prompt vanished before it could be answered. NOT the timeout.
+
+The operator was right to push back on my first read. The 10 s window did expire twice, but the
+prompts that could not be reacted to died in **0.2–0.3 s**:
+
+```
+-5.80  settling  limit=120                 ← 120 has held ~1 s
+-5.55  pending   120  way=extended
+-5.22  stale     current reads 60          ← retired 0.33 s later
+-1.22  way_possible raw=120 way=possible
+-0.20  pending   120  way=current
++0.00  stale     current reads 60          ← retired 0.20 s later
+```
+
+`mapdOut.speedLimit` was **alternating 60↔120 every 1–2 s** while `waySelectionType` churned
+`current`→`possible`→`extended`: a spot where a freeway and a parallel service road overlap. Both
+values passed the 1 s stability gate, so the feature offered 120 — **the wrong road** — and the
+next flip killed it. Both of those prompts were spurious.
+
+A stability requirement on the *retirement* cannot fix this: the 60 is equally stable. Two fixes:
+- `LIMIT_STABLE_S` **1.0 → 3.0 s**, so neither value in a flip-flop qualifies at all;
+- an offer is retired as stale **only once a DIFFERENT limit has become established in its own
+  right**. Retiring on a single differing frame WAS the 0.2 s bug. This required moving the
+  stability tracker so it keeps running while a prompt is open — it previously stopped, which is
+  why the new test could not otherwise fire.
+
+`PENDING_TIMEOUT_S` stays at **10 s** at the operator's instruction.
+
+### Also per operator spec: DIRECTION-MATCHED confirmation
+
+"Push the switch the way the speed is going." A **higher** pending limit is accepted with RES/+
+and declined with SET/−; a **lower** one is accepted with SET/− and declined with RES/+. The
+direction is captured when the offer is MADE, so a set-speed nudge mid-window cannot invert the
+buttons under the driver. The alert text names the correct button.
+
+This replaces "RES/+ accepts, SET/− declines", which in this drive read a routine **81→80 km/h
+nudge as a decline** — visible in the log as `decline` 6.9 s after the offer.
+
+New state stays single-writer, per the rule that earned itself last session: `_established_kph`
+(the debounced limit) and `_authorised_kph` (what the driver accepted).
+
+Tests: 28 scc_map (9 new, covering fail-open AND fail-closed), 35 hooks, 55 set_speed, 28/28
+schema conformance including the four wire discriminants. **NOT YET DEPLOYED.**
+
 ## 2026-07-29 — set-speed test drive: GOOD PRELIMINARY RESULTS; plan doc consolidated
 
 Operator reports **good preliminary results** from the first drive with set-speed tracking live.

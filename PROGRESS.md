@@ -16,7 +16,7 @@ Resume rules:
 
 ## STATE
 
-- **Status:** SET-SPEED TRACKING **DEPLOYED TO comma4 AND ENABLED** (device on `dc6e2b5`, AGNOS 18.7, healthy, engagement verified unblocked). **ROAD TEST OUTSTANDING** — the confirmation ALERT could not be verified parked (it only fires engaged), so first drive must confirm the text + chime appear. Feature complete (parts a AND b). Engage seeds
+- **Status:** DRIVE 2 REVIEWED; TWO ISSUES FIXED LOCALLY, **NOT DEPLOYED** — (1) physical limit compliance is now gated on driver authorisation (`authorisedLimit` on `grtSetSpeedState`, consumed by `scc_map`); (2) the limit is debounced at 3 s and an offer is retired only when a different limit becomes established, fixing prompts that died in 0.2 s at a flip-flopping way selection. Direction-matched confirmation added (RES/+ for up, SET/- for down). Alert rendering CONFIRMED on the car. Prior: SET-SPEED TRACKING **DEPLOYED TO comma4 AND ENABLED** (device on `dc6e2b5`, AGNOS 18.7, healthy, engagement verified unblocked). **ROAD TEST OUTSTANDING** — the confirmation ALERT could not be verified parked (it only fires engaged), so first drive must confirm the text + chime appear. Feature complete (parts a AND b). Engage seeds
   the set speed from the posted limit (60 if no map data); a later change auto-adopts only if
   the feature owns the set speed AND that speed is a multiple of 10 AND |Δ| ≤ 20; otherwise a
   10 s RES/+ confirmation prompt. Alert needs NO schema addition (plain `Alert` +
@@ -26,7 +26,10 @@ Resume rules:
 - **Last action:** Deployed + enabled on comma4; first drive gave good preliminary results.
   `PORT_MAPD_FROM_SUNNYPILOT.md` rewritten as a two-feature record + reusable recipe (§9)
   covering both mapd control and set-speed tracking.
-- **Next step:** Deploy to comma4 via git bundle, enable
+- **Next step:** Deploy the drive-2 fixes (bundle `dcb3550cac..nightly-dev`, §5 of the plan doc),
+  then drive and check two things specifically: (a) the car no longer slows for a limit you have
+  not accepted, and (b) whether braking AT the sign feels abrupt now that the pre-sign ramp is
+  gated off — if it does, build two-stage pre-authorisation. Prior: Deploy to comma4 via git bundle, enable
   `/data/media/0/grt/SmartCruiseControlSetSpeed`, then verify OFFROAD FIRST, in this order:
   1. **engagement still works** — selfdrived's `ignore` list is the one thing that could block
      it; if the car will not engage, that is the first suspect;
