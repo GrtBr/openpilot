@@ -222,17 +222,20 @@ def test_hook4():
         hooks.set_speed_alerts(no_state, True) == [])
 
   idle = SM3(60.0, state=NS(pending=False, pendingLimit=0.0, secondsLeft=0.0,
-                            setSpeed=100.0, tracking=True))
+                            setSpeed=100.0, tracking=True, authorisedLimit=100.0,
+                            active=True, pendingIsIncrease=False))
   check("hook4 returns [] when nothing is pending", hooks.set_speed_alerts(idle, True) == [])
 
   pend = SM3(60.0, state=NS(pending=True, pendingLimit=80.0, secondsLeft=7.5,
-                            setSpeed=120.0, tracking=True))
+                            setSpeed=120.0, tracking=True, authorisedLimit=120.0,
+                            active=True, pendingIsIncrease=False))
   alerts = hooks.set_speed_alerts(pend, True)
   check("hook4 emits exactly one alert while pending", len(alerts) == 1)
   a = alerts[0]
   check("hook4 alert names the limit in km/h when metric",
         "80" in a.alert_text_1 and "km/h" in a.alert_text_1)
-  check("hook4 alert tells the driver what to press", "RES" in a.alert_text_2)
+  check("hook4 alert names the DIRECTION-MATCHED button (80 < 120 => SET/-)",
+        "SET/-" in a.alert_text_2)
   check("hook4 alert makes a sound", a.audible_alert == "prompt")
   check("hook4 alert_type is fork-owned (AlertManager keys on it, not on an EventName)",
         a.alert_type == "grtSetSpeedPending")

@@ -212,7 +212,21 @@ class SmartCruiseControlMap:
     # tune MapdSettings — do not add a second python-side integrator here.
     # Note: mapdOut.suggestedSpeed is deliberately NOT used; it already folds in vCruise and
     # the curve speeds with mapd's own priority rules, which would fight this arbitration.
+    # AUTHORISATION GATE (2026-07-30, on drive evidence). The set-speed feature asks the driver
+    # before changing the set speed for an out-of-band limit — but this controller was obeying the
+    # posted limit physically regardless, so the car slowed for a sign while the display still
+    # showed the old set speed awaiting confirmation. Measured: 1,069 frames where the posted-limit
+    # ceiling was the binding source, plus 95 frames of pre-sign approach ramp.
+    #
+    # So when the set-speed feature is ACTIVE, obey only the limit it has authorised. When it is
+    # not active (flag off, not engaged, or the message is missing/stale) FAIL OPEN to mapd's own
+    # value — infrastructure failure must not silently stop the car obeying speed limits.
+    authorised_ms, gated = self._authorised_limit(sm)
+
     speed_limit_suggested = float(mapd.speedLimitSuggestedSpeed)
+    if gated:
+      # Never exceed what was authorised, and never obey a limit that was not.
+      speed_limit_suggested = min(speed_limit_suggested, authorised_ms) if authorised_ms > 0 else 0.0
     if speed_limit_suggested > 0 and (self.v_target == 0 or speed_limit_suggested < self.v_target):
       self.v_target = speed_limit_suggested
 
@@ -224,6 +238,18 @@ class SmartCruiseControlMap:
     # decision, on drive evidence.
     next_speed_limit = float(mapd.nextSpeedLimit)
     next_speed_limit_distance = float(mapd.nextSpeedLimitDistance)
+    # The approach ramp is what the driver felt as "it slowed down BEFORE the sign", so while the
+    # set-speed feature is active it is switched OFF entirely.
+    #
+    # KNOWN TRADE-OFF, deliberate and documented: the ramp acts on the UPCOMING limit, which by
+    # definition cannot have been authorised yet — the driver is only asked once that limit
+    # becomes current, at the sign. So there is no way to keep the ramp AND honour authorisation
+    # without also pre-authorising upcoming limits (a two-stage design: authorise early, move the
+    # set speed at the sign). That is the follow-up if braking at signs now feels abrupt.
+    # Consequence today: the slow-down happens AT the sign via the ceiling, giving the planner's
+    # a_cruise floor of -1.2 m/s² rather than the shaped 0.5 m/s² ramp.
+    if gated:
+      next_speed_limit = 0.0
     if 0 < next_speed_limit < self.v_ego and next_speed_limit_distance > 0:
       v_sl_now = approach_speed(next_speed_limit, next_speed_limit_distance)
       if self.v_target == 0 or v_sl_now < self.v_target:
@@ -329,6 +355,24 @@ class SmartCruiseControlMap:
       "lead1_d_rel": lead1.dRel if lead1.present else 0.0,
       "lead2_d_rel": lead2.dRel if lead2.present else 0.0,
     }
+
+  def _authorised_limit(self, sm) -> tuple[float, bool]:
+    """(authorised limit in m/s, gated?) from the set-speed feature.
+
+    `gated=False` means **fail open**: obey mapd exactly as before this gate existed. That is the
+    right failure mode for infrastructure problems — a dropped message must never silently stop
+    the car obeying speed limits. `gated=True` with 0.0 means the opposite and is deliberate:
+    the feature IS running and has authorised nothing, so no limit is obeyed.
+    """
+    try:
+      if not sm.alive.get('grtSetSpeedState', False):
+        return 0.0, False
+      s = sm['grtSetSpeedState']
+      if not s.active:
+        return 0.0, False
+      return float(s.authorisedLimit) * CV.KPH_TO_MS, True
+    except Exception:
+      return 0.0, False
 
   def _update_state_machine(self) -> tuple[bool, bool]:
     if self.state != MapState.disabled:

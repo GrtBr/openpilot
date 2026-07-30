@@ -79,9 +79,19 @@ REOFFER_S = 60.0
 # selfdrived -> AlertManager. Set False to fall back to ignoring out-of-band changes.
 PENDING_ENABLED = True
 
-# A new limit must hold this long before it is acted on. mapdOut arrives at 20 Hz, so card sees
-# each value repeated ~5 frames regardless; this is about way-selection flapping at junctions.
-LIMIT_STABLE_S = 1.0
+# A new limit must hold this long CONTINUOUSLY before it is acted on.
+#
+# Raised 1.0 -> 3.0 on drive evidence. At a spot where a freeway and a parallel service road
+# overlap, mapd alternated `speedLimit` between 60 and 120 every 1-2 s while `waySelectionType`
+# churned current -> possible -> extended. At 1.0 s BOTH values qualified as "stable", so the
+# feature offered 120 (wrong road) and then retired the offer 0.2-0.3 s later when the reading
+# flipped back — the prompt appeared and vanished before the driver could react. A stability
+# requirement on the RETIREMENT cannot fix that, because the 60 is equally stable; the gate
+# itself has to outlast the alternation.
+#
+# Cost: a genuine sign change is acted on ~3 s late (~50 m at 60 km/h). Acceptable because the
+# APPROACH profile, not this gate, is what shapes the run-up to a sign.
+LIMIT_STABLE_S = 3.0
 
 # Floats here have been through round(), += and clip(). Never compare them with ==: one
 # 99.99999 would silently end tracking forever, and the symptom would look like "the feature
@@ -133,6 +143,13 @@ class SetSpeedLimitTracker:
     # on some code paths and not others, and both bugs found in review lived in those seams.
     self._owned_kph: float | None = None
     self._in_force_kph: float | None = None
+    # The debounced limit — the value that has actually held for LIMIT_STABLE_S. Written only by
+    # _track_established(). Decisions are made on this, never on a raw frame reading.
+    self._established_kph: float | None = None
+    # The limit the driver (or the auto rules) has AUTHORISED. scc_map obeys only this, so an
+    # unanswered or declined change means the car keeps the previous limit. Written only by
+    # _authorise().
+    self._authorised_kph: float | None = None
 
     # --- engage seeding --------------------------------------------------------------------
     self._seed_pending = False
@@ -148,6 +165,9 @@ class SetSpeedLimitTracker:
     # --- confirmation ----------------------------------------------------------------------
     self.pending_limit_kph: float | None = None
     self._pending_frames = 0
+    # Direction of the offer, captured when it was MADE. Decides which button accepts and which
+    # declines, so a set-speed nudge mid-window cannot invert the buttons under the driver.
+    self._pending_is_increase = False
 
     self.tracking = False
     self.last_action = ""
@@ -170,6 +190,8 @@ class SetSpeedLimitTracker:
   def _reset(self) -> None:
     self._owned_kph = None
     self._in_force_kph = None
+    self._established_kph = None
+    self._authorised_kph = None
     self._seed_pending = False
     self._seed_frames = 0
     self._acted_limit_kph = None
@@ -179,11 +201,52 @@ class SetSpeedLimitTracker:
     self._cand_frames = 0
     self.pending_limit_kph = None
     self._pending_frames = 0
+    self._pending_is_increase = False
     self.tracking = False
+
+  @property
+  def authorised_limit_kph(self) -> float:
+    """Published to plannerd. 0.0 means 'nothing authorised' — scc_map then FAILS OPEN and keeps
+    obeying mapd directly, so a dropped message can never silently disable limit compliance."""
+    return float(self._authorised_kph or 0.0)
+
+  def _track_established(self, limit_kph) -> str:
+    """Maintain the debounced 'established limit'. The ONLY writer of `_established_kph`.
+
+    A value must hold CONTINUOUSLY for LIMIT_STABLE_S to become established. Losing the limit
+    resets the candidate but deliberately does NOT clear `_established_kph`: a road that flickers
+    in and out must not re-trigger anything.
+
+    Returns a heartbeat reason: `no_limit` / `new_candidate` / `settling` / `established`.
+    """
+    if limit_kph is None:
+      self._cand_limit_kph = None
+      self._cand_frames = 0
+      return "no_limit"
+
+    if limit_kph != self._cand_limit_kph:
+      self._cand_limit_kph = limit_kph
+      self._cand_frames = 0
+      return "new_candidate"
+
+    self._cand_frames += 1
+    if self._cand_frames < int(LIMIT_STABLE_S / DT_CTRL):
+      return "settling"
+
+    self._established_kph = limit_kph
+    return "established"
 
   def _take_ownership(self, v_set: float) -> None:
     """Record that this set speed is ours, not the driver's. The ONLY writer of _owned_kph."""
     self._owned_kph = v_set
+
+  def _authorise(self, limit_kph: float) -> None:
+    """Record that the driver (or the auto rules) has AUTHORISED this limit.
+
+    Published as `grtSetSpeedState.authorisedLimit` and consumed by `scc_map` in plannerd, which
+    obeys only authorised limits. The ONLY writer of `_authorised_kph`.
+    """
+    self._authorised_kph = limit_kph
 
   def _mark_acted(self, limit_kph: float, declined: bool = False) -> None:
     """Record a decision about a limit VALUE so it is not re-decided every frame."""
@@ -290,29 +353,50 @@ class SetSpeedLimitTracker:
 
     self.tracking = self._owns(v_cruise_kph)
 
+    # Stability tracking runs EVERY frame, including while a prompt is open. That is not
+    # incidental: the stale test in the pending block needs to know when a DIFFERENT limit has
+    # become established in its own right, and it cannot know that if the tracker stops while an
+    # offer is outstanding.
+    gate = self._track_established(limit_kph)
+
     # --- a pending limit is awaiting confirmation --------------------------------------------
     if self.pending_limit_kph is not None:
       self._pending_frames += 1
-      if self._button(CS, "accelCruise"):
+
+      # DIRECTION-MATCHED CONFIRMATION (operator's spec, 2026-07-30): you push the switch the way
+      # the speed is going. A higher pending limit is accepted with RES/+ and declined with SET/-;
+      # a lower one is accepted with SET/- and declined with RES/+. The direction is the one
+      # captured when the offer was MADE — it is what the driver was shown — so a set-speed nudge
+      # mid-window cannot invert the meaning of the buttons under them.
+      accept_btn = "accelCruise" if self._pending_is_increase else "decelCruise"
+      reject_btn = "decelCruise" if self._pending_is_increase else "accelCruise"
+
+      if self._button(CS, accept_btn):
         adopted = self._clamped(self.pending_limit_kph)
         self._take_ownership(adopted)
+        self._authorise(self.pending_limit_kph)
         self.pending_limit_kph = None
         self._log("confirm", limit_kph, v_cruise_kph, adopted)
         return adopted
-      if self._button(CS, "decelCruise"):
-        # Driver asserting their own speed instead. That is an ANSWER, so it is never re-offered.
+      if self._button(CS, reject_btn):
+        # An explicit answer, so it is never re-offered.
         self._mark_acted(self.pending_limit_kph, declined=True)
         self._log("decline", limit_kph, v_cruise_kph, None)
         self.pending_limit_kph = None
         self._pending_frames = 0
         return v_cruise_kph
-      if limit_kph is not None and not _near(limit_kph, self.pending_limit_kph):
-        # The road changed under us; the offer is stale. It was never DECIDED, so it must not be
-        # marked acted — otherwise returning to that limit later would silently skip a decision.
+
+      # An offer is retired as stale ONLY once a DIFFERENT limit has become established in its
+      # own right — i.e. has passed the full stability gate. Retiring on a single differing frame
+      # is what killed prompts in 0.2-0.3 s at a flip-flopping way selection; the offer is a
+      # question about a value that WAS stable, and a transient reading does not answer it.
+      if (self._established_kph is not None and
+          not _near(self._established_kph, self.pending_limit_kph)):
         self._log("stale", limit_kph, v_cruise_kph, None)
         self.pending_limit_kph = None
         self._pending_frames = 0
         return v_cruise_kph
+
       if self._pending_frames > int(PENDING_TIMEOUT_S / DT_CTRL):
         # Unanswered, not declined: re-offered after REOFFER_S while the mismatch persists.
         self._mark_acted(self.pending_limit_kph)
@@ -321,34 +405,20 @@ class SetSpeedLimitTracker:
         self._pending_frames = 0
       return v_cruise_kph
 
-    # --- stability gate ---------------------------------------------------------------------
-    # A limit that is absent/untrusted does NOT clear `_acted_limit_kph`: losing a limit must
-    # never trigger anything, and a road that flickers in and out must not re-adopt each time.
-    #
-    # Note the failure mode this creates and which the heartbeat exists to expose: the candidate
-    # counter resets here, so a waySelectionType flickering between `current` and `fail` faster
-    # than LIMIT_STABLE_S means a limit NEVER clears the gate, and nothing is logged as a
-    # decision.
+    # --- act on the ESTABLISHED limit --------------------------------------------------------
     if limit_kph is None:
-      self._cand_limit_kph = None
-      self._cand_frames = 0
       self._heartbeat(reason, v_cruise_kph)
       return v_cruise_kph
-
-    if limit_kph != self._cand_limit_kph:
-      self._cand_limit_kph = limit_kph
-      self._cand_frames = 0
-      self._heartbeat("new_candidate", v_cruise_kph, limit_kph)
+    if gate != "established":
+      self._heartbeat(gate, v_cruise_kph, limit_kph)
       return v_cruise_kph
 
-    self._cand_frames += 1
-    if self._cand_frames < int(LIMIT_STABLE_S / DT_CTRL):
-      self._heartbeat("settling", v_cruise_kph, limit_kph)
-      return v_cruise_kph
+    # Decide on the value that PASSED the gate, never on the raw frame value.
+    limit_kph = self._established_kph
 
-    # The limit is stable, so it IS the one in force — a fact about the road, independent of
-    # what we go on to decide. This is the single place that fact is recorded; `tracking` above
-    # was computed against the PREVIOUS one, which is what the ownership test needs.
+    # The established limit IS the one in force — a fact about the road, independent of what we
+    # go on to decide. This is the single place that fact is recorded; `tracking` above was
+    # computed against the PREVIOUS one, which is what the ownership test needs.
     self._in_force_kph = limit_kph
 
     if _near(limit_kph, v_cruise_kph):
@@ -356,6 +426,8 @@ class SetSpeedLimitTracker:
       # who dialled the posted number in by hand — so the NEXT change auto-adopts.
       self._take_ownership(v_cruise_kph)
       self._mark_acted(limit_kph)
+      # The set speed already equals the posted limit, so it is accepted by construction.
+      self._authorise(limit_kph)
       self.tracking = True
       self._heartbeat("at_limit", v_cruise_kph, limit_kph)
       return v_cruise_kph
@@ -395,12 +467,14 @@ class SetSpeedLimitTracker:
     if auto:
       adopted = self._clamped(limit_kph)
       self._take_ownership(adopted)
+      self._authorise(limit_kph)
       self._log("adopt", limit_kph, v_cruise_kph, adopted)
       return adopted
 
     why = self._why_not_auto(v_cruise_kph, delta)
     if PENDING_ENABLED:
       self.pending_limit_kph = limit_kph
+      self._pending_is_increase = delta > 0
       self._pending_frames = 0
       self._log("pending", limit_kph, v_cruise_kph, None, why=why)
     else:
@@ -427,8 +501,12 @@ class SetSpeedLimitTracker:
     self._take_ownership(seeded)
     from_map = action == "seed_from_map"
     self._in_force_kph = limit_kph if from_map else None
+    self._established_kph = limit_kph if from_map else None
     if from_map:
       self._mark_acted(limit_kph)
+      # Seeding from the map IS an adoption, so the limit is authorised and scc_map may obey it
+      # from the first frame. (The no-map 60 fallback authorises nothing — there is no limit.)
+      self._authorise(limit_kph)
     else:
       self._acted_limit_kph = None
     self.tracking = True

@@ -250,8 +250,8 @@ def test_confirm_restores_tracking():
   engaged_at(t, sm, 120.0)
   sm.set_limit(80.0)
   out = run(t, sm, 120.0, STABLE + 2)
-  out = t.update(sm, fake_cs([button(ButtonType.accelCruise)]), out, True)
-  check("RES/+ confirms the pending limit", out == 80.0, f"got {out}")
+  out = t.update(sm, fake_cs([button(ButtonType.decelCruise)]), out, True)
+  check("SET/- confirms a DOWNWARD pending limit (direction-matched)", out == 80.0, f"got {out}")
   sm.set_limit(60.0)
   out = run(t, sm, out, STABLE + 2)
   check("...and the next in-band change auto-adopts again (tracking restored)",
@@ -325,6 +325,23 @@ def test_float_drift_does_not_end_tracking():
 
 # --- pending window -------------------------------------------------------------------------
 
+def test_upward_prompt_is_confirmed_with_res():
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 60.0)
+  out = 60.0
+  sm.set_limit(120.0)                        # +60: out of band, so it prompts
+  out = run(t, sm, out, STABLE + 2)
+  assert t.pending_limit_kph == 120.0, t.pending_limit_kph
+  check("an UPWARD offer is declined by SET/-",
+        t.update(sm, fake_cs([button(ButtonType.decelCruise)]), out, True) == 60.0)
+  t2 = make_tracker(); sm2 = FakeSM(); engaged_at(t2, sm2, 60.0)
+  sm2.set_limit(120.0)
+  out2 = run(t2, sm2, 60.0, STABLE + 2)
+  out2 = t2.update(sm2, fake_cs([button(ButtonType.accelCruise)]), out2, True)
+  check("...and confirmed by RES/+", out2 == 120.0, f"got {out2}")
+
+
 def test_pending_expires():
   t = make_tracker()
   sm = FakeSM()
@@ -344,8 +361,9 @@ def test_pending_declined_by_set_button():
   engaged_at(t, sm, 120.0)
   sm.set_limit(60.0)
   out = run(t, sm, 120.0, STABLE + 2)
-  out = t.update(sm, fake_cs([button(ButtonType.decelCruise)]), out, True)
-  check("SET/- declines the prompt", out == 120.0 and t.pending_limit_kph is None,
+  out = t.update(sm, fake_cs([button(ButtonType.accelCruise)]), out, True)
+  check("RES/+ DECLINES a downward prompt (wrong direction = no)",
+        out == 120.0 and t.pending_limit_kph is None and t.last_action == "decline",
         f"out {out} action {t.last_action}")
 
 
@@ -358,8 +376,12 @@ def test_pending_goes_stale_on_a_new_limit():
   assert t.pending_limit_kph == 60.0
   sm.set_limit(100.0)                       # road changed under us
   out = run(t, sm, out, 2)
-  check("a prompt is retired when the road changes under it",
-        t.pending_limit_kph is None and t.last_action == "stale", t.last_action)
+  check("one differing frame does NOT retire the offer", t.pending_limit_kph == 60.0)
+  out = run(t, sm, out, STABLE + 2)         # 100 now becomes ESTABLISHED
+  # The offer is retired, and the newly established limit is then decided on its own merits in
+  # the same pass (120 -> 100 is in band, so it auto-adopts) — hence last_action is "adopt".
+  check("a prompt is retired once a DIFFERENT limit becomes established",
+        t.pending_limit_kph is None and out == 100.0, f"out {out} action {t.last_action}")
   out = run(t, sm, out, STABLE + 2)
   check("...and the new limit is then decided on its own merits", out == 100.0, f"got {out}")
 
@@ -408,6 +430,8 @@ def test_stale_pending_leaves_no_residue():
   assert t.pending_limit_kph == 60.0
   sm.set_limit(100.0)                       # road changes under the offer
   out = run(t, sm, out, 2)
+  check("a single differing frame does NOT kill the offer (the 0.2 s bug)",
+        t.pending_limit_kph == 60.0, str(t.pending_limit_kph))
   out = run(t, sm, out, STABLE + 2)
   assert out == 100.0, out                  # 120 -> 100 is in band, auto-adopted
   sm.set_limit(60.0)                        # back to the limit that went stale

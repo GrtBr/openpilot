@@ -37,7 +37,11 @@ MAPD_BINARY_RELPATH = "third_party/mapd/mapd"
 # above is retained only to document the required queue size.
 
 # Services spliced into plannerd's SubMaster. Never add modelV2-sized (BIG) services here.
-GRT_SUB: list[str] = ["mapdOut"]
+# `grtSetSpeedState` is here so scc_map can obey only limits the driver has AUTHORISED. plannerd
+# passes this same list as all three ignore lists, so appending here is safe — but note plannerd
+# DOES call all_checks() unscoped (§2.2), so it must never be added to the service list without
+# the ignores.
+GRT_SUB: list[str] = ["mapdOut", "grtSetSpeedState"]
 
 # Services spliced into card's SubMaster, for the set-speed tracker (grt/set_speed.py).
 # Separate name from GRT_SUB so the two consumers can diverge without a silent surprise.

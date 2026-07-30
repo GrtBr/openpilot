@@ -183,6 +183,9 @@ def set_speed_state_msg(v_cruise_helper):
     s.secondsLeft = float(tracker.pending_seconds_left)
     s.setSpeed = float(v_cruise_helper.v_cruise_kph)
     s.tracking = bool(tracker.tracking)
+    s.authorisedLimit = tracker.authorised_limit_kph
+    s.active = bool(tracker.enabled)
+    s.pendingIsIncrease = bool(tracker._pending_is_increase)
     return msg
   except Exception:
     _log_exception("set_speed state publish")
@@ -215,9 +218,13 @@ def set_speed_alerts(sm, is_metric: bool) -> list:
 
     limit = s.pendingLimit if is_metric else s.pendingLimit * CV.KPH_TO_MPH
     unit = "km/h" if is_metric else "mph"
+    # Direction-matched: push the switch the way the speed is going. The direction comes from the
+    # message, not from comparing against the live set speed, so the instruction cannot flip
+    # mid-prompt if the driver nudges their own speed.
+    btn = "RES/+" if s.pendingIsIncrease else "SET/-"
     alert = Alert(
       f"Speed limit {round(limit)} {unit}",
-      "Press RES/+ to accept",
+      f"Press {btn} to accept",
       AlertStatus.normal, AlertSize.mid, Priority.LOW,
       VisualAlert.none, AudibleAlert.prompt, 1.0,
     )
