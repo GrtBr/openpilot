@@ -660,6 +660,37 @@ right at the sign. APPROACH_DECEL stays at 0.5; do not touch it without new evid
 (My episode detector found 0 episodes this drive because it keyed off a large speed error at the
 FIRST frame, which the profile no longer produces. The binding-frames metric replaces it.)
 
+## 2026-07-30 — ramp + coast-down DEPLOYED to comma4
+
+Device on `19c3568`, AGNOS 18.7, clean tree, healthy. Fast-forward from `4a9305f`, 11 files,
++273/-13. Back up in ~75 s; no AGNOS update needed.
+
+Verified BEFORE the reboot (cheapest place to find a problem):
+- schema conformance **29/29** against the device's own log.capnp, including all four wire
+  discriminants — mapd still 141/142/143, `grtSetSpeedState` 140 after adding `authorisedNextLimit`.
+- unit suites on device: 31 scc_map, 44 hooks, 59 set_speed.
+- real-import gate: `longitudinal_planner` imports with the new hook, `COAST_DECEL = 0.5`,
+  `soften_cruise_decel(-1.2) -> -0.5`, `authorisedNextLimit` round-trips.
+
+Verified AFTER the reboot:
+- all processes up; `managerState` reports **nothing** shouldBeRunning-but-not-running.
+- `onroadEvents` = `wrongGear` + `seatbeltNotLatched` only. **No `commIssue`, no
+  `processNotRunning`** — engagement is not blocked.
+- `longitudinalPlan VALID=True`; `grtSetSpeedState` at exactly 20 Hz (201 msgs / 10 s), `active=True`.
+- **Zero `grt:` exceptions.**
+
+**soundd, again — worth watching.** It crashed once during startup (`soundd_thread()` audio-stream
+init) and manager restarted it successfully; it is running and stable. The other tracebacks in the
+log are `athenad`/urllib3 network retries, which are routine. This is an audio-init race at boot,
+not fork-related — but it matters because if soundd ever fails to come back, `processNotRunning`
+is `ET.NO_ENTRY` and **blocks engagement**, which is exactly the state the operator hit and cleared
+with a manual reboot. If the car ever refuses to engage, check `micd`/`soundd` first.
+
+**Next drive judges two things:** whether the pre-sign ramp now feels right for in-band limit
+changes (it should ease down at ~0.5 m/s² and land on the limit AT the sign, not step at it), and
+whether the coast-down after an overtake feels natural. Both instruments are in place:
+`/data/media/0/grt/set_speed.log` and `/data/media/0/mapd_debug.log`.
+
 ## 2026-07-30 — ramp restored when no confirmation is needed + gentle coast-down to set speed
 
 Operator review of the authorisation gate, two requirements.
