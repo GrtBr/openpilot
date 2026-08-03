@@ -9,7 +9,8 @@ checks that claim against the actual log.capnp. (A stub that invented `lead.stat
 how the mapd controller shipped a silent 38,300-exception no-op to the car.)
 
 The behaviour under test (user spec, 2026-07-29):
-  * at engage, seed the set speed from the posted limit, else 60 km/h if no map data;
+  * at engage, seed the set speed from the posted limit; with NO map data leave it alone
+    (there is deliberately no fallback value -- see the 2026-08-03 removal);
   * afterwards adopt a limit change automatically ONLY if the feature still owns the set speed
     AND that speed is a multiple of 10 AND the change is within ±20 km/h;
   * otherwise offer it for 10 s and adopt only on RES/+.
@@ -89,7 +90,6 @@ ss = _load("openpilot.grt.set_speed", str(GRT / "set_speed.py"))
 
 ss._DEBUG_LOG = None          # no file writes during tests
 STABLE = int(ss.LIMIT_STABLE_S / 0.01)
-SEED_TIMEOUT = int(ss.SEED_TIMEOUT_S / 0.01)
 PENDING = int(ss.PENDING_TIMEOUT_S / 0.01)
 
 
@@ -185,23 +185,40 @@ def test_seed_from_map():
   check("engage seeds the set speed from the posted limit (not 105)", out == 100.0, f"got {out}")
 
 
-def test_seed_no_map_falls_back_to_60():
+def test_no_map_never_forces_a_fallback_speed():
+  """REGRESSION (2026-08-03). There used to be a 60 km/h fallback after a 10 s timeout. It was
+  removed as problematic: engaging at highway speed with no map fix dropped the set speed to 60
+  and the car braked for a limit that was never posted."""
   t = make_tracker()
-  sm = FakeSM(100, way="fail")              # parked: way selection fails
-  out = run(t, sm, 105.0, SEED_TIMEOUT + 5, engage=True)
-  check("no map data at engage -> seeds 60 after the timeout", out == 60.0, f"got {out}")
+  sm = FakeSM(100, way="fail")              # no usable fix, indefinitely
+  out = run(t, sm, 120.0, 3000, engage=True)   # 30 s -- far past the old 10 s timeout
+  check("no map data -> the set speed is NEVER forced to a fallback value",
+        out == 120.0, f"got {out}")
+  check("...and the feature owns nothing, so it stays out of the way",
+        t.authorised_limit_kph == 0.0 and not t.tracking)
 
 
-def test_seed_waits_before_falling_back():
-  """Engaging from standstill reports way=fail; without the wait every drive would start on 60
-  and immediately prompt to move to the real limit."""
+def test_seed_waits_indefinitely_for_a_real_limit():
   t = make_tracker()
   sm = FakeSM(100, way="fail")
-  out = run(t, sm, 105.0, SEED_TIMEOUT - 20, engage=True)
+  out = run(t, sm, 105.0, 2000, engage=True)   # 20 s with no fix
   check("upstream's value stands while waiting for a first fix", out == 105.0, f"got {out}")
   sm.msg.waySelectionType = "current"
   out = run(t, sm, out, 2)
-  check("...and the real limit wins if it arrives inside the window", out == 100.0, f"got {out}")
+  check("...and a real limit seeds it whenever it finally arrives", out == 100.0, f"got {out}")
+
+
+def test_seed_abandoned_when_driver_sets_own_speed():
+  """If the driver dials in a speed while we are still waiting for map data, it is theirs."""
+  t = make_tracker()
+  sm = FakeSM(100, way="fail")
+  out = run(t, sm, 105.0, 300, engage=True)
+  out = t.update(sm, fake_cs([button(ButtonType.accelCruise)]), 118.0, True)
+  check("driver input while seeding abandons the seed", t._seed_pending is False, t.last_action)
+  sm.msg.waySelectionType = "current"       # map arrives afterwards
+  out = run(t, sm, 118.0, STABLE + 5)
+  check("...and a limit arriving later does NOT overwrite the driver's speed",
+        out == 118.0, f"got {out}")
 
 
 def test_seed_overrides_resume():
@@ -435,12 +452,12 @@ def test_expired_prompt_is_reoffered():
   """Regression: an ignored prompt used to mark the limit `already_handled` FOREVER — leaving
   the set speed stranded (60 in a 100 zone) with the heartbeat looking benign."""
   t = make_tracker()
-  sm = FakeSM(100, way="fail")
-  out = run(t, sm, 105.0, SEED_TIMEOUT + 5, engage=True)
+  sm = FakeSM()
+  out = engaged_at(t, sm, 60.0)             # seeded 60 from a real 60 limit
   assert out == 60.0, out
-  sm.msg.waySelectionType = "current"       # map arrives: 100 in a 60-seeded drive
+  sm.set_limit(100.0)                       # +40: out of band, so it prompts
   out = run(t, sm, out, STABLE + 2)
-  check("first real limit after a no-map seed is offered, not silently taken",
+  check("an out-of-band limit is offered, not silently taken",
         out == 60.0 and t.pending_limit_kph == 100.0, f"out {out} pending {t.pending_limit_kph}")
   out = run(t, sm, out, PENDING + 5)        # driver misses it
   assert t.pending_limit_kph is None

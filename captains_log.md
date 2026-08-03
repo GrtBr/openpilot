@@ -660,6 +660,47 @@ right at the sign. APPROACH_DECEL stays at 0.5; do not touch it without new evid
 (My episode detector found 0 episodes this drive because it keyed off a large speed error at the
 FIRST frame, which the profile no longer produces. The binding-frames metric replaces it.)
 
+## 2026-08-03 — REMOVED the 60 km/h no-map fallback (operator: problematic)
+
+The engage seed used to fall back to **60 km/h** when no trusted limit had arrived within 10 s.
+Removed entirely at the operator's instruction. **Local only — comma4 is offline; deploy
+tomorrow.**
+
+**Why it was wrong.** "No fix yet" is not an exceptional state — it is the *normal* state at the
+moment of engagement (parked: `vEgo=0`, `bearing=0`, so `waySelectionType=fail`), and the
+persistent state anywhere off-tile. So the timeout fired routinely and forced the set speed to 60
+regardless of the road. Engage at highway speed, wait 10 s, and the set speed dropped to 60 — the
+car then braking for a limit that was never posted anywhere.
+
+**What happens now instead:**
+- the seed **waits indefinitely** for a real posted limit; upstream's own `V_CRUISE_INITIAL*`
+  stands until one arrives, and if none ever does the feature stays out of the way for the whole
+  drive (owns nothing, authorises nothing, so `scc_map` also fails open);
+- if the driver touches the cruise buttons while it is still waiting, the seed is **abandoned** —
+  the speed is theirs, and a limit arriving later will not overwrite it. New `seed_abandoned`
+  line in `set_speed.log`.
+
+Deleted: `NO_MAP_DEFAULT_KPH`, `SEED_TIMEOUT_S`, and the whole `seed_no_map` path. `_seed()` is
+now only ever called with a limit that passed `_read_limit`, which simplifies it — seeding is
+unambiguously an adoption, so the limit is in force, decided and authorised in one place.
+
+**The general rule, now written into the plan (§11.5) because it outlives this feature:**
+
+> A map-driven feature may only ever command a value the map actually supplied. A "sensible
+> default" for missing data is an invented measurement, and it will be wrong in exactly the
+> situations where the data is missing. The correct behaviour for absent data is to do *nothing*
+> and leave the base system in charge.
+
+That is the same prime directive as §0.2, in a form I had not applied to *data* — only to
+crashes. Worth remembering: the fallback did not fail safe, it failed *confidently*.
+
+Docs updated: `PORT_MAPD_FROM_SUNNYPILOT.md` §11.2 (rule 1 restated) and §11.5 (rewritten, with
+the old behaviour struck through and the reason kept, per this doc's convention), plus the §2.6
+illustration which had used the 60 seed as its example. `PROGRESS.md` status + next step.
+
+Tests: 62 set_speed (3 seed tests rewritten, incl. a REGRESSION test asserting no fallback value
+is ever forced over 30 s without a fix), 31 scc_map, 44 hooks, 29/29 schema conformance.
+
 ## 2026-07-30 — ramp + coast-down DEPLOYED to comma4
 
 Device on `19c3568`, AGNOS 18.7, clean tree, healthy. Fast-forward from `4a9305f`, 11 files,

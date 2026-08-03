@@ -231,10 +231,12 @@ which. Say so explicitly.
 
 ## 2.6 A terminal "handled" state left the feature dead for the rest of the drive
 
-The confirmation prompt marked a limit as *decided* when it expired unanswered. Combined with
-the no-map seed of 60 km/h, a driver who simply **missed one prompt** was left at 60 in a 100
-zone, with no further prompt, for the whole drive — and the debug heartbeat reported a
-reassuring `already_handled` the entire time.
+The confirmation prompt marked a limit as *decided* when it expired unanswered. A driver who
+simply **missed one prompt** was then stuck with the old set speed — no further prompt, no
+adopt, for the whole drive — while the debug heartbeat reported a reassuring `already_handled`
+the entire time. (The original illustration used the 60 km/h no-map seed, which made it far
+worse: 60 in a 100 zone. That seed has since been removed — §11.5 — but the terminal-state bug
+was independent of it.)
 
 **Rules:**
 1. **Audit every state that is entered and never left.** For each, ask: *what re-opens this?*
@@ -696,10 +698,10 @@ against a log already on the device would have caught this before a line was wri
 
 ## 11.2 The rules that actually shipped (operator's spec)
 
-1. **At engage, seed the set speed from the posted limit**, or **60 km/h if there is no map
-   data** — replacing upstream's `V_CRUISE_INITIAL*`. This wins even on a RES/resume engage
-   (operator's explicit choice over upstream's restore-previous behaviour), and it is what makes
-   the feature useful rather than inert.
+1. **At engage, seed the set speed from the posted limit** — replacing upstream's
+   `V_CRUISE_INITIAL*`. This wins even on a RES/resume engage (operator's explicit choice over
+   upstream's restore-previous behaviour), and it is what makes the feature useful rather than
+   inert. **With no map data the set speed is left exactly as upstream set it** — see §11.5.
 2. **A later limit change is adopted silently only if ALL of:**
    - **a.** the feature still **owns** the set speed — it equals the limit in force, or the
      value we ourselves last wrote;
@@ -743,12 +745,24 @@ Plus an asymmetry worth copying: **raising** the set speed additionally requires
 at a junction — acting on a guess to *slow down* is conservative; acting on it to *speed up* is
 not.
 
-## 11.5 Seeding detail that is not obvious
+## 11.5 Seeding: never invent a speed the road did not post
 
-Engaging from standstill reports `waySelectionType=fail` (`vEgo=0`, `bearing=0` — §8), so the
-seed **waits up to 10 s for a first fix** before falling back to 60. Without the wait, every
-drive would start on 60 and then immediately prompt to move to the real limit. Upstream's own
-initial value stands during the window.
+Engaging from standstill reports `waySelectionType=fail` (`vEgo=0`, `bearing=0` — §8), so at the
+moment of engagement there is usually no usable limit yet. The seed therefore **waits
+indefinitely for a real limit**, and upstream's own `V_CRUISE_INITIAL*` stands until one arrives.
+If the driver touches the cruise buttons while it is waiting, the seed is abandoned — the speed
+is theirs.
+
+~~Originally the seed fell back to **60 km/h** after a 10 s timeout when no map data had
+arrived.~~ **Removed 2026-08-03 as problematic.** "No fix yet" is the normal state when engaging,
+and the persistent state anywhere off-tile — so the timeout fired routinely and forced the set
+speed to 60 regardless of the road. Engaging at highway speed dropped it to 60 and the car braked
+for a limit that was never posted.
+
+**The general rule, and it generalises past this feature:** a map-driven feature may only ever
+command a value the map actually supplied. A "sensible default" for missing data is an invented
+measurement, and it will be wrong in exactly the situations where the data is missing. The
+correct behaviour for absent data is to do *nothing* and leave the base system in charge.
 
 ## 11.6 STILL UNVERIFIED — does the confirmation alert render?
 

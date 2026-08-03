@@ -17,9 +17,11 @@ Because of that this is the FIRST fork feature that can make the car ACCELERATE 
 
 Agreed behaviour (user spec, 2026-07-29)
 ----------------------------------------
-1. AT ENGAGE the set speed is seeded from the current posted limit, or 60 km/h if there is no
-   map data. This replaces upstream's fixed `V_CRUISE_INITIAL*` constants (40, or 105 in
-   experimental mode) — including on a RES/resume engage, which the user chose deliberately.
+1. AT ENGAGE the set speed is seeded from the current posted limit, replacing upstream's fixed
+   `V_CRUISE_INITIAL*` constants (40, or 105 in experimental mode) — including on a RES/resume
+   engage, which the user chose deliberately. If there is NO map data the set speed is left
+   exactly as upstream set it; the seed simply waits for a real limit. There is deliberately no
+   fallback value (see the note at the seeding branch in `update`).
 2. THEREAFTER a limit change is adopted automatically only if ALL of:
      a. the feature still OWNS the set speed — it equals the limit in force, or the value we
         ourselves last wrote (so a driver who dials in their own number is never overridden);
@@ -56,15 +58,6 @@ AUTO_ADOPT_BAND_KPH = 20.0
 # mapd_debug.log that the limits on these roads are only ever 20/40/60/80/120, so this test
 # never latches the feature into permanent-prompt mode by itself.
 ROUND_STEP_KPH = 10.0
-
-# Set speed at engage when there is genuinely no map data.
-NO_MAP_DEFAULT_KPH = 60.0
-
-# How long to wait after engage for a trusted limit before falling back to NO_MAP_DEFAULT_KPH.
-# Engaging from standstill reports waySelectionType=fail (vEgo=0, bearing=0), so without this
-# window every drive would start on 60 and then immediately prompt to move to the real limit.
-# Upstream's own initial value stands during the window.
-SEED_TIMEOUT_S = 10.0
 
 PENDING_TIMEOUT_S = 10.0
 
@@ -384,8 +377,21 @@ class SetSpeedLimitTracker:
       self._seed_frames += 1
       if limit_kph is not None:
         return self._seed(limit_kph, "seed_from_map", v_cruise_kph)
-      if self._seed_frames >= int(SEED_TIMEOUT_S / DT_CTRL):
-        return self._seed(NO_MAP_DEFAULT_KPH, "seed_no_map", v_cruise_kph)
+      # NO FALLBACK VALUE. There used to be one (60 km/h after a 10 s timeout) and it was
+      # removed on 2026-08-03 as problematic: with no map fix — which is the normal state when
+      # engaging from standstill, and the persistent state anywhere off-tile — it forced the set
+      # speed to 60 regardless of the road, so engaging at highway speed dropped it to 60 and the
+      # car braked for a limit that was never posted. The feature must only ever set the set
+      # speed to a limit that actually exists.
+      #
+      # So: keep waiting. Upstream's own V_CRUISE_INITIAL* stands until a real limit turns up,
+      # and if none ever does the feature simply stays out of the way for the whole drive.
+      if self._cruise_button_event(CS):
+        # The driver dialled their own speed while we were waiting: it is theirs now. Stop
+        # seeding, and let the normal ownership rules decide anything that follows.
+        self._seed_pending = False
+        self._log("seed_abandoned", limit_kph, v_cruise_kph, None, why="driver_set_own_speed")
+        return v_cruise_kph
       self._heartbeat(f"seeding:{reason}", v_cruise_kph, limit_kph)
       return v_cruise_kph
 
@@ -534,26 +540,19 @@ class SetSpeedLimitTracker:
     return f"delta_{abs(delta):.0f}_over_{AUTO_ADOPT_BAND_KPH:.0f}"
 
   def _seed(self, limit_kph: float, action: str, v_cruise_kph: float) -> float:
-    """Establish the set speed at engage. From the map, or the no-map default.
+    """Establish the set speed at engage, from a real posted limit.
 
-    On the no-map path `_in_force_kph` and `_acted_limit_kph` stay None on purpose: 60 is our
-    placeholder, not a posted limit, so the first real limit that turns up must still be
-    decided on its merits.
+    Only ever called with a limit that passed `_read_limit`, so seeding IS an adoption: the
+    limit is in force, decided, and authorised for `scc_map` from the first frame.
     """
     self._seed_pending = False
     self._seed_frames = 0
     seeded = self._clamped(limit_kph)
     self._take_ownership(seeded)
-    from_map = action == "seed_from_map"
-    self._in_force_kph = limit_kph if from_map else None
-    self._established_kph = limit_kph if from_map else None
-    if from_map:
-      self._mark_acted(limit_kph)
-      # Seeding from the map IS an adoption, so the limit is authorised and scc_map may obey it
-      # from the first frame. (The no-map 60 fallback authorises nothing — there is no limit.)
-      self._authorise(limit_kph)
-    else:
-      self._acted_limit_kph = None
+    self._in_force_kph = limit_kph
+    self._established_kph = limit_kph
+    self._mark_acted(limit_kph)
+    self._authorise(limit_kph)
     self.tracking = True
     self._log(action, limit_kph, v_cruise_kph, seeded)
     return seeded
