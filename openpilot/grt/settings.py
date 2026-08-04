@@ -32,6 +32,16 @@ DEFAULT_MAPD_SETTINGS: dict = {
   # --- behaviour 1: map curve speed control ---
   "map_curve_speed_control_enabled": True,
   "map_curve_use_enable_speed": False,
+  # Curve target lateral accel. mapd computes v = sqrt(map_curve_target_lat_a / kappa)
+  # (mapd_source/math.go GetTargetVelocities), so commanded curve speed scales with sqrt(latA).
+  # mapd's own embedded default is 2.5; 2.5 * 0.9^2 = 2.025 cuts curve speed by 10%.
+  # Lowered 2026-08-04 on drive feedback — curve entry was slightly too fast.
+  # Expect slightly MORE than 10% in practice: a lower target also lets more nodes pass
+  # map_curve.go's `tv.Velocity > VEgo + CURVE_CALC_OFFSET` filter and lengthens the
+  # jerk-limited trigger distance, so braking starts marginally earlier too.
+  # This is the intended lever — see the note in scc_map.py: tune MapdSettings, do not add
+  # a second python-side integrator.
+  "map_curve_target_lat_a": 2.025,
 
   # --- behaviour 3: automatic speed-limit adoption ---
   # CHANGED from sunnypilot's False. This is what makes mapd fold the posted limit (plus
