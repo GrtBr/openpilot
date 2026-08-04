@@ -16,17 +16,27 @@ Resume rules:
 
 ## STATE
 
-- **Status:** 60 km/h no-map fallback REMOVED (local only — comma4 is OFFLINE, deploy pending). Prior: DEPLOYED to comma4 (`19c3568`) and healthy; awaiting a drive to judge ramp feel + coast-down feel. RAMP RESTORED for no-confirmation-needed limits (`authorisedNextLimit`) + gentle coast-down to the set speed (`COAST_DECEL = 0.5`, hook 5 in longitudinal_planner). NOT DEPLOYED. Prior: DRIVE 2 REVIEWED; TWO ISSUES FIXED LOCALLY, **NOT DEPLOYED** — (1) physical limit compliance is now gated on driver authorisation (`authorisedLimit` on `grtSetSpeedState`, consumed by `scc_map`); (2) the limit is debounced at 3 s and an offer is retired only when a different limit becomes established, fixing prompts that died in 0.2 s at a flip-flopping way selection. Direction-matched confirmation added (RES/+ for up, SET/- for down). Alert rendering CONFIRMED on the car. Prior: SET-SPEED TRACKING **DEPLOYED TO comma4 AND ENABLED** (device on `dc6e2b5`, AGNOS 18.7, healthy, engagement verified unblocked). **ROAD TEST OUTSTANDING** — the confirmation ALERT could not be verified parked (it only fires engaged), so first drive must confirm the text + chime appear. Feature complete (parts a AND b). Engage seeds
+- **Status:** **MAP CURVE SPEED CUT 10% + NATIONAL TILE SET — BOTH DEPLOYED to comma4 (`09a174b`), awaiting a drive to judge corner speed.** `map_curve_target_lat_a` pinned at 2.025 (was mapd's embedded default 2.5; v = √(latA/κ), so ×0.9² = −10% speed). Tiles now 2,046 files / 601 MB covering bands -24…-36, replacing 376 files / 106 MB of -34/-36 only; delivered tiles passed `parity_check_ver2.py` gate 1a (4,468 junction nodes, 0 violations) BEFORE deploy. `APPROACH_DECEL` untouched. Prior: 60 km/h no-map fallback REMOVED — **now deployed** (see captains_log 2026-08-04 SYNC; this line previously read "local only, comma4 OFFLINE"). Prior: DEPLOYED to comma4 (`19c3568`) and healthy; awaiting a drive to judge ramp feel + coast-down feel. RAMP RESTORED for no-confirmation-needed limits (`authorisedNextLimit`) + gentle coast-down to the set speed (`COAST_DECEL = 0.5`, hook 5 in longitudinal_planner). NOT DEPLOYED. Prior: DRIVE 2 REVIEWED; TWO ISSUES FIXED LOCALLY, **NOT DEPLOYED** — (1) physical limit compliance is now gated on driver authorisation (`authorisedLimit` on `grtSetSpeedState`, consumed by `scc_map`); (2) the limit is debounced at 3 s and an offer is retired only when a different limit becomes established, fixing prompts that died in 0.2 s at a flip-flopping way selection. Direction-matched confirmation added (RES/+ for up, SET/- for down). Alert rendering CONFIRMED on the car. Prior: SET-SPEED TRACKING **DEPLOYED TO comma4 AND ENABLED** (device on `dc6e2b5`, AGNOS 18.7, healthy, engagement verified unblocked). **ROAD TEST OUTSTANDING** — the confirmation ALERT could not be verified parked (it only fires engaged), so first drive must confirm the text + chime appear. Feature complete (parts a AND b). Engage seeds
   the set speed from the posted limit (with NO map data it is left alone — the 60 km/h fallback was REMOVED 2026-08-03); a later change auto-adopts only if
   the feature owns the set speed AND that speed is a multiple of 10 AND |Δ| ≤ 20; otherwise a
   10 s RES/+ confirmation prompt. Alert needs NO schema addition (plain `Alert` +
   `AlertManager.add_many`); the card→selfdrived channel is `grtSetSpeedState` on renamed
   reserved slot 16. Default OFF via `/data/media/0/grt/SmartCruiseControlSetSpeed`.
   104 tests + 25 schema checks. Prior: APPROACH PROFILE VALIDATED on drive 3 (median decel -0.51 vs -0.50 target; user: "felt perfect"). NEXT: set-speed-tracks-limit feature — DESIGNED and feasibility-verified, NOT implemented; see captains_log 2026-07-29. Prior status: FIRST TEST DRIVE FAILED (feature was a silent no-op) -> ROOT-CAUSED AND FIXED (radarState lead field is `present`, not `status`). Fix deployed; awaiting a SECOND test drive. Prior: ENABLED AND LIVE ON THE CAR (offroad-verified). Speed ceiling ON; hazard braking still OFF. Only the road test remains. Prior: ON-DEVICE IN PROGRESS. Offline block complete; deployed to comma4; Phase 0 gates 1&2 PASS. **Feature is currently INERT on device (params unknown until a C++ build) — this is the safe designed fallback.** Prior status: ✅ **OFFLINE BLOCK COMPLETE.** Phases 1a, 2, 3, 4, 5, 6, 7 all done and committed; Verification 2 done; Verification 1 reassigned to the device (impossible on Pi5). Auto-resume cron cancelled. **Next work requires the car.**
-- **Last action:** Deployed + enabled on comma4; first drive gave good preliminary results.
-  `PORT_MAPD_FROM_SUNNYPILOT.md` rewritten as a two-feature record + reusable recipe (§9)
-  covering both mapd control and set-speed tracking.
-- **Next step:** Deploy the fallback removal to comma4 when it is back online (bundle `dcb3550cac..nightly-dev`, §5 of the plan doc). Prior: Deploy the drive-2 fixes (bundle `dcb3550cac..nightly-dev`, §5 of the plan doc),
+- **Last action:** Cut map curve speed 10% (`map_curve_target_lat_a` 2.5 → 2.025) and deployed the
+  national tile set (601 MB, bands -24…-36) to comma4. Both verified pre-deploy: gate 1a passed on
+  the delivered tiles, and `write_settings_file()` on device emits 2.025. Device rebooted, healthy.
+- **Next step:** **DRIVE IT.** Two questions, one instrument (`/data/media/0/mapd_debug.log` —
+  `mapdOut` is never in rlog on this prebuilt branch, so there is no retrospective path):
+  1. **Is corner speed right now?** Compare `map_curve_speed_kmh` at a known corner against the
+     pre-change value. Expect ≥10% lower. If still too fast, drop `map_curve_target_lat_a` further
+     — remember it is a **squared** lever: another −10% needs 2.025 × 0.81 = 1.64, not 1.82.
+     If it now feels too slow, 2.5 restores stock exactly.
+  2. **Does mapd actually read the new tiles?** Unproven — it opens tiles on demand near a fix and
+     had no open handles parked. Confirm `tileLoaded=True` plus a non-empty `roadName` while moving,
+     especially OUTSIDE the old -34/-36 bands, which is the part that was never covered before.
+  Do NOT re-tune `APPROACH_DECEL` (0.5) off this drive — it shapes the approach, not the target,
+  and it is separately drive-validated. Prior: Deploy the drive-2 fixes (bundle `dcb3550cac..nightly-dev`, §5 of the plan doc),
   then drive and check two things specifically: (a) the car no longer slows for a limit you have
   not accepted, and (b) whether braking AT the sign feels abrupt now that the pre-sign ramp is
   gated off — if it does, build two-stage pre-authorisation. Prior: Deploy to comma4 via git bundle, enable
@@ -40,6 +50,14 @@ Resume rules:
      pre-change segment — card is the 100 Hz CAN loop and now carries a subscriber AND a
      publisher.
 ### DEPLOY RUNBOOK — set-speed tracking (RUN SUCCESSFULLY 2026-07-29; kept for reuse)
+
+> **SUPERSEDED for the normal case (2026-08-04).** Deploys now go **Pi5 → GitHub → comma4**:
+> `git push origin nightly-dev`, then on device `git fetch origin nightly-dev && git pull --ff-only
+> origin nightly-dev`. Used for the 08-04 SYNC and again for the curve-speed change; simpler, and
+> the fork branch is pushed anyway. **The git-bundle route below is still the correct fallback when
+> the device has no network** — keep it. Everything after the bundle steps (offroad, clean tree,
+> `pkill -x`, never scons, never scp cereal, and the whole post-reboot verification order) applies
+> unchanged to both routes.
 
 First attempt at ~16:05 found comma4 offline (car powered down while parked); it returned a
 few minutes later and the deploy completed. Device went cbe0818 -> dc6e2b5, clean fast-forward,
@@ -121,7 +139,7 @@ All match → the rename is wire-neutral and agrees with the binary. Also verifi
 ## ON-DEVICE BLOCK — DO NOT auto-run. Car powered + user supervising, one session.
 
 - [~] **Phase -1 — prebuilt marker** — marker EXISTS at /data/openpilot/prebuilt. **DO NOT delete it**: a full scons build currently FAILS (missing driving_supercombo.onnx), so deleting the marker would make the device try, and fail, to build at boot — stranding it in the fallback launcher. Left in place deliberately.
-- [x] **Phase 1b — deploy** DONE. Repo fast-forwarded via git bundle; binary md5 verified on device. Tiles: bands **-34 and -36** deployed. **GOTCHA: band dir = floor(lat/2)*2 — tiles for lat -34.x live in dir -36, not -34.**
+- [x] **Phase 1b — deploy** DONE. Repo fast-forwarded via git bundle; binary md5 verified on device. Tiles: **UPDATED 2026-08-04 — the full national set is now deployed, 2,046 files / 601 MB, bands -24 through -36** (was bands -34 and -36 only, 376 files / 106 MB). Deployed by rsync to `offline.new` + atomic swap; `offline.old` since deleted. **GOTCHA (now moot, keep for the record): band dir = floor(lat/2)*2 — tiles for lat -34.x live in dir -36, not -34.** Deploying the whole generated tree instead of hand-picked bands sidesteps it entirely.
 - [x] **Phase 0 — compatibility gate (gates 1&2)** — PASSED, and the feature is now ENABLED and running under manager after a clean reboot. Prior note: - [~] **Phase 0** — GATE-1 (messages arrive/decode) **PASS**, GATE-2 (tileLoaded 307/307 @12Hz) **PASS**. GATE-3 (roadName/speedLimit/curve) BLOCKED: car stationary (vEgo=0, bearing=0) so waySelectionType=fail. **Needs a road test.**
 - [x] **Verification 3–5** — DONE. `prebuilt` deliberately KEPT (this is a prebuilt branch; building it is a documented mistake). **Boot clean**: manager + plannerd/controlsd/selfdrived/card/modeld all up, mapd running under manager (pid 10159), nothing crash-looping, longitudinalPlan VALID=True. Config survived the reboot via the file fallback (it lives outside /data/params).
 - [~] **Verification 6–9** — static check done (mapdOut live, tileLoaded=True). **ROAD TESTS STILL OUTSTANDING** — need the car moving: waySelectionType is still `fail` and roadName empty because vEgo=0/bearing=0. Order: (a) known curve, (b) posted-limit change, (c) stop sign with no lead. Keep a hand near the wheel; then review /data/media/0/mapd_debug.log.

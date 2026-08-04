@@ -9,6 +9,78 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-08-04 — map curve speed cut 10% (`map_curve_target_lat_a` 2.5 → 2.025) + NATIONAL tile set, both DEPLOYED
+
+Two changes, both on the car. Device on `09a174b`, offroad during the whole deploy, rebooted, back
+in ~90 s.
+
+### 1. Curve speed 10% slower — a setting, not a code path
+
+Operator: curve entry slightly too fast.
+
+mapd computes `v = sqrt(map_curve_target_lat_a / κ)` (`mapd_source/math.go` `GetTargetVelocities`),
+and `UpdateCurveSpeed` takes the min over lookahead nodes. `scc_map.py:202` consumes
+`mapdOut.mapCurveSpeed` **directly with no scaling** — and its own comment says to tune MapdSettings
+rather than add a second python-side integrator. So the lever is the setting.
+
+Speed scales with √latA, so a factor *f* on speed needs *f²* on latA: **2.5 × 0.9² = 2.025**.
+
+**The key was ABSENT from `DEFAULT_MAPD_SETTINGS`**, so mapd was silently falling back to its own
+embedded default of 2.5 (`mapd_source/settings/defaults.json`). Pinning it makes the tune explicit
+and survives `clear_all()`, since `write_settings_file()` rewrites the blob before every mapd exec.
+
+**Expect slightly MORE than 10%.** A lower target also lets more nodes pass `map_curve.go:58`'s
+`tv.Velocity > VEgo + CURVE_CALC_OFFSET` filter and lengthens the jerk-limited trigger distance, so
+braking starts marginally earlier too.
+
+`APPROACH_DECEL = 0.5` deliberately **untouched** — it shapes the *approach*, latA sets the
+*target*. The drive-3 validation stands; the complaint was corner speed, not braking feel.
+
+**Verified:** ran `write_settings_file()` to a temp path **on device** → emits `2.025`; mapd's start
+time is after the pull (uptime 7 min vs mapd elapsed 7:26, both post-reboot).
+
+**Do NOT verify this by grepping `/data/params/d/MapdSettings`** — it is absent in steady state *by
+design* (`clear_all()` deletes it; mapd holds the values in memory). Same trap recorded in the
+2026-07-29 "one wrinkle understood and benign" entry. I hit it again and wasted a 5-minute poll on it.
+
+Category A, fork-owned file → no `GRT_MODS.md` entry needed (checked).
+
+### 2. National tile set replaces the two-band regional one
+
+Tiles regenerated on another machine from the full South Africa PBF, using the reworked sunnypilot
+generator (κ now suppressed at ≥3-way junctions and dead ends; chains held to a single highway tag).
+
+Device: **376 files / 106 MB (bands -34, -36 only) → 2,046 files / 601 MB (bands -24 … -36).**
+
+**The delivered tiles were verified before deploying, not taken on trust.**
+`parity_check_ver2.py` gate 1a asserts *"≥3-way node ⇒ stored κ == 0.0"*. Run against the delivered
+tiles with a Garden Route clip PBF: **4,468 junction nodes checked, 0 violations, PASS.** A stale
+checkout on the build machine would have shown ~3,029 violations — that is measured, not assumed:
+it is exactly what the pre-change generator produces on the same clip. So the build machine ran the
+reviewed code.
+
+Transfer: rsync → `offline.new`, verified 2,046 files + matching md5 on a spot tile, atomic swap.
+`offline.old` kept briefly, then deleted at the operator's instruction — it was a *regional subset*,
+not an equivalent fallback, so if the new tiles are ever wrong the fix is a rebuild, not a revert.
+
+The Phase 1b band gotcha (`floor(lat/2)*2`) is now moot: the whole generated tree is deployed, so
+every band is present rather than hand-picked.
+
+### STILL OUTSTANDING — the drive
+
+Every check confirms the **input** is 2.025. **Nothing confirms the output moved 10%.** Also, mapd
+was never observed opening a tile: it has no open handles into `offline/` while parked and opens
+tiles on demand near a fix, so that proves nothing either way.
+
+Instrument is `/data/media/0/mapd_debug.log` → `map_curve_speed_kmh`, same corner before vs after.
+`mapdOut` is still never in rlog on this prebuilt branch, so there is no retrospective path.
+
+### Deploy method note
+
+Used GitHub fetch → `git pull --ff-only` on device, matching the SYNC entry below. PROGRESS.md's
+`DEPLOY RUNBOOK` still describes the older git-bundle route; marked superseded there rather than
+deleted, since the bundle path is still correct when the device has no network.
+
 ## 2026-08-04 — SYNC: Pi5 → GitHub → comma4 (no code change; the 08-03 fallback removal is now ON the car)
 
 Housekeeping entry. No source was modified today — this records where each copy of the code now
