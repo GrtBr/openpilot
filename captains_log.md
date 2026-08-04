@@ -42,7 +42,14 @@ ignition cycle**, which will pick up the new code with no further action. First 
 cycle is the one that exercises the removal.
 
 **Deliberately NOT committed** (local tooling, not code): `graphify-out/` (57 MB of generated
-graph output), `CLAUDE.md`, `.graphifyignore`. All three remain untracked in the working tree.
+graph output), `CLAUDE.md`, `.graphifyignore`.
+
+`CLAUDE.md` and `graphify-out/` were then added to `.gitignore` at the operator's instruction, in
+the existing `# agents` block at the foot of the file. Both were already untracked, so the rules
+hide nothing that was ever committed — verified with `git check-ignore -v` (both rules fire) and
+`git ls-files | grep -cE 'CLAUDE\.md|graphify'` → `0`. This is a 2-line fork diff against upstream
+in a file upstream rarely touches; if it ever conflicts on rebase, `.git/info/exclude` is the
+zero-diff alternative. `.graphifyignore` was left untracked and un-ignored.
 
 ## 2026-07-28
 
