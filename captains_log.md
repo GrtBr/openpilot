@@ -9,6 +9,41 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-08-04 — SYNC: Pi5 → GitHub → comma4 (no code change; the 08-03 fallback removal is now ON the car)
+
+Housekeeping entry. No source was modified today — this records where each copy of the code now
+sits, and closes the "deploy tomorrow" left open by the 2026-08-03 entry below.
+
+**GitHub (`GrtBr/openpilot`), both pushes fast-forward, no force:**
+
+| Branch | Before | After | Note |
+|---|---|---|---|
+| `nightly-dev` | `dcb3550cac` | `005d003592` | 32 commits — the whole mapd + set-speed body of work |
+| `release-mici-staging` | *(absent)* | `0af132822` | **new branch**; the RHD Staria FW commit was local-only until now |
+
+Remote refs were a week stale (`FETCH_HEAD` dated Jul 28); re-fetched and re-checked
+`rev-list --left-right` before pushing — `0 32`, a true fast-forward, not a divergence.
+
+**comma4:** `git fetch origin nightly-dev && git merge --ff-only origin/nightly-dev`,
+`19c3568 → 005d003` (2 commits: the fallback removal + one docs commit). `--ff-only` deliberately,
+so it fails loudly rather than merging on the car.
+
+**Verified on the device:** `HEAD == 005d003`, working tree clean and exactly level with
+`origin/nightly-dev`, `prebuilt` sentinel still present (0 bytes, untouched — no scons was run and
+none is implied: the diff is 3 markdown files + `set_speed.py` + its tests). `test_set_speed.py`
+via `/usr/local/venv`: **42/42 passing on the car** — up from the 33 recorded on 2026-08-03,
+which is the rewritten suite from `005d003` running green against the device's real fork-config.
+
+**DEPLOY STATUS — read this before the next drive.** The car was *onroad* during the sync
+(`IsOffroad=0`, 17 selfdrive processes up, not engaged). At the operator's instruction the pull was
+done **without a reboot**: the new `set_speed.py` is on disk but the running processes still hold
+the old module in memory. **The 60 km/h no-map fallback is therefore still live until the next
+ignition cycle**, which will pick up the new code with no further action. First drive after that
+cycle is the one that exercises the removal.
+
+**Deliberately NOT committed** (local tooling, not code): `graphify-out/` (57 MB of generated
+graph output), `CLAUDE.md`, `.graphifyignore`. All three remain untracked in the working tree.
+
 ## 2026-07-28
 
 ### 3. Hard reset onto upstream `nightly-dev` — lockout and accel-filter changes DISCARDED
