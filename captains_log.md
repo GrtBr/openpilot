@@ -9,6 +9,73 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-08-05 — lead-vehicle dash icon, Tier 1 (`SCC_ObjSta`): CODED, NOT YET DEPLOYED
+
+New feature, unrelated to mapd/set-speed. sunnypilot's Hyundai `CarController` fills the dash's
+lead-vehicle icon from real lead data; mainline (this branch's base) sends the same `SCC_CONTROL`
+CAN message with those fields hardcoded static, so the Staria's cluster shows no dynamic lead icon
+today. Full plan: `PORT_LEAD_ICON_FROM_SUNNYPILOT.md`.
+
+**Why this is smaller than the mapd port:** the data source (`radarState`) is already a stock,
+compiled service — no `CustomReserved` slot, no `services.py`/`custom.capnp`/`log.capnp` edit. This
+is the first fork feature in this repo's history to touch zero cereal files, so the repo `CLAUDE.md`
+rule against SCP'ing cereal files to the device cannot be triggered by it.
+
+**DBC finding (`opendbc/dbc/generator/hyundai/hyundai_canfd.dbc:374-407`, `SCC_CONTROL` id 416):**
+`SCC_ObjSta` is the only signal in the message with a documented comment + `VAL_` table
+(0=no object, 1=uncontrollable, 2=controllable:longitudinal) AND the only one receiver-tagged `CLU`
+(cluster). Every other candidate signal (`ObjValid`, `OBJ_STATUS`, `ACC_ObjDist`) shows unconfirmed
+`XXX` receivers. sunnypilot's own `ObjValid` polarity differs between its CANFD and non-CANFD paths
+with no documented reason — rather than guess it, this change avoids that signal entirely and
+targets `SCC_ObjSta`, whose semantics are unambiguous from the DBC alone.
+
+**Confirmed the Staria's `SCC_CONTROL` is authored by openpilot, not a live factory ECU:**
+`create_acc_control()` only fires `if self.CP.openpilotLongitudinalControl` (`carcontroller.py:196`),
+already confirmed `True` on this car (line 310 of this log, 2026-07-24 entry). The ADAS Driving ECU
+is disabled and openpilot is the sole author of this message.
+
+**Advisor review, two checks before coding, both cleared:**
+1. `hyundaicanfd.py` has a second `SCC_CONTROL` builder, `create_acc_cancel()` — checked it only
+   fires when `openpilotLongitudinalControl` is `False` (`carcontroller.py:205-217`), the opposite
+   condition to `create_acc_control()`. Exactly one builder is ever active for this car; no risk of
+   two conflicting writers alternating the field.
+2. `gas_override` (the argument driving the 1-vs-2 distinction) is `CC.cruiseControl.override` at
+   the call site — the driver-pedal-override signal, matching the DBC's "uncontrollable" semantics.
+
+**Change:** `opendbc_repo/opendbc/car/hyundai/hyundaicanfd.py`, `create_acc_control()`, one dict
+entry, GRT-MOD sentinel-wrapped:
+```python
+"SCC_ObjSta": 0 if not (enabled and hud_control.leadVisible) else (1 if gas_override else 2),
+```
+Uses `enabled`, `hud_control`, `gas_override` — all pre-existing function arguments. No new
+SubMaster subscription, no signature change, no schema edit. `ObjValid`/`OBJ_STATUS` left at
+mainline's hardcoded constants — their cluster relevance is unconfirmed by the DBC, so touching
+them would add risk without a confirmed payoff.
+
+**Deliberately NOT built in the same pass:** Tier 2 (real `ACC_ObjDist`/`ACC_ObjRelSpd` numbers via
+`radarState`, hysteresis debounce) — advisor's instruction, followed: Tier 1 is an unproven probe
+(no reference implementation ships icon-only; sunnypilot always drives `ObjValid`/`SCC_ObjSta`/
+`ACC_ObjDist` together), so a road-test surprise with both changes present wouldn't be attributable
+to either one. Tier 2's design is fully scoped in the plan doc but stays unstarted until Tier 1 is
+driven.
+
+**Verified so far (offline only — Pi5 cannot build the compiled `CANPacker`, same constraint as
+every prior port on this branch):**
+- `ast.parse` on the modified file: syntax OK.
+- Real import: `from opendbc.car.hyundai import hyundaicanfd` succeeds (via `uv run --no-project
+  --with numpy`, the same pattern used for the RHD fingerprint verification on 2026-07-28);
+  `create_acc_control`'s signature unchanged.
+- Packer-level round-trip (does the DBC-generated `CANPacker` actually accept `SCC_ObjSta` as a
+  key) could NOT be run here — needs the compiled extension, which needs a build this branch's Pi5
+  cannot do. Deferred to the device, same as the mapd port's Verification 1.
+
+**NOT YET ON THE DEVICE.** Next step per the plan doc's §6: offroad on comma4, confirm engagement
+still works (lowest risk here — no new SubMaster service, so none of the `all_checks()` blast-radius
+concerns from the mapd port apply), then a `candump`-level check that `SCC_ObjSta` actually varies
+with `hudControl.leadVisible`, then a road test to see what the cluster actually does with it — the
+DBC confirms the signal is routed to the cluster, not what the cluster's firmware renders for each
+of its three documented values. Do not run any of this unattended.
+
 ## 2026-08-04 — map curve speed cut 10% (`map_curve_target_lat_a` 2.5 → 2.025) + NATIONAL tile set, both DEPLOYED
 
 Two changes, both on the car. Device on `09a174b`, offroad during the whole deploy, rebooted, back

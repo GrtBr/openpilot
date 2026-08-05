@@ -146,6 +146,12 @@ def create_acc_control(packer, CAN, enabled, accel_last, accel, stopping, gas_ov
     "ACC_ObjDist": 1,
     "ObjValid": 0,
     "OBJ_STATUS": 2,
+    # GRT-MOD-START: lead-vehicle dash icon. SCC_ObjSta is the only signal in this DBC message
+    # tagged CLU (cluster) with a documented value table (0=no object, 1=uncontrollable,
+    # 2=controllable:longitudinal) - see PORT_LEAD_ICON_FROM_SUNNYPILOT.md. ObjValid/OBJ_STATUS
+    # above are left at mainline's constants: their cluster relevance is unconfirmed by the DBC.
+    "SCC_ObjSta": 0 if not (enabled and hud_control.leadVisible) else (1 if gas_override else 2),
+    # GRT-MOD-END
     "SET_ME_2": 0x4,
     "SET_ME_3": 0x3,
     "SET_ME_TMP_64": 0x64,
