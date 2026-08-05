@@ -9,6 +9,99 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-08-05 — lead-vehicle dash icon, Tier 2 (distance/speed): IMPLEMENTED, offline-verified, NOT DEPLOYED (comma4 offline)
+
+Real `ACC_ObjDist`/`ACC_ObjRelSpd` numbers on top of Tier 1's `SCC_ObjSta` icon. `comma4` was
+offline for this entire session — nothing below has touched the device.
+
+**Design change from the original plan (`PORT_LEAD_ICON_FROM_SUNNYPILOT.md` §4), found while
+re-grounding on the current code before writing anything:** the plan called for porting
+sunnypilot's separate `LeadDataCarController` hysteresis class to debounce lead *presence*. Didn't
+build it. Tier 1 already has a working, road-tested presence signal — `hud_control.leadVisible` —
+which itself derives from `radarState.leadOne.present` one hop upstream
+(`longitudinal_planner.py: longitudinalPlan.hasLead = sm['radarState'].leadOne.present`, re-checked
+directly, not assumed). Porting a SECOND, independent hysteresis on `radarState.leadOne.present`
+would risk `SCC_ObjSta` (gated on `hud_control.leadVisible`) and the new numeric fields (gated on
+the new hysteresis) disagreeing frame-to-frame — icon on with no number, or vice versa. Instead:
+gate the numeric fields on `hud_control.leadVisible` AND card's own `radarState.leadOne.present`
+BOTH agreeing. When they don't (a real but narrow window — the two views update on independent
+cycles), the fail-safe direction is "no number" — same rule as the mapd port's 60 km/h fallback
+removal: never command a value the data didn't actually, currently supply.
+
+**Changes:**
+- `openpilot/selfdrive/car/card.py` — `'radarState'` added to the base `SubMaster` list (NOT
+  `GRT_SUB_CARD` — it's a stock always-published service, none of `mapdOut`'s ignore-list
+  treatment applies). One hook: `self.CI.CS._grt_lead = (dRel, vRel, present)` stashed onto the
+  `CarStateBase` instance right before `self.CI.apply(CC, now_nanos)` — works because `apply()`
+  forwards `self.CS` unchanged into `CarController.update()`, and `self.CI.CS` is already reached
+  this exact way at the `secoc_key` line a few lines up. No `interfaces.py` signature change, no
+  other car brand touched.
+- `opendbc_repo/opendbc/car/hyundai/carcontroller.py` — the `create_acc_control()` call site
+  passes `lead=getattr(CS, '_grt_lead', None)`. `CS` already reaches this call unchanged; `getattr`
+  with a `None` default so any `CS` this branch hasn't touched (replay, tests) degrades to Tier 1's
+  behaviour instead of raising.
+- `opendbc_repo/opendbc/car/hyundai/hyundaicanfd.py` — `create_acc_control()` gained an optional
+  `lead=None` param. Packs `ACC_ObjDist` (clipped 0–204.7 m) and `ACC_ObjRelSpd` (clipped
+  −16.4–34.7 m/s) only when the gate above is true. **`ACC_ObjRelSpd` is omitted from the values
+  dict entirely (not set to 0) when no lead is shown** — mainline never packed it either, and its
+  DBC receiver is unconfirmed (`XXX`, not `CLU`); writing an explicit `0` physical value would
+  silently change existing behaviour on a signal that might feed something else. `ACC_ObjDist`
+  stays at the constant `1` in that case, matching mainline exactly (it was already always set).
+- `openpilot/grt/tests/test_schema_conformance.py` — added `radarState.leadOne.vRel` (`.dRel`/
+  `.present` were already asserted from the mapd port).
+
+**§2.3 trap, checked explicitly because it bit the mapd port exactly this way:** re-grepped
+`log.capnp`'s `LeadData` struct directly before writing any code — `dRel @0`, `vRel @2`,
+`present @11`. Confirmed on THIS repo's actual schema. (Earlier in this session, before any code
+was written, a `.status` field name from an unrelated earlier grep against a different repo —
+sunnypilot's — nearly got carried into a design note; caught and corrected by re-grepping before
+committing to it, not after.)
+
+**Offline verification (comma4 unreachable all session):**
+- `ast.parse` on all 3 modified Python files: clean.
+- `test_schema_conformance.py`: **30/30**, including the new `vRel` assertion.
+- Real import of the `opendbc`-side files (`uv run --no-project --with numpy`): clean.
+  `card.py`'s own import could not be exercised — needs the on-device path layout for `opendbc`/
+  `cereal` resource resolution, which the Pi5 doesn't replicate. Pre-existing limitation from
+  every prior port on this branch, not new here.
+- **5 behavioural cases against the real `create_acc_control()` packing logic**, via a stub
+  packer that captures the `values` dict instead of encoding real bytes (the compiled `CANPacker`
+  needs a build the Pi5 can't do — same class of gate as the mapd port's Verification 1):
+  1. no lead at all (`lead=None`) → `ACC_ObjDist=1`, `ACC_ObjRelSpd` absent — **exact parity with
+     pre-Tier-2 behaviour**, the most important case to get right.
+  2. lead present + visible, in range → both fields pack correctly.
+  3. `hud_control.leadVisible=True` but `radarState.leadOne.present=False` → falls back to
+     no-number, confirming the fail-safe-on-disagreement gate actually works.
+  4. out-of-range `dRel`/`vRel` (500 m, 100 m/s) → clipped to 204/34.7, not passed through raw
+     (which would make the real packer choke on the car).
+  5. `gas_override=True` with a lead shown → `SCC_ObjSta=1` (uncontrollable), confirming Tier 1's
+     logic and Tier 2's numeric fields don't fight each other.
+  All 5 pass.
+
+**Advisor could not review this round's design** (overloaded both times called this session,
+same as earlier for Tier 1's initial DBC pull). Proceeded on the same grounding discipline as
+Tier 1 — every claim re-checked against this repo's live code — but this is flagged explicitly in
+`PORT_LEAD_ICON_FROM_SUNNYPILOT.md` §7 as outstanding: get advisor's read on the
+gate-on-both-sources-agreeing design and the `ACC_ObjRelSpd` omission before deploying.
+
+**NOT ON THE DEVICE.** `comma4` was offline for this entire session. Next step: deploy via the
+same Pi5 → GitHub → device route that worked for Tier 1 (see the entry below for the exact runbook
+and the `pkill -x manager.py` correction), then the on-device block — engagement check and a
+`cumLagMs` comparison against the 36.86 ms Tier-1 baseline are the two items Tier 2 specifically
+needs (new `radarState` subscriber, unlike Tier 1) — then a road test for the actual numbers.
+
+## 2026-08-05 — lead-vehicle dash icon, Tier 1: ROAD TEST PASSED
+
+Operator drove behind traffic and confirmed the lead icon appears on the Staria's cluster and
+"looks sane" — steady, not flickering, no reported oddity. This closes the one open question from
+the offroad-only verification below (the DBC confirms `SCC_ObjSta` is routed to the cluster; it
+never proved what the cluster's firmware does with each value — now confirmed by direct observation).
+
+**Tier 1 is DONE.** No further action needed on it. Proceeding to Tier 2 (real distance/speed via
+`radarState`) — see the entry above this one for its full design; `comma4 is offline` at the start
+of this work, so Tier 2 will be implemented and offline-verified only, not deployed, until the
+device is reachable again.
+
 ## 2026-08-05 — lead-vehicle dash icon, Tier 1: DEPLOYED to comma4, offroad checks PASS, road test outstanding
 
 Deployed the change from the entry below. Device confirmed parked/ignition-off by the operator

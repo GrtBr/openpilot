@@ -124,7 +124,7 @@ def create_lfahda_cluster(packer, CAN, enabled):
   return packer.make_can_msg("LFAHDA_CLUSTER", CAN.ECAN, values)
 
 
-def create_acc_control(packer, CAN, enabled, accel_last, accel, stopping, gas_override, set_speed, hud_control):
+def create_acc_control(packer, CAN, enabled, accel_last, accel, stopping, gas_override, set_speed, hud_control, lead=None):
   jerk = 5
   jn = jerk / 50
   if not enabled or gas_override:
@@ -132,6 +132,24 @@ def create_acc_control(packer, CAN, enabled, accel_last, accel, stopping, gas_ov
   else:
     a_raw = accel
     a_val = np.clip(accel, accel_last - jn, accel_last + jn)
+
+  # GRT-MOD-START: lead-vehicle dash icon, Tier 2 (distance/speed). `lead` is
+  # (dRel, vRel, present) from radarState.leadOne, or None if the caller has no lead data.
+  # Gated on BOTH hud_control.leadVisible (Tier 1's proven signal, derived from this same
+  # radarState.leadOne.present one hop upstream via longitudinalPlan.hasLead) AND `present`
+  # agreeing: card's own radarState read and the planner's slightly older view can disagree for
+  # a frame, and the fail-safe direction is "no number" rather than a possibly-stale one (same
+  # rule as the mapd port's 60 km/h fallback removal - never command a value the data didn't
+  # actually supply). dRel is clipped to the DBC's documented range before packing so a
+  # transient out-of-range track can never make the packer raise inside card's CAN loop.
+  # ACC_ObjRelSpd is intentionally OMITTED from the values dict (not set to 0) when there is no
+  # shown lead: mainline never packs it either, and its receiver is unconfirmed by the DBC (see
+  # PORT_LEAD_ICON_FROM_SUNNYPILOT.md §3) - explicitly writing 0 physical (raw 164, since the
+  # signal's offset is -16.4) would be a real behaviour change on an unconfirmed-safety-relevant
+  # signal versus the packer's prior default (unset -> raw 0 -> -16.4 m/s physical).
+  show_lead = lead is not None and hud_control.leadVisible and lead[2]
+  lead_dist = int(np.clip(lead[0], 0.0, 204.7)) if show_lead else 1
+  # GRT-MOD-END
 
   values = {
     "ACCMode": 0 if not enabled else (2 if gas_override else 1),
@@ -143,7 +161,7 @@ def create_acc_control(packer, CAN, enabled, accel_last, accel, stopping, gas_ov
     "JerkLowerLimit": jerk if enabled else 1,
     "JerkUpperLimit": 3.0,
 
-    "ACC_ObjDist": 1,
+    "ACC_ObjDist": lead_dist,  # GRT-MOD: was hardcoded 1; now the real lead distance when shown
     "ObjValid": 0,
     "OBJ_STATUS": 2,
     # GRT-MOD-START: lead-vehicle dash icon. SCC_ObjSta is the only signal in this DBC message
@@ -157,6 +175,9 @@ def create_acc_control(packer, CAN, enabled, accel_last, accel, stopping, gas_ov
     "SET_ME_TMP_64": 0x64,
     "DISTANCE_SETTING": hud_control.leadDistanceBars,
   }
+  if show_lead:
+    # GRT-MOD: ACC_ObjRelSpd, only ever set when a lead is actually shown - see note above.
+    values["ACC_ObjRelSpd"] = float(np.clip(lead[1], -16.4, 34.7))
 
   return packer.make_can_msg("SCC_CONTROL", CAN.ECAN, values)
 

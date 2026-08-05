@@ -33,6 +33,7 @@ REQUIRED = [
   ("mapdOut", "nextHazardDistance"),
   ("radarState", "leadOne.present"),
   ("radarState", "leadOne.dRel"),
+  ("radarState", "leadOne.vRel"),  # lead-vehicle dash icon, Tier 2 (card.py / hyundaicanfd.py)
   ("radarState", "leadTwo.present"),
   ("radarState", "leadTwo.dRel"),
   ("carState", "aEgo"),

@@ -69,7 +69,12 @@ class Car:
     self.can_sock = messaging.sub_sock('can', timeout=20)
     # GRT-MOD-START: mapdOut for the set-speed tracker. Ignores are mandatory — mapd only runs
     # when OSM tiles are installed (see GRT_MODS.md / plannerd).
-    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'] + GRT_SUB_CARD,
+    # 'radarState' (lead-vehicle dash icon, Tier 2) is added OUTSIDE the ignore lists,
+    # deliberately: it is a stock, always-published service (radard), not a fork one, so it
+    # needs none of the ignore-list treatment mapdOut requires. card's own checks are scoped to
+    # all_checks(['carControl'])/all_alive(['carControl']) (see below), so this cannot affect
+    # them either way — see PORT_LEAD_ICON_FROM_SUNNYPILOT.md.
+    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents', 'radarState'] + GRT_SUB_CARD,
                                   ignore_alive=GRT_SUB_CARD, ignore_valid=GRT_SUB_CARD,
                                   ignore_avg_freq=GRT_SUB_CARD)
     # GRT-MOD-END
@@ -257,6 +262,13 @@ class Car:
     if self.sm.all_alive(['carControl']):
       # send car controls over can
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
+      # GRT-MOD-START: lead-vehicle dash icon, Tier 2. Stash the fused lead track onto the
+      # CarStateBase instance CarController.update() already receives (self.CI.CS is reached
+      # the same way at the secoc_key line above), so no interfaces.py/apply() signature change
+      # is needed for any car brand. Hyundai-only consumer: opendbc/car/hyundai/carcontroller.py.
+      lead_one = self.sm['radarState'].leadOne
+      self.CI.CS._grt_lead = (lead_one.dRel, lead_one.vRel, lead_one.present)
+      # GRT-MOD-END
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
       self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
 
