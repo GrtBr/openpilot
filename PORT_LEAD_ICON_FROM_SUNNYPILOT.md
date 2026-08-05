@@ -7,12 +7,15 @@
   the parts specific to this feature. §9 of that doc ("reusable recipe") is the checklist this
   plan was built against.
 
-  Status: **Tier 1 IMPLEMENTED locally (offline block only) — NOT YET ON THE DEVICE.**
-  Advisor reviewed §3's DBC findings and two follow-up checks (§4a) before the edit landed;
-  both cleared, see §4's Tier 1 section. Offline gates (syntax parse, real import of the
-  modified module) pass. Packer-level and on-device verification (§6) are outstanding — same
-  class of gate as the mapd port's Verification 1, which this branch's Pi5 cannot run (no
-  scons/cmake/capnproto toolchain). Tier 2 is unstarted by design (see §4a).
+  Status: **Tier 1 DEPLOYED to comma4 (`405e1a8`). All offroad checks PASS. Road test OUTSTANDING.**
+  Advisor reviewed §3's DBC findings and two follow-up checks before the edit landed, both
+  cleared (§4). Offroad, post-reboot: managerState clean, engagement not blocked
+  (`onroadEvents` = wrongGear+seatbeltNotLatched only), zero packer/card exceptions in swaglog,
+  and a real `SCC_CONTROL` frame captured off `sendcan` and hand-decoded against the DBC's bit
+  layout — `SCC_ObjSta=0`, correct for a disengaged car. See captains_log 2026-08-05 for the
+  full record. What's NOT yet proven: the `1`/`2` branches and what the cluster's firmware
+  actually renders for any value — needs the driver engaged with a real lead present (§6).
+  Tier 2 remains unstarted by design (§4).
 -->
 
 # Lead-vehicle dash icon — porting sunnypilot's behaviour into `nightly-dev`
@@ -220,18 +223,24 @@ Offline (Pi5), before any device step:
 
 On-device, offroad first (car powered, supervised, per this branch's standing rule — never
 unattended):
-1. **Engagement still works.** Lowest-risk item here (card's checks are scoped, no ignore lists
-   needed at all for `radarState`), but verify it anyway before anything else, per house convention.
-2. `carState.cumLagMs` vs. a pre-change segment — card is the 100 Hz CAN loop; Tier 2 adds a
-   subscriber (no new publisher this time, unlike the set-speed feature).
-3. Confirm via `candump`/whatever CAN tooling is available that `SCC_CONTROL.SCC_ObjSta` actually
-   varies with `hudControl.leadVisible` while stationary with a target in front (e.g. wall/car in a
-   driveway) — don't wait for a drive to learn the two-line diff has a typo.
-4. **Road test — this is what actually answers the open question in §4's Tier 1 caveat.** Drive
-   behind traffic and watch the cluster: does the lead icon light, and does it look right (steady,
-   not flickering, positioned sensibly)? This is the one thing that can't be determined from DBC
-   inspection or unit tests — the DBC confirms `SCC_ObjSta` is *routed* to the cluster, not what the
-   cluster's firmware *does* with each of its three documented values.
+1. **Engagement still works.** — DONE 2026-08-05 for Tier 1. `onroadEvents` = benign parked-car
+   signature only, nothing shouldBeRunning-but-not-running. Re-run for Tier 2 when it ships (it
+   adds a `radarState` subscriber to `card`, unlike Tier 1).
+2. `carState.cumLagMs` vs. a pre-change segment — DONE for Tier 1 as a data point (36.86 ms,
+   no comparison needed since Tier 1 adds no new SubMaster/PubMaster traffic to `card`). Tier 2
+   DOES add a subscriber and must get a real before/after comparison, per the set-speed feature's
+   precedent.
+3. Confirm via CAN capture that `SCC_CONTROL.SCC_ObjSta` decodes correctly — DONE 2026-08-05 for
+   Tier 1: captured a real frame off `sendcan`, hand-decoded byte 13 bits 4-6 against the DBC's
+   `108|3@1+` layout, got `SCC_ObjSta=0`, correct for the disengaged state at capture time (the
+   formula collapses to 0 whenever `enabled` is false). The `1`/`2` branches are NOT yet exercised
+   — that needs engagement, which needs the car moving.
+4. **Road test — OUTSTANDING. This is what actually answers the open question in §4's Tier 1
+   caveat**, and the only remaining item for Tier 1. Drive behind traffic and watch the cluster:
+   does the lead icon light, and does it look right (steady, not flickering, positioned sensibly)?
+   This is the one thing that can't be determined from DBC inspection, unit tests, or a parked CAN
+   capture — the DBC confirms `SCC_ObjSta` is *routed* to the cluster, not what the cluster's
+   firmware *does* with each of its three documented values.
 
 ## 7. Status
 

@@ -9,6 +9,55 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-08-05 — lead-vehicle dash icon, Tier 1: DEPLOYED to comma4, offroad checks PASS, road test outstanding
+
+Deployed the change from the entry below. Device confirmed parked/ignition-off by the operator
+before touching anything (see the process-state note further down — worth recording as a real
+gotcha, not just a formality).
+
+**Deploy:** Pi5 → GitHub → comma4 (the normal-case route per PROGRESS.md's 2026-08-04 note).
+Committed the 4 files below as `405e1a84e7`, `git push origin nightly-dev`, device fast-forwarded
+`09a174b → 405e1a8` (picked up one prior docs commit it hadn't pulled yet, plus this one — 5 files,
++418/−7). `prebuilt` marker untouched. No scons, no cereal SCP (this change touches zero cereal
+files, so that class of risk was structurally not in play — see the entry below).
+
+**`pkill -x manager.py` matched nothing** — both `manager.py` processes' actual `/proc/PID/comm` is
+`python3` (invoked as `python3 ./manager.py`), so an exact-name match never fires. Not a blocker:
+per the 2026-08-04 SYNC entry's own finding, a plain `git merge --ff-only` is safe with the old
+processes still running (they just keep the old module in memory until restarted); the reboot is
+what actually applies the change, not the pkill. Recorded as a correction to the `pkill -x`
+guidance in the deploy runbook — it doesn't reliably match on this device's process tree.
+
+**Also noteworthy: `IsOffroad=0` while the operator reported the car parked/off.** Caught this before
+doing anything: `controlsd`/`selfdrived`/`card` were all live pre-reboot, which is the *onroad*
+process set. Paused and asked the operator directly rather than trusting either signal alone —
+confirmed parked. Given the operator's direct confirmation, proceeded, but this is worth watching
+on a future deploy: either the param is stale after a non-clean stop, or the device's onroad
+detection doesn't match the operator's notion of "off". Not resolved here; just flagged.
+
+**Post-reboot, offroad, all checks before any road test:**
+- Device back in ~60s. `git log -1` = `405e1a8`, tree clean.
+- `managerState`: **nothing** shouldBeRunning-but-not-running. mapd/modeld/dmonitoringmodeld/
+  controlsd/selfdrived/card/plannerd all up.
+- `onroadEvents` = `[wrongGear, seatbeltNotLatched]` only — the same benign parked-car signature
+  recorded on 2026-07-30. No `commIssue`. **Engagement is not blocked.**
+- swaglog since boot grepped for `card|hyundaicanfd|carcontroller|packer|SCC_ObjSta|KeyError`:
+  **empty.** The packer accepted the new DBC key without throwing.
+- **Captured the real `SCC_CONTROL` (address 416) frame off `sendcan`** and hand-decoded byte 13
+  bits 4-6 (the DBC's `108|3@1+` layout) against the raw bytes: `SCC_ObjSta = 0`. Correct — the car
+  is disengaged (`selfdriveState.enabled=False`), and the formula collapses to 0 whenever `enabled`
+  is false, independent of lead state. This is the expected value here, not an inert result; it
+  also cross-validates the packer's encoding against independent hand bit-math, both agreeing.
+- `carState.cumLagMs` = 36.86 ms. No pre/post comparison needed (unlike the set-speed feature):
+  this change adds no new `SubMaster`/`PubMaster` traffic to `card`, only edits an
+  already-running message builder inside the existing car-control path.
+
+**NOT YET PROVEN: the `1`/`2` branches, or what the cluster actually renders for any of them.**
+Everything above is reachable while parked and disengaged; the DBC confirms `SCC_ObjSta` is routed
+to the cluster (`CLU` receiver tag), not what the cluster's firmware does with each value. That
+needs the driver engaged with a real lead vehicle present — the road test in
+`PORT_LEAD_ICON_FROM_SUNNYPILOT.md` §6, still outstanding.
+
 ## 2026-08-05 — lead-vehicle dash icon, Tier 1 (`SCC_ObjSta`): CODED, NOT YET DEPLOYED
 
 New feature, unrelated to mapd/set-speed. sunnypilot's Hyundai `CarController` fills the dash's
