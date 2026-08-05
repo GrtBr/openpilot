@@ -9,6 +9,46 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-08-05 — DIAGNOSTIC ONLY: `micd` down after operator reboot — NOT fork-related, unfixed, handed off
+
+Operator rebooted comma4 (unrelated to any deploy from this session — device came back online on
+its own) and hit `processNotRunning` blocking engagement, reported as "micd soundd process not
+running". Investigated; **no fix applied**, handed off to a separate agent per operator's
+instruction. Recorded here so the next investigation doesn't repeat the same steps.
+
+**Ruled out as fork-related:**
+- Device is on `405e1a8` (Tier 1 only — `SCC_ObjSta`). Tier 2 (`00c38bddb5`) has **not** been
+  pulled to the device; nothing from this session's card.py/carcontroller.py/hyundaicanfd.py work
+  is on the car.
+- `micd`/`soundd` are the microphone/audio subsystem — no code path shared with the CAN/dash-icon
+  changes in either tier.
+- Tier 1 already passed a full road test earlier in this same session, before this reboot.
+
+**State found:**
+- `soundd`: running fine (confirmed via `pgrep`).
+- `micd`: `managerState` reports `shouldBeRunning=True, running=False, exitCode=1`, stale
+  `pid=18707`. **Not self-recovering** — polled 4× over ~80s with `managerState`, identical
+  `pid`/`exitCode` every time, so manager is not retrying it (differs from the closest documented
+  precedent, the 2026-07-30 `soundd` boot crash, which self-recovered via manager's own restart).
+- `onroadEvents` includes `processNotRunning` — confirmed this blocks engagement, matching the
+  documented behaviour of that event type.
+- Manually running `python3 -m openpilot.system.micd` on the device **succeeds cleanly right now**
+  — "micd stream started" logged immediately, no error, blocks normally on the audio stream. Not a
+  persistent/reproducible fault as of this investigation.
+
+**Root cause of the ORIGINAL crash (exitCode=1 at boot) could not be determined — the traceback is
+structurally unrecoverable on this device**: `system/manager/process.py:221-222`
+(`PythonProcess.start()`) redirects every Python-process's `stdout`/`stderr` to `/dev/null`. Once
+manager launches a process, any traceback it prints on crash is gone. This is stock/upstream
+manager code, not fork-owned, so not something to patch as part of this feature — but worth knowing
+for any future investigation on this device: a crash-at-boot diagnosis needs either a live
+`journalctl`/dmesg capture from the actual boot window, or `stdout`/`stderr` redirected to a file
+temporarily (e.g. a manual foreground run at the moment of boot), not swaglog after the fact.
+
+**Not attempted:** a reboot, which is the only thing precedent shows reliably clears this class of
+issue (2026-07-30 entry). Deliberately left to the operator/next agent rather than done unasked,
+since a device reboot is a real action on a physical, possibly-driven car.
+
 ## 2026-08-05 — lead-vehicle dash icon, Tier 2 (distance/speed): IMPLEMENTED, offline-verified, NOT DEPLOYED (comma4 offline)
 
 Real `ACC_ObjDist`/`ACC_ObjRelSpd` numbers on top of Tier 1's `SCC_ObjSta` icon. `comma4` was
