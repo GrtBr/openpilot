@@ -170,6 +170,8 @@ class SmartCruiseControlMap:
     self.output_v_target = V_CRUISE_UNSET
     self.output_hazard_accel = None
 
+    self._curve_ceiling = 0.0     # rate-limited map-curve ceiling (m/s); 0 = no curve
+
     self.hazard_speed_target = 0.0
     self.hazard_hold_m = 0.0
     self.hazard_active = False
@@ -190,6 +192,52 @@ class SmartCruiseControlMap:
     if self.frame % int(PARAMS_UPDATE_PERIOD / DT_MDL) == 0:
       self.enabled = get_bool_safe(self.params, "SmartCruiseControlMap")
 
+  def _ramp_curve_ceiling(self, map_curve_speed: float) -> float:
+    """Rate-limit how fast the map-curve ceiling may DESCEND, to APPROACH_DECEL.
+
+    Returns the ceiling to command this frame (m/s), or 0.0 when there is no curve.
+
+    WHY. mapd publishes mapCurveSpeed as a step. Measured on route 00000072
+    (2026-08-05 11:43:18, no lead, no hazard): the ceiling fell 85.2 -> 57.2 km/h in a single
+    frame at 72.7 km/h, and the planner's P-controller
+    a_cruise = clip(v_cruise - v_ego, A_CRUISE_MIN=-1.2, ...) saturated on the spot —
+    -1.34 m/s^2 with -2.33 m/s^3 of jerk, where mapd's own trigger distance had been sized for
+    -0.26 m/s^2. Across that day's drives 70% of curve steps hit A_CRUISE_MIN. This is the same
+    pathology approach_speed() fixed for hazards and speed limits on 2026-07-29.
+
+    WHY NOT approach_speed(). That profile needs a DISTANCE, and mapdOut carries none for
+    curves — only nextSpeedLimitDistance / nextHazardDistance / nextAdvisorySpeedDistance.
+    Shaping in the time domain instead needs no distance and gives the same result: the ceiling
+    descends at APPROACH_DECEL, so the planner sees a small error each frame instead of one big
+    one.
+
+    Properties, each asserted by test:
+      * Rises are NOT limited. When the curve ends the ceiling lifts immediately, so this can
+        never hold the car back.
+      * The ramp is anchored at v_ego, never at the previous ceiling. A ceiling above the
+        current speed cannot brake, so ramping down from a stale high value (85 km/h above)
+        would burn seconds doing nothing before braking started.
+      * Self-escalating, so authority is never reduced. The ceiling descends on its own clock
+        whether or not the car keeps up; a curve closer than the ramp assumes simply grows the
+        v_cruise - v_ego error and the planner brakes harder. Only the onset transient is
+        softened — the floor is still A_CRUISE_MIN.
+      * It still lands in time. mapd's trigger distance includes a
+        target_speed_time_offset = 4 s margin; the ramp needs Δv / APPROACH_DECEL plus ~1 s to
+        build the tracking error (5.8 s for the measured median Δv of 8.7 km/h) against the
+        5.5 s mapd planned, so the ceiling reaches target inside that margin.
+    """
+    if map_curve_speed <= 0.0:
+      self._curve_ceiling = 0.0
+      return 0.0
+
+    # Never carry a ceiling higher than what could actually bind this frame.
+    cap = max(self.v_ego, map_curve_speed)
+    prev = self._curve_ceiling if self._curve_ceiling > 0.0 else cap
+    prev = min(prev, cap)
+
+    self._curve_ceiling = max(map_curve_speed, prev - APPROACH_DECEL * DT_MDL)
+    return self._curve_ceiling
+
   def update_calculations(self, sm: messaging.SubMaster) -> None:
     # Reset each frame; the hazard / hold branches below set it if the hazard logic ends up
     # owning v_target. Gates the firm hazard decel output.
@@ -197,10 +245,11 @@ class SmartCruiseControlMap:
 
     mapd = sm['mapdOut']
 
-    # mapd's UpdateCurveSpeed() already handles path distance, the 3-phase jerk profile,
-    # TriggerDistance hysteresis and CURVE_CALC_OFFSET. Trust its output directly.
+    # mapd's UpdateCurveSpeed() handles path distance, the 3-phase jerk profile,
+    # TriggerDistance hysteresis and CURVE_CALC_OFFSET — but it publishes the result as a STEP,
+    # and the step is what the driver feels. See _ramp_curve_ceiling().
     map_curve_speed = float(mapd.mapCurveSpeed)
-    self.v_target = map_curve_speed if map_curve_speed > 0 else 0.0
+    self.v_target = self._ramp_curve_ceiling(map_curve_speed)
 
     # --- speed limits (Phase 6) ---
     # mapd already folds the posted limit, speed_limit_offset, hold-last-seen AND the
@@ -348,7 +397,8 @@ class SmartCruiseControlMap:
     self._prev_hazard_distance = next_hazard_distance
 
     self._dbg = {
-      "map_curve_speed": map_curve_speed,
+      "map_curve_speed": map_curve_speed,          # RAW from mapd (the step)
+      "curve_ceiling": self._curve_ceiling,        # after the APPROACH_DECEL descent limit
       "speed_limit_suggested": speed_limit_suggested,
       "next_speed_limit": float(mapd.nextSpeedLimit),
       "next_speed_limit_distance": float(mapd.nextSpeedLimitDistance),
@@ -449,6 +499,7 @@ Third element is an UPCOMING limit pre-authorised for the approach ramp ONLY.
       "a_ego_mps": self.a_ego,
       "v_cruise_kmh": self.v_cruise * 3.6,
       "map_curve_speed_kmh": self._dbg.get("map_curve_speed", 0.0) * 3.6,
+      "curve_ceiling_kmh": self._dbg.get("curve_ceiling", 0.0) * 3.6,
       "speed_limit_suggested_kmh": self._dbg.get("speed_limit_suggested", 0.0) * 3.6,
       "next_sl_kmh": self._dbg.get("next_speed_limit", 0.0) * 3.6,
       "next_sl_dist_m": self._dbg.get("next_speed_limit_distance", 0.0),

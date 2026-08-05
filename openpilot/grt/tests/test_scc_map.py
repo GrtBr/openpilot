@@ -48,10 +48,13 @@ UNSET=255.0; ok=lambda c: "PASS" if c else "**FAIL**"
 res=[]
 def check(name,cond): res.append((name,cond)); print(f"  {ok(cond):9s} {name}")
 
-# 1 curve speed becomes the ceiling
+# 1 curve speed becomes the ceiling. The ceiling is RATE-LIMITED downward at APPROACH_DECEL
+# (see _ramp_curve_ceiling), so it starts at v_ego and converges on the curve speed rather
+# than stepping to it — hold v_ego and let it run to convergence.
 c=scc_map.SmartCruiseControlMap()
-for _ in range(3): c.update(SM(curve=15.0),True,False,25.0,0.0,30.0)
-check("curve speed -> v_target=15, active, ceiling applied", abs(c.v_target-15.0)<1e-6 and c.is_active and abs(c.output_v_target-15.0)<1e-6)
+for _ in range(600): c.update(SM(curve=15.0),True,False,25.0,0.0,30.0)
+check("curve speed -> v_target converges to 15, active, ceiling applied",
+      abs(c.v_target-15.0)<1e-6 and c.is_active and abs(c.output_v_target-15.0)<1e-6)
 
 # 2 speed limit (Phase 6) lowers target, and is taken over a higher curve speed
 c=scc_map.SmartCruiseControlMap()
@@ -185,7 +188,7 @@ check("ungated -> the approach ramp still fires (unchanged when the feature is o
 
 # curve and hazard braking are NOT gated -- they are not speed limits
 c=scc_map.SmartCruiseControlMap()
-for _ in range(3): c.update(GSM(SM(curve=15.0),authorised_kph=0.0),True,False,25.0,0.0,30.0)
+for _ in range(600): c.update(GSM(SM(curve=15.0),authorised_kph=0.0),True,False,25.0,0.0,30.0)
 check("curve braking is NOT gated by authorisation", abs(c.v_target-15.0)<1e-6)
 c=scc_map.SmartCruiseControlMap()
 for _ in range(5): c.update(GSM(SM(hz="stop",hzd=30.0),authorised_kph=0.0),True,False,15.0,0.0,25.0)
@@ -206,6 +209,87 @@ check("a PRE-authorised upcoming limit is NOT used as a ceiling", c.v_target==0.
 c=scc_map.SmartCruiseControlMap()
 for _ in range(3): c.update(GSM(SM(nsl=5.55,nsld=80.0),authorised_kph=0.0,next_kph=60.0),True,False,20.0,0.0,30.0)
 check("a pre-authorisation for a different limit does not unlock the ramp", c.v_target==0.0)
+
+# ---------------------------------------------------------------------------------------
+# Curve-ceiling descent rate limit (_ramp_curve_ceiling). Added 2026-08-05 from drive data:
+# mapd steps mapCurveSpeed (measured 85.2 -> 57.2 km/h in one frame at 72.7 km/h), which
+# saturated A_CRUISE_MIN on 70% of curve events. Each assertion below mirrors a property
+# claimed in the method's docstring.
+DEC = scc_map.APPROACH_DECEL
+DT = 0.05
+
+# anchored at v_ego, NOT at the raw curve speed: no instantaneous step
+c=scc_map.SmartCruiseControlMap()
+c.update(SM(curve=15.9),True,False,20.2,0.0,30.0)          # the measured 72.7 -> 57.2 km/h case
+check("first frame anchors at v_ego, not at the curve speed",
+      abs(c.v_target-(20.2-DEC*DT))<1e-6)
+
+# the descent rate IS APPROACH_DECEL
+c=scc_map.SmartCruiseControlMap()
+seq=[]
+for _ in range(20):
+    c.update(SM(curve=15.9),True,False,20.2,0.0,30.0); seq.append(c.v_target)
+steps=[seq[i-1]-seq[i] for i in range(1,len(seq))]
+check("ceiling descends at exactly APPROACH_DECEL",
+      all(abs(s-DEC*DT)<1e-9 for s in steps))
+
+# never overshoots below the raw target
+c=scc_map.SmartCruiseControlMap()
+for _ in range(2000): c.update(SM(curve=15.9),True,False,20.2,0.0,30.0)
+check("ceiling converges to the raw curve speed and never undershoots it",
+      abs(c.v_target-15.9)<1e-9)
+
+# RISES are not limited -- curve ending must lift the ceiling immediately
+c=scc_map.SmartCruiseControlMap()
+for _ in range(40): c.update(SM(curve=15.9),True,False,20.2,0.0,30.0)
+low=c.v_target
+c.update(SM(curve=30.0),True,False,20.2,0.0,30.0)
+check("a rising curve speed is applied immediately (never holds the car back)",
+      c.v_target>low and abs(c.v_target-30.0)<1e-9)
+
+# no curve -> ceiling resets, so the next curve re-anchors at v_ego rather than resuming
+c=scc_map.SmartCruiseControlMap()
+for _ in range(40): c.update(SM(curve=15.9),True,False,20.2,0.0,30.0)
+c.update(SM(curve=0.0),True,False,20.2,0.0,30.0)
+check("no curve -> v_target 0 and the ramp state resets", c.v_target==0.0 and c._curve_ceiling==0.0)
+c.update(SM(curve=15.9),True,False,20.2,0.0,30.0)
+check("next curve re-anchors at v_ego (no stale ceiling carried over)",
+      abs(c.v_target-(20.2-DEC*DT))<1e-6)
+
+# a stale HIGH ceiling must not delay braking: ceiling above v_ego is inert, so when the raw
+# value drops below v_ego the ramp starts from v_ego, not from the old high value
+c=scc_map.SmartCruiseControlMap()
+for _ in range(20): c.update(SM(curve=23.7),True,False,20.2,0.0,30.0)   # 85.2 km/h, above v_ego
+check("a ceiling above v_ego is passed through untouched", abs(c.v_target-23.7)<1e-9)
+c.update(SM(curve=15.9),True,False,20.2,0.0,30.0)
+check("step down from an above-v_ego ceiling still starts the ramp at v_ego",
+      abs(c.v_target-(20.2-DEC*DT))<1e-6)
+
+# self-escalation: the ceiling keeps descending even if the car does not slow, so the
+# v_cruise - v_ego error grows and the planner brakes harder. Authority is never reduced.
+c=scc_map.SmartCruiseControlMap()
+errs=[]
+for _ in range(60):
+    c.update(SM(curve=8.0),True,False,20.2,0.0,30.0)   # car stubbornly holds 20.2 m/s
+    errs.append(c.v_target-20.2)
+check("ceiling keeps descending when the car does not slow (self-escalating)",
+      errs[-1]<errs[0]<0 and all(errs[i]<errs[i-1] for i in range(1,len(errs))))
+
+# a lower speed limit still wins over the ramped curve ceiling
+c=scc_map.SmartCruiseControlMap()
+for _ in range(10): c.update(SM(curve=15.9,sl=10.0),True,False,20.2,0.0,30.0)
+check("a lower speed limit still beats the ramping curve ceiling", abs(c.v_target-10.0)<1e-9)
+
+# time to converge is bounded by dv / APPROACH_DECEL -- it must land inside mapd's own
+# trigger margin (target_speed_time_offset = 4 s on top of the jerk-limited distance)
+c=scc_map.SmartCruiseControlMap()
+n=0
+while c.v_target != 15.9 and n < 10000:
+    c.update(SM(curve=15.9),True,False,20.2,0.0,30.0); n+=1
+t_conv=n*DT
+expect=(20.2-15.9)/DEC
+check(f"convergence time {t_conv:.1f}s == dv/APPROACH_DECEL ({expect:.1f}s)",
+      abs(t_conv-expect)<0.1)
 
 print(f"\n{sum(1 for _,c_ in res if c_)}/{len(res)} passed")
 sys.exit(0 if all(c_ for _,c_ in res) else 1)

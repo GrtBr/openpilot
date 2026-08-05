@@ -9,6 +9,110 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-08-05 — curve approach: rate-limit the ceiling descent to APPROACH_DECEL (fixes the harsh curve slow-down)
+
+Operator: the slow-down *before* a curve is too rapid. Root-caused from the 11:28 drive, fixed
+in `scc_map.py`, tests green, **DEPLOYED**.
+
+### Getting the right drive out of the log (worth reusing)
+
+`mapd_debug.log` `t` is `time.monotonic()` — boot-relative and reset every boot, so it cannot
+locate a wall-clock time. **Device file mtimes are also useless**: the RTC is batteryless, so
+segments carry pre-NTP stamps (`Jun 5 15:37`) corrected only later.
+
+What works: each route's qlog `clocks` messages, whose *last* sample is post-sync. Route
+`00000072` → boot_epoch `2026-08-05 09:27:06 UTC`, so the drive ran **11:27:42–11:51:38 SAST**
+= mapd_debug session 56. Verified the session↔route pairing twice by matching qlog
+`carState.vEgo` against `v_ego_kmh` over the same monotonic window (21.5 vs 21.5 km/h;
+13.6 vs 13.5 on a second drive). Boot cycles map 1:1 to the day's routes by duration.
+
+### The aggregate hid the defect
+
+Over 11 curve episodes: mean a_ego **−0.35 m/s²**, median frames at/below −1.15 = **0%**.
+Nothing looks wrong. The whole problem is the onset transient, visible only frame by frame:
+
+```
+t       v_ego  a_ego  jerk   mapCurve  v_target
+970.0   71.2    0.07         75.5      75.5     <- ceiling above us, inert
+972.0   72.7    0.21         57.2      57.2     <- STEP 85.2 -> 57.2 in ONE 0.5 s frame
+972.5   72.2   -0.96  -2.33
+975.0   61.4   -1.34                            <- saturated A_CRUISE_MIN
+976.0   58.2   -0.42                            <- gentle tail
+```
+
+Ported `CalculateJerkLimitedDistance` from the Go source to get mapd's own planned decel:
+**mapd sized the trigger for −0.26 m/s², the car used −1.24** — 4.5× overshoot, and 70% of
+curve steps saturated `A_CRUISE_MIN`. Same pathology `approach_speed()` fixed for hazards and
+limits on 2026-07-29; curves never got it.
+
+### It was NOT caused by the 10% cut — but the cut is why it became noticeable
+
+Clean before/after, because no driving happened between the 08-04 change and this drive. A
+recurring corner pair reads **(52.9, 41.7) km/h** across 16 pre-change sessions and
+**(47.7, 37.6)** today — both ratios 0.9017, exactly the √(2.025/2.5) applied. Same corners,
+same κ, only `latA` moved.
+
+| no-lead events | PRE (latA 2.5) | TODAY (latA 2.025) |
+|---|---|---|
+| median Δv to target | 2.9 km/h | **8.7 km/h** |
+| **peak decel used** | **−1.23** | **−1.24 m/s²** |
+| events saturating ≤−1.15 | 57% | **70%** |
+| median time to target | 3.0 s | **5.0 s** |
+
+Peak decel is identical, so the saturation is structural and pre-existing. What the cut did was
+triple Δv per step, so the same hard braking lasts ~1.7× longer and fires more often. A −1.2
+blip shedding 3 km/h is imperceptible; −1.2 for 5 s shedding 9 km/h is what the operator felt.
+
+### The fix: rate-limit the DESCENT, not the distance
+
+`_ramp_curve_ceiling()` in `scc_map.py`. `approach_speed()` cannot be reused because it needs a
+distance and **mapdOut publishes none for curves** (only `nextSpeedLimitDistance`,
+`nextHazardDistance`, `nextAdvisorySpeedDistance`). Shaping in the *time* domain needs no
+distance and achieves the same thing: the commanded ceiling may fall no faster than
+`APPROACH_DECEL = 0.5 m/s²`, so the planner sees a small error each frame instead of one big one.
+
+Design points, each asserted by test:
+- **Anchored at `v_ego`, never at the previous ceiling.** A ceiling above current speed is inert;
+  ramping down from a stale 85 km/h would burn ~7 s doing nothing before braking began.
+- **Rises are not limited** — curve ends, ceiling lifts immediately, can never hold the car back.
+- **Self-escalating, so authority is never reduced.** The ceiling descends on its own clock
+  whether or not the car keeps up; a closer-than-assumed curve grows the error and the planner
+  brakes harder. Floor is still `A_CRUISE_MIN`.
+- **Still lands in time.** mapd's trigger carries a `target_speed_time_offset = 4 s` margin;
+  the ramp needs Δv/0.5 ≈ 4.8 s plus ~1 s to build tracking error, against mapd's planned 5.5 s.
+
+`_dbg` now logs BOTH `map_curve_speed_kmh` (raw step) and `curve_ceiling_kmh` (ramped), so the
+next drive shows the shaping directly.
+
+### Replay of the 11 real measured events through the new limiter
+
+| | before | after |
+|---|---|---|
+| commanded `a_cruise` peak (median) | −1.20 | **−0.50 m/s²** |
+| onset jerk (median) | −2.81 | **−0.84 m/s³** |
+| events saturating `A_CRUISE_MIN` | 100% | **0%** |
+
+Every event lands on exactly −0.50, i.e. `APPROACH_DECEL`, which is the design intent.
+Open-loop caveat: real `v_ego` would differ once braking changes, so this is first-order — but
+the onset transient is precisely what the change targets.
+
+### Tests
+
+**42 scc_map** (13 new for the limiter), **44 hooks**, **62 set_speed**, **30/30 schema
+conformance** against the real `log.capnp` including all four wire discriminants.
+
+Two pre-existing scc_map tests asserted the curve target arrives *instantly* — the exact step
+being removed. Rewritten to assert convergence rather than deleted, per §0.3: a test that
+encodes the old behaviour is not evidence, it is the old behaviour.
+
+### Still outstanding
+
+`latA` stays at **2.025**, keeping both goals (slower corners AND a gentle approach). The next
+drive judges whether the onset now feels right; instrument is `curve_ceiling_kmh` vs
+`map_curve_speed_kmh` in `/data/media/0/mapd_debug.log`. If braking now feels *late*, raise the
+descent rate — but `APPROACH_DECEL` is shared with hazards and limits, both separately
+drive-validated, so prefer a curve-specific constant over changing it.
+
 ## 2026-08-05 — lead-vehicle dash icon, Tier 2: ROAD TEST — plausible, good for now, one thing to watch
 
 Operator drove and reports the distance/speed reading on the cluster "looks plausible — steady,
