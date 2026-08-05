@@ -105,13 +105,43 @@ Two pre-existing scc_map tests asserted the curve target arrives *instantly* —
 being removed. Rewritten to assert convergence rather than deleted, per §0.3: a test that
 encodes the old behaviour is not evidence, it is the old behaviour.
 
+### Deploy + on-device verification
+
+Pi5 → GitHub (`ae8322a`) → comma4 `git pull --ff-only`, offroad, then reboot.
+
+Ran the cheap gates ON THE DEVICE before rebooting: **42 scc_map / 44 hooks / 62 set_speed /
+30 schema conformance**, all passing under `/usr/local/venv`. Plus the real-import gate the
+stubs cannot cover: `grt.scc_map` imports with the actual openpilot deps, `APPROACH_DECEL = 0.5`,
+`DT_MDL = 0.05`, `A_CRUISE_MIN` still −1.2, and `_ramp_curve_ceiling(15.9)` from `v_ego = 20.2`
+returns 20.175 on the first frame and converges to exactly 15.9 within 10 s.
+
+After the reboot: all processes up, `longitudinalPlan VALID=True`, zero `grt:` exceptions, and
+`curve_ceiling_kmh` confirmed live in `mapd_debug.log`.
+
+**`micd`/`soundd` were down again on the first reboot**, raising `processNotRunning` — which is
+`ET.NO_ENTRY` and blocks engagement. Same boot-time audio-init transient as 2026-07-30; `mapd`
+itself was running, so the fork is not implicated. A second reboot cleared it: `onroadEvents` is
+now `seatbeltNotLatched` + `wrongGear` only, **no engagement blockers**. Worth noting this has
+now happened on two consecutive deploys — if it ever fails to clear, engagement stays blocked.
+
+**Do not read `tileLoaded=False` here as a tile problem.** The car is parked with **no GPS fix**
+(`gpsLocation` not alive, `gpsLocationExternal` reporting lat/lon ≈ 0), so mapd has no position,
+loads no tile, and `roadName` is empty. Today's drive produced 971 frames of curve data from
+these same tiles, so they load fine when there is a fix.
+
+**New gotcha:** `waySelectionType` reads **`current`** in this state, which looks like success but
+is not — `current @0` is the enum's zero value, so with no fix the field is simply never set. The
+2026-07-29 entry recorded `fail` when parked; that was with a stale position. Neither value proves
+anything parked. Judge way selection only while moving.
+
 ### Still outstanding
 
 `latA` stays at **2.025**, keeping both goals (slower corners AND a gentle approach). The next
 drive judges whether the onset now feels right; instrument is `curve_ceiling_kmh` vs
-`map_curve_speed_kmh` in `/data/media/0/mapd_debug.log`. If braking now feels *late*, raise the
-descent rate — but `APPROACH_DECEL` is shared with hazards and limits, both separately
-drive-validated, so prefer a curve-specific constant over changing it.
+`map_curve_speed_kmh` in `/data/media/0/mapd_debug.log` — the gap between them IS the shaping.
+Expect onset decel ≈ −0.5 m/s² instead of −1.2. If braking now feels *late*, raise the descent
+rate — but `APPROACH_DECEL` is shared with hazards and limits, both separately drive-validated,
+so prefer a curve-specific constant over changing it.
 
 ## 2026-08-05 — lead-vehicle dash icon, Tier 2: ROAD TEST — plausible, good for now, one thing to watch
 
