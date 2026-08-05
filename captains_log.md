@@ -9,6 +9,48 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-08-05 — lead-vehicle dash icon, Tier 2: DEPLOYED to comma4, offroad checks PASS, road test outstanding
+
+Deployed `00c38bd` (Tier 2). Note on advisor: Tier 1's plan got two successful advisor reviews;
+Tier 2's design (both-sources-agree gate, `ACC_ObjRelSpd` omission) did **not** — both attempts
+this session hit "temporarily overloaded". Operator made an informed call to deploy anyway, given
+the offline verification already done (schema conformance 30/30, 5 behavioural cases against the
+real packing logic). Recorded so it's clear this wasn't silently skipped.
+
+**Deploy:** Pi5 → GitHub → comma4, same route as Tier 1. Fast-forward `405e1a8 → a6e183a`
+(7 files, +344/−74 — includes `00c38bd` Tier 2 plus a docs-only commit and the micd diagnostic
+entry). `prebuilt` marker untouched, tree clean before and after.
+
+**Also resolved, incidentally:** `micd` (see the entry below, filed by the previous investigation)
+was still down going into this deploy. This reboot cleared it — `running=True, exitCode=0` for
+both `micd` and `soundd` post-reboot, matching the established precedent that this class of
+boot-time audio-init race self-resolves on a subsequent boot. No separate action was taken on it.
+
+**Post-reboot, offroad, all checks before the road test:**
+- Device back in ~1 minute. `git log -1` = `a6e183a`, tree clean.
+- `managerState`: nothing shouldBeRunning-but-not-running. All processes up including `micd`.
+- `onroadEvents` = `[wrongGear, seatbeltNotLatched]` only — **the new `radarState` subscriber on
+  `card` did not trip anything**, confirming the plan's prediction that card's checks being scoped
+  to `all_checks(['carControl'])` makes this safe.
+- swaglog since boot grepped for `card|hyundaicanfd|carcontroller|packer|SCC_Obj|ACC_Obj|
+  KeyError|Traceback`: **empty.**
+- `carState.cumLagMs` = **28.45 ms**, DOWN from the Tier-1 baseline of 36.86 ms — no lag
+  regression from the new subscriber (the doc's required Tier-2-specific check).
+- **Captured a real `SCC_CONTROL` frame off `sendcan` and decoded ALL three touched signals**
+  (not just `SCC_ObjSta` this time):
+  - `SCC_ObjSta=0` — Tier 1 unaffected.
+  - `ACC_ObjDist=1.0m` — exactly the pre-existing no-lead constant, correctly preserved when
+    `radarState.leadOne.present=False` (confirmed via the same `sendcan` capture:
+    `(dRel=0.0, vRel=0.0, present=False)`).
+  - `ACC_ObjRelSpd=-16.4 m/s` — this is the packer's default for an UNSET signal (raw 0 → physical
+    `0×0.1 + (-16.4)`), confirming the field really was omitted from the packed dict as designed,
+    not explicitly zeroed. This was the design decision under the most scrutiny (§4 of the plan
+    doc) and it's now verified on the real compiled packer, not just the offline stub test.
+
+**NOT YET PROVEN: the lead-shown branch with real numbers, or how the cluster renders a moving
+distance/speed.** Everything above is reachable parked and disengaged with no lead present. Road
+test outstanding — operator driving next.
+
 ## 2026-08-05 — DIAGNOSTIC ONLY: `micd` down after operator reboot — NOT fork-related, unfixed, handed off
 
 Operator rebooted comma4 (unrelated to any deploy from this session — device came back online on

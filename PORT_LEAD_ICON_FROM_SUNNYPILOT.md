@@ -8,17 +8,18 @@
   plan was built against.
 
   Status: **Tier 1 ROAD-TESTED and DONE — operator confirmed the icon appears and looks sane.**
-  **Tier 2 IMPLEMENTED and offline-verified — NOT YET DEPLOYED (comma4 was offline when built).**
-  Advisor was unavailable for Tier 2's design review (overloaded both times it was called this
-  session) — implemented on the same grounding rigor as Tier 1 (every field name and call-site
-  re-checked against this repo's actual current code, not assumed from the plan), but flag this
-  explicitly: get advisor's read on §4's Tier 2 design before deploying, not just noting it here.
-  Offline gates for Tier 2: syntax parse (3 files), schema conformance 30/30 (added
-  `radarState.leadOne.vRel`), and 5 behavioural cases run against the real packing logic via a
-  stub packer (no-lead parity with pre-change behaviour, lead-shown values, fail-safe on
-  source disagreement, out-of-range clipping, gas-override interaction) — all pass. `card.py`'s
-  own import could not be exercised (needs the on-device path layout the Pi5 doesn't replicate;
-  pre-existing limitation, not new). See captains_log 2026-08-05 entries for the full record.
+  **Tier 2 DEPLOYED to comma4 (`a6e183a`). All offroad checks PASS. Road test OUTSTANDING.**
+  Advisor reviewed Tier 1's plan (twice, successfully); Tier 2's design did NOT get an advisor
+  pass — both attempts this session hit "overloaded". Operator made an informed call to deploy
+  anyway given the offline verification already done. Offroad, post-reboot: managerState clean
+  (including `micd`, which had been down from an unrelated boot issue and self-resolved on this
+  reboot), engagement not blocked, zero exceptions, `cumLagMs` DOWN not up (28.45 ms vs the 36.86
+  ms Tier-1 baseline), and all three touched CAN fields decoded correctly off a live `sendcan`
+  capture — including confirming `ACC_ObjRelSpd` is genuinely omitted (packer's unset-signal
+  default, −16.4 m/s) rather than explicitly zeroed, the design decision under the most scrutiny.
+  See captains_log 2026-08-05 entries for the full record. What's NOT yet proven: the lead-shown
+  branch with real numbers, or what the cluster renders for a moving distance/speed — needs the
+  driver engaged with a real lead present (§6).
 -->
 
 # Lead-vehicle dash icon — porting sunnypilot's behaviour into `nightly-dev`
@@ -256,40 +257,35 @@ Offline (Pi5), before any device step:
 
 On-device, offroad first (car powered, supervised, per this branch's standing rule — never
 unattended):
-1. **Engagement still works.** — DONE 2026-08-05 for Tier 1 (`onroadEvents` = benign parked-car
-   signature only). **OUTSTANDING for Tier 2** — it adds a `radarState` subscriber to `card`,
-   unlike Tier 1, so re-run this on the next deploy even though card's checks are scoped and this
-   is expected to be low-risk (§4 point 1).
-2. `carState.cumLagMs` vs. a pre-change segment — DONE for Tier 1 as a data point (36.86 ms, no
-   comparison needed since Tier 1 added no new SubMaster/PubMaster traffic). **OUTSTANDING for
-   Tier 2** — it DOES add a subscriber and needs a real before/after comparison on deploy, per the
-   set-speed feature's precedent. Use the 36.86 ms figure as the pre-Tier-2 baseline.
-3. Confirm via CAN capture that `SCC_CONTROL.SCC_ObjSta` decodes correctly — DONE 2026-08-05 for
-   Tier 1: captured a real frame off `sendcan`, hand-decoded byte 13 bits 4-6 against the DBC's
-   `108|3@1+` layout, got `SCC_ObjSta=0`, correct for the disengaged state at capture time (the
-   formula collapses to 0 whenever `enabled` is false). The `1`/`2` branches are NOT yet exercised
-   — that needs engagement, which needs the car moving.
-4. **Road test — OUTSTANDING. This is what actually answers the open question in §4's Tier 1
-   caveat**, and the only remaining item for Tier 1. Drive behind traffic and watch the cluster:
-   does the lead icon light, and does it look right (steady, not flickering, positioned sensibly)?
-   This is the one thing that can't be determined from DBC inspection, unit tests, or a parked CAN
-   capture — the DBC confirms `SCC_ObjSta` is *routed* to the cluster, not what the cluster's
-   firmware *does* with each of its three documented values.
+1. **Engagement still works.** — DONE for both tiers. Tier 2 (2026-08-05, second deploy):
+   `onroadEvents` = benign parked-car signature only, confirming the new `radarState` subscriber
+   on `card` didn't trip anything, as predicted (card's checks are scoped to `carControl` only).
+2. `carState.cumLagMs` vs. a pre-change segment — DONE for both. Tier 2 measured **28.45 ms**,
+   DOWN from the Tier-1 baseline of 36.86 ms — no lag regression from the new subscriber.
+3. Confirm via CAN capture that the packed fields decode correctly — DONE for both tiers.
+   Tier 2's capture decoded all three touched signals at once: `SCC_ObjSta=0` (Tier 1 unaffected),
+   `ACC_ObjDist=1.0m` (the pre-existing no-lead constant, correctly preserved), and
+   `ACC_ObjRelSpd=-16.4 m/s` — the packer's default for an genuinely UNSET signal, confirming the
+   omission-not-zero design actually holds on the real compiled packer, not just the offline stub
+   test. The `1`/`2` `SCC_ObjSta` branches and the lead-shown `ACC_ObjDist`/`ACC_ObjRelSpd` values
+   are NOT yet exercised — both need engagement with a real lead present.
+4. **Road test — OUTSTANDING for Tier 2. This is the only remaining item.** Drive behind traffic
+   and watch the cluster: does the lead icon light (Tier 1, already confirmed sane), and do the
+   distance/speed numbers (Tier 2, new) look right — plausible values, not jumping around, not
+   stuck? This is the one thing that can't be determined from DBC inspection, unit tests, or a
+   parked CAN capture.
 
 ## 7. Status
 
 - **Tier 1: DONE.** Deployed to comma4, all offroad checks passed, road-tested — operator confirmed
   the lead icon appears and looks sane. No further action needed.
-- **Tier 2: implemented and offline-verified, NOT YET DEPLOYED.** `comma4` was offline when this
-  was built, so nothing has touched the device. Advisor was unavailable both times it was called
-  for Tier 2's design (overloaded) — implemented on the same grounding rigor as Tier 1 (every
-  field name and call site re-checked against this repo's current code), but **get advisor's read
-  on §4's Tier 2 design before deploying it**, specifically the gate-on-both-sources-agreeing
-  decision and the deliberate omission of `ACC_ObjRelSpd` when no lead is shown.
-- **Next step**: once comma4 is reachable again, deploy via the standard Pi5 → GitHub → device
-  route (see the 2026-08-05 captains_log entries for the exact runbook that worked for Tier 1,
-  including the `pkill -x manager.py` correction), then run the on-device block (§6) — engagement
-  check and `cumLagMs` comparison are the two items Tier 2 specifically needs that Tier 1 didn't
-  (new `radarState` subscriber), followed by a road test to confirm the actual distance/speed
+- **Tier 2: DEPLOYED to comma4 (`a6e183a`). All offroad checks PASS. Road test OUTSTANDING.**
+  Advisor reviewed Tier 1's plan (twice); Tier 2's design did not get an advisor pass (overloaded
+  both attempts this session) — the operator made an informed call to deploy anyway, given the
+  offline verification already in place. Every offroad check that can run parked has: engagement
+  unblocked, zero exceptions, `cumLagMs` down not up, and all three touched CAN fields decoding
+  correctly including the `ACC_ObjRelSpd` omission behaving exactly as designed on real hardware.
+- **Next step**: the road test. Drive behind traffic and report whether the distance/speed numbers
+  look plausible — that's the only thing left that can't be checked from a parked car.
   numbers render sanely on the cluster, not just the icon.
 - No captains_log/PROGRESS.md conflicts found for either tier — this remains new ground.
