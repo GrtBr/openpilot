@@ -9,6 +9,33 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-08-05 — lead-vehicle dash icon, Tier 2: ROAD TEST — plausible, good for now, one thing to watch
+
+Operator drove and reports the distance/speed reading on the cluster "looks plausible — steady,
+roughly matches what I expect for the gap." Closes the last open question from the offroad-only
+verification (whether the lead-shown branch and the actual numbers render sanely — confirmed by
+direct observation, same as Tier 1's road test).
+
+**One thing flagged, not yet acted on:** "a little bit of jumping around" in the reading — operator
+wants more drive time before drawing conclusions, and asked to leave it alone for now ("good for
+now"). Recorded as a candidate follow-up, not a bug to fix reactively:
+
+- Tier 2's design deliberately did NOT add hysteresis/smoothing to the numeric `dRel`/`vRel`
+  values themselves (`PORT_LEAD_ICON_FROM_SUNNYPILOT.md` §4 point 3) — only the *presence* gate
+  (`hud_control.leadVisible` AND `radarState.leadOne.present` agreeing) is debounced, via Tier 1's
+  already-existing signal. The raw distance/speed numbers pass through radard's fused track
+  unsmoothed on top of that gate.
+- If further drives confirm this is a real, bothersome jitter (not measurement noise or a one-off),
+  the fix is narrow: apply `_hysteresis_update`-style smoothing (or a simple low-pass) to `dRel`/
+  `vRel` specifically, the same pattern already proven elsewhere on this branch (the e2e
+  acceleration filter, 2026-07-24 entry). Not built now — no evidence yet that it's needed, and
+  building it without a confirmed problem would repeat exactly the mistake this branch's own
+  captains_log warns against (§0.3 of the mapd doc: a fix without a measured problem is a guess).
+
+**Both tiers of this feature are now DONE and road-tested.** No code changes pending. Watching
+item above is the only open thread, and it's explicitly deferred to more drive data at the
+operator's instruction.
+
 ## 2026-08-05 — lead-vehicle dash icon, Tier 2: DEPLOYED to comma4, offroad checks PASS, road test outstanding
 
 Deployed `00c38bd` (Tier 2). Note on advisor: Tier 1's plan got two successful advisor reviews;

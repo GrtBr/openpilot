@@ -7,19 +7,15 @@
   the parts specific to this feature. §9 of that doc ("reusable recipe") is the checklist this
   plan was built against.
 
-  Status: **Tier 1 ROAD-TESTED and DONE — operator confirmed the icon appears and looks sane.**
-  **Tier 2 DEPLOYED to comma4 (`a6e183a`). All offroad checks PASS. Road test OUTSTANDING.**
-  Advisor reviewed Tier 1's plan (twice, successfully); Tier 2's design did NOT get an advisor
-  pass — both attempts this session hit "overloaded". Operator made an informed call to deploy
-  anyway given the offline verification already done. Offroad, post-reboot: managerState clean
-  (including `micd`, which had been down from an unrelated boot issue and self-resolved on this
-  reboot), engagement not blocked, zero exceptions, `cumLagMs` DOWN not up (28.45 ms vs the 36.86
-  ms Tier-1 baseline), and all three touched CAN fields decoded correctly off a live `sendcan`
-  capture — including confirming `ACC_ObjRelSpd` is genuinely omitted (packer's unset-signal
-  default, −16.4 m/s) rather than explicitly zeroed, the design decision under the most scrutiny.
-  See captains_log 2026-08-05 entries for the full record. What's NOT yet proven: the lead-shown
-  branch with real numbers, or what the cluster renders for a moving distance/speed — needs the
-  driver engaged with a real lead present (§6).
+  Status: **BOTH TIERS DONE AND ROAD-TESTED.** Tier 1: operator confirmed the icon appears and
+  looks sane. Tier 2: operator confirmed the distance/speed reading "looks plausible — steady,
+  roughly matches what I expect for the gap," with one open item — a little jitter, flagged for
+  more drive-time observation before deciding whether it needs fixing (see §7 and captains_log
+  2026-08-05 "ROAD TEST" entry). No code changes pending. Advisor reviewed Tier 1's plan (twice);
+  Tier 2's design did not get an advisor pass (overloaded both attempts) — deployed anyway on an
+  informed operator call, backed by full offline + offroad verification (see captains_log for the
+  complete record: schema conformance, 5 behavioural cases, live CAN capture confirming exact
+  field-level correctness including the `ACC_ObjRelSpd` omission on real hardware).
 -->
 
 # Lead-vehicle dash icon — porting sunnypilot's behaviour into `nightly-dev`
@@ -279,13 +275,17 @@ unattended):
 
 - **Tier 1: DONE.** Deployed to comma4, all offroad checks passed, road-tested — operator confirmed
   the lead icon appears and looks sane. No further action needed.
-- **Tier 2: DEPLOYED to comma4 (`a6e183a`). All offroad checks PASS. Road test OUTSTANDING.**
-  Advisor reviewed Tier 1's plan (twice); Tier 2's design did not get an advisor pass (overloaded
-  both attempts this session) — the operator made an informed call to deploy anyway, given the
-  offline verification already in place. Every offroad check that can run parked has: engagement
-  unblocked, zero exceptions, `cumLagMs` down not up, and all three touched CAN fields decoding
-  correctly including the `ACC_ObjRelSpd` omission behaving exactly as designed on real hardware.
-- **Next step**: the road test. Drive behind traffic and report whether the distance/speed numbers
-  look plausible — that's the only thing left that can't be checked from a parked car.
-  numbers render sanely on the cluster, not just the icon.
+- **Tier 2: DONE.** Deployed to comma4 (`a6e183a`), all offroad checks passed (engagement
+  unblocked, zero exceptions, `cumLagMs` down not up, all three CAN fields decoding correctly
+  including the `ACC_ObjRelSpd` omission on real hardware), road-tested — operator confirmed the
+  distance/speed reading "looks plausible — steady, roughly matches what I expect for the gap."
+  Advisor did not review Tier 2's design (overloaded both attempts this session, unlike Tier 1's
+  two successful reviews) — deployed on an informed operator call backed by full offline +
+  offroad + on-road verification instead.
+- **One open item, deliberately not acted on**: operator noted "a little bit of jumping around" in
+  the reading, wants more drive time before concluding anything — explicitly NOT asking for a fix
+  yet. See captains_log 2026-08-05 "ROAD TEST" entry for the candidate follow-up (smoothing
+  `dRel`/`vRel` themselves, not built) if further drives confirm it's a real, bothersome jitter
+  rather than noise or a one-off.
+- **Both tiers of this feature are complete.** No code changes pending on either.
 - No captains_log/PROGRESS.md conflicts found for either tier — this remains new ground.
