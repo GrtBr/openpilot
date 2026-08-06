@@ -22,14 +22,15 @@ Agreed behaviour (user spec, 2026-07-29)
    engage, which the user chose deliberately. If there is NO map data the set speed is left
    exactly as upstream set it; the seed simply waits for a real limit. There is deliberately no
    fallback value (see the note at the seeding branch in `update`).
-2. THEREAFTER a limit change is adopted automatically only if ALL of:
-     a. the feature still OWNS the set speed — it equals the limit in force, or the value we
-        ourselves last wrote (so a driver who dials in their own number is never overridden);
-     b. the set speed is a multiple of 10 (60, 70, 80 ... 120) — a non-round value is a
-        hand-tuned one;
-     c. the change is within ±20 km/h.
-   Otherwise the new limit is offered as a PENDING confirmation for 10 s and adopted only if
-   the driver taps RES/+ in that window.
+2. THEREAFTER a limit change is adopted automatically iff BOTH of:
+     a. the set speed is a multiple of 10 (60, 70, 80 ... 120) — a non-round value is taken as
+        hand-tuned and is never overwritten silently;
+     b. the change is within ±20 km/h.
+   Otherwise the new limit is offered as a PENDING confirmation for 10 s, accepted with the
+   button that matches the direction of travel (RES/+ for a higher limit, SET/- for a lower).
+
+   Ownership is deliberately NOT a condition (removed 2026-08-06): a driver-set 110 must
+   auto-adopt a 120 limit, and rule 2a already protects a hand-tuned 103 or 116.
 
 The >20 km/h rule is an absolute safety floor: it applies even while the feature owns the set
 speed. On these roads limits of 20 and 40 exist, so 120 -> 80 and 60 -> 20 both prompt.
@@ -217,6 +218,11 @@ class SetSpeedLimitTracker:
     silently pre-authorised here.
     """
     self._authorised_next_kph = None
+    # INVARIANT: nothing is pre-authorised while a prompt is open. The operator must be able to
+    # rely on "the car keeps doing what it was doing until I answer" — so this returns before it
+    # can unlock the approach ramp, whatever the upcoming limit is.
+    if self.pending_limit_kph is not None:
+      return
     try:
       mapd = sm['mapdOut']
       nl = round(float(mapd.nextSpeedLimit) * 3.6)
@@ -230,7 +236,7 @@ class SetSpeedLimitTracker:
     delta = nl - v_cruise_kph
     if delta > 0 and self._way not in GOOD_WAY_SELECTION_UP:
       return
-    if self.tracking and _is_round(v_cruise_kph) and abs(delta) <= AUTO_ADOPT_BAND_KPH:
+    if _is_round(v_cruise_kph) and abs(delta) <= AUTO_ADOPT_BAND_KPH:   # same rule as auto-adopt
       self._authorised_next_kph = float(nl)
 
   @property
@@ -514,7 +520,16 @@ class SetSpeedLimitTracker:
 
     self._mark_acted(limit_kph)
 
-    auto = self.tracking and _is_round(v_cruise_kph) and abs(delta) <= AUTO_ADOPT_BAND_KPH
+    # AUTO-ADOPT RULE (operator, 2026-08-06). Exactly two conditions:
+    #   * the set speed is a multiple of 10 — that IS the "did the driver hand-tune this?" test;
+    #   * the change is within +/-20 km/h.
+    # The ownership test (`self.tracking`) was a THIRD condition I had added and the operator had
+    # not asked for. It made a driver-set 110 prompt for a 120 limit, which is the reported bug.
+    # Removing it also closes a real seam: `tracking` was the only TIME-VARYING term, and it was
+    # evaluated once for the upcoming limit (unlocking the ramp) and again when that limit became
+    # current (deciding prompt vs auto). If it flipped in between, the car slowed while the
+    # display waited. Roundness and delta cannot disagree that way.
+    auto = _is_round(v_cruise_kph) and abs(delta) <= AUTO_ADOPT_BAND_KPH
     if auto:
       adopted = self._clamped(limit_kph)
       self._take_ownership(adopted)
@@ -527,14 +542,17 @@ class SetSpeedLimitTracker:
       self.pending_limit_kph = limit_kph
       self._pending_is_increase = delta > 0
       self._pending_frames = 0
+      # _preauthorise_upcoming() already ran THIS frame, before the prompt existed. Revoke it now
+      # rather than waiting for the next frame to notice.
+      self._authorised_next_kph = None
       self._log("pending", limit_kph, v_cruise_kph, None, why=why)
     else:
       self._log("ignore", limit_kph, v_cruise_kph, None, why=why)
     return v_cruise_kph
 
   def _why_not_auto(self, v_set: float, delta: float) -> str:
-    if not self.tracking:
-      return "driver_owns_set_speed"
+    # NB: ownership is no longer a reason to prompt (2026-08-06). `tracking` is still published
+    # and logged, but only as instrumentation — do not reintroduce it here.
     if not _is_round(v_set):
       return "set_speed_not_multiple_of_10"
     return f"delta_{abs(delta):.0f}_over_{AUTO_ADOPT_BAND_KPH:.0f}"

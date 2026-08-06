@@ -702,24 +702,27 @@ against a log already on the device would have caught this before a line was wri
    `V_CRUISE_INITIAL*`. This wins even on a RES/resume engage (operator's explicit choice over
    upstream's restore-previous behaviour), and it is what makes the feature useful rather than
    inert. **With no map data the set speed is left exactly as upstream set it** — see §11.5.
-2. **A later limit change is adopted silently only if ALL of:**
-   - **a.** the feature still **owns** the set speed — it equals the limit in force, or the
-     value we ourselves last wrote;
-   - **b.** the set speed is a **multiple of 10** — a non-round value is hand-tuned;
-   - **c.** the change is **within ±20 km/h**.
+2. **A later limit change is adopted silently iff BOTH of:**
+   - **a.** the set speed is a **multiple of 10** — a non-round value is hand-tuned;
+   - **b.** the change is **within ±20 km/h**.
 3. **Otherwise it is offered as a PENDING prompt for 10 s**, adopted only on RES/+.
    SET/− declines (final); a limit change under it retires it as stale; an unanswered prompt is
    re-offered after 60 s (§2.6).
 
-**Rule 2c is absolute** — it holds even while the feature owns the set speed. On roads that post
+**Rule 2b is absolute** — it holds however the set speed got there. On roads that post
 20 and 40, that means 120→80 and 60→20 both prompt. Prompts being common is the intent.
 
-**Rule 2b is not redundant with 2a.** It is tempting to argue that if `set == limit` then
-`set % 10 == limit % 10`, so the test is dead weight. It is not: ownership can also be held via
-*the value we last wrote*, which may be non-round (an mph-derived 97, or any future adopted
-value). 2b is what stops a hand-tuned-looking number being overwritten in that case. The device
-data (§0.4) shows only that it will not *latch the feature off* on today's roads — that is
-evidence about the roads, not about the rule.
+**Rule 2a carries the whole hand-tuned test.** ~~Originally there was a third condition: the feature had to still OWN the set speed.~~
+**Removed 2026-08-06.** It made a *driver-set* 110 prompt for a 120 limit, which the operator
+reported as a bug — they expect round numbers they dialled in themselves to keep tracking.
+Roundness alone does the hand-tuned test: 103 and 116 still prompt, 110 does not.
+
+It also closed a real seam. `tracking` was the only **time-varying** term in the auto test, and
+the test is evaluated at two different moments — once for the UPCOMING limit (which unlocks the
+approach ramp) and again when that limit becomes CURRENT (which decides prompt vs auto). If it
+flipped in between, the car slowed while the display still waited for an answer. Roundness and
+Δ cannot disagree that way. **Generalisation: if the same predicate is evaluated at two times,
+every time-varying term in it is a bug waiting to happen.**
 
 **What rule 2a buys the operator**, and it was the point of the whole redesign: dial in 103 in a
 100 zone and the feature never touches it again — it only ever asks. Dial back to exactly 100

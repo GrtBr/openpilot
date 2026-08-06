@@ -1226,6 +1226,59 @@ right at the sign. APPROACH_DECEL stays at 0.5; do not touch it without new evid
 (My episode detector found 0 episodes this drive because it keyed off a large speed error at the
 FIRST frame, which the profile no longer produces. The binding-frames metric replaces it.)
 
+## 2026-08-06 — auto-adopt rule corrected: ownership dropped; nothing pre-authorised while asking
+
+Two issues from the drive. **Local only — comma4 offline.**
+
+### Issue 2 (the clear one): a driver-set round speed must keep auto-tracking
+
+Reported verbatim: set 110 by hand, new limit 120, and it asked for confirmation. Expected: auto
+change. And 116 should still ask, because it is not a multiple of 10.
+
+My auto test had **three** conditions where the operator had specified two — I had added
+`self.tracking` (the feature still owns the set speed). A driver-set 110 fails it, so it
+prompted. **Removed.** Roundness alone is the hand-tuned test and it does the job: 103 and 116
+still prompt, 110 does not. The rule is now exactly:
+
+> auto iff `set speed is a multiple of 10` AND `|Δ| ≤ 20 km/h`; otherwise ask.
+
+`tracking`, `_owned_kph` and `_in_force_kph` are KEPT — they still drive `at_limit`, the
+heartbeat and `grtSetSpeedState`. They are instrumentation now, not decision inputs.
+`_why_not_auto` no longer returns `driver_owns_set_speed`, which would have actively misled the
+next diagnosis.
+
+### Issue 1: same root cause, plus an invariant
+
+`tracking` was the **only time-varying term** in the auto test, and that test is evaluated at two
+different moments: once for the UPCOMING limit (which pre-authorises it and unlocks the approach
+ramp) and again when the limit becomes CURRENT (which decides prompt vs auto). If it flipped in
+between, **the car slowed while the display waited** — exactly "Max speed is out of sync". Δ and
+roundness cannot disagree that way, so dropping `tracking` removes the disagreement entirely.
+
+Belt and braces, because the operator must be able to rely on "nothing changes until I answer":
+**nothing is pre-authorised while a prompt is open.** Early return in `_preauthorise_upcoming`,
+plus an explicit revoke on the frame a prompt is created — that method runs *before* the pending
+branch, so it had a one-frame window where both could be set.
+
+**NOT fully explained, and I am not claiming otherwise.** The above explains the car slowing. It
+does not explain MAX itself moving, because `update()` cannot write the set speed while a prompt
+is open. The one path that bypasses the pending branch is the **engage seed**: `engage_edge`
+calls `_reset()` (clearing the prompt) and then seeds from the map. `grt_engage_edge` is
+byte-identical to upstream's own condition on the next line — the one gating
+`initialize_v_cruise` — so a momentary `carControl.enabled` glitch resets the set speed with or
+without the fork; we only change what it resets *to*. **Cannot be ruled out statically.**
+Discriminator for the next drive: a `seed_from_map` line in `set_speed.log` at the moment MAX
+jumped. It is already logged — just look for it.
+
+### The generalisation worth keeping
+
+> If the same predicate is evaluated at two different times, every time-varying term in it is a
+> bug waiting to happen. Here it produced a feature that acted on the car and not on the display.
+
+Tests: 67 set_speed (3 new — the reported 110→120 case verbatim, the 116 counter-case, and one
+asserting `authorisedNextLimit` stays 0 for **every** frame a prompt is open), 42 scc_map, 44
+hooks, 30/30 schema. Plan doc §11.2 updated: rule 2a struck through with the reason kept.
+
 ## 2026-08-03 — REMOVED the 60 km/h no-map fallback (operator: problematic)
 
 The engage seed used to fall back to **60 km/h** when no trusted limit had arrived within 10 s.

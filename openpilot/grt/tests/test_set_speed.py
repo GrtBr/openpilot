@@ -404,6 +404,53 @@ def test_no_preauthorisation_when_driver_owns_set_speed():
         t.authorised_next_limit_kph == 0.0, str(t.authorised_next_limit_kph))
 
 
+def test_driver_set_round_speed_auto_adopts():
+  """REPORTED 2026-08-06, verbatim: set 110 by hand, new limit 120 -> must AUTO change, not ask.
+  Ownership used to be a third auto condition and made this prompt."""
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  out = 110.0                                # driver dials in their own round speed
+  sm.set_limit(120.0)                        # +10, within band
+  out = run(t, sm, out, STABLE + 2)
+  check("driver-set 110 + limit 120 -> AUTO adopts (no prompt)",
+        out == 120.0 and t.pending_limit_kph is None, f"out {out} pending {t.pending_limit_kph}")
+
+
+def test_driver_set_non_round_speed_still_prompts():
+  """...and 116 must still ask, because it is not a multiple of 10."""
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  sm.set_limit(120.0)
+  out = run(t, sm, 116.0, STABLE + 2)
+  check("driver-set 116 + limit 120 -> PROMPTS (not a multiple of 10)",
+        out == 116.0 and t.pending_limit_kph == 120.0, f"out {out} pending {t.pending_limit_kph}")
+  why = t._why_not_auto(116.0, 4.0)
+  check("...and the logged reason names roundness, not ownership",
+        t.last_action == "pending" and why == "set_speed_not_multiple_of_10", why)
+
+
+def test_nothing_is_preauthorised_while_a_prompt_is_open():
+  """The invariant behind issue 1: the car must keep doing what it was doing until answered.
+  authorisedNextLimit unlocks the pre-sign ramp, so it must be 0 for EVERY frame of the prompt."""
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  sm.set_limit(60.0)                         # -40: out of band -> prompts
+  sm.set_next(80.0, 250.0)                   # an upcoming limit that WOULD pre-authorise
+  out = run(t, sm, 100.0, STABLE + 2)
+  assert t.pending_limit_kph == 60.0, t.pending_limit_kph
+  worst = 0.0
+  for _ in range(PENDING - 10):
+    out = t.update(sm, fake_cs(), out, True)
+    worst = max(worst, t.authorised_next_limit_kph)
+  check("authorisedNextLimit stays 0 for the whole prompt (ramp cannot unlock)",
+        worst == 0.0, f"max seen {worst}")
+  check("...and the prompt is still open, so this was not vacuous",
+        t.pending_limit_kph == 60.0, str(t.pending_limit_kph))
+
+
 def test_pending_expires():
   t = make_tracker()
   sm = FakeSM()
