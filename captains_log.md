@@ -1226,6 +1226,37 @@ right at the sign. APPROACH_DECEL stays at 0.5; do not touch it without new evid
 (My episode detector found 0 episodes this drive because it keyed off a large speed error at the
 FIRST frame, which the profile no longer produces. The binding-frames metric replaces it.)
 
+## 2026-08-07 (later) — set-speed-is-final + 110 cap DEPLOYED to comma4
+
+Device on `b500214`, AGNOS 18.7, clean tree, healthy. 12 KB bundle from the device's actual HEAD
+(`277973d8e2..nightly-dev`, 3 commits), clean fast-forward, back up in ~75 s.
+
+Verified BEFORE the reboot — schema 30/30, suites 43 scc_map / 44 hooks / 71 set_speed — and the
+critical decoupling confirmed against the device's real modules:
+
+```
+V_CRUISE_MAX = 110  |  MAX_LIMIT_KPH = 145.0
+120 limit recognised: True -> clamps to 110.0
+```
+
+That is the trap check: had `MAX_LIMIT_KPH` still tracked `V_CRUISE_MAX`, a real 120 limit would
+have read as implausible and the feature would have gone silently inert on 120 roads.
+
+Verified AFTER the reboot: all processes up incl. `soundd`/`micd` (no audio transient this time);
+`managerState` reports nothing missing; `onroadEvents` only `wrongGear`/`doorOpen`/
+`seatbeltNotLatched` — **no `commIssue`, no `processNotRunning`**, engagement not blocked;
+`longitudinalPlan VALID=True`; `grtSetSpeedState` at 20 Hz with `active=True`; **zero `grt:`
+exceptions**.
+
+**What to check on the next drive**, in order of what would tell us most:
+1. **The reported case is fixed** — in a zone the map gets wrong, raise the set speed and confirm
+   the car actually holds it after you lift off. That is the whole point of this change.
+2. **The 110 cap** behaves as intended, including on a 120 road (set speed should sit at 110, and
+   there should be no repeating prompt — the `at_limit`-on-clamped-value fix).
+3. **The ramp trade-off**: after any manual set-speed change, pre-sign shaping stays off until the
+   feature re-takes ownership. If in-band sign approaches now feel abrupt after a manual nudge,
+   that is this, and it is tunable.
+
 ## 2026-08-07 — the driver's set speed is now the FINAL authority + V_CRUISE_MAX 145 → 110
 
 Drive report, 14:45–15:00: map wrongly showed 60, driver set cruise to 100, **both the Staria
