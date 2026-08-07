@@ -100,6 +100,28 @@ something implementable. Two of the three answers changed the design materially.
 
 Do not silently pick a reading of an ambiguous spec when the readings produce different cars.
 
+## 0.6 The recurring bug of this fork: authority the driver cannot take back
+
+Three separate defects, found on three separate drives, were the same shape:
+
+| # | Defect | What the driver could not do |
+|---|---|---|
+| 1 | 60 km/h no-map fallback (§11.5) | stop the fork inventing a limit the road never posted |
+| 2 | ownership term in the auto rule (§11.2) | keep a round set speed they dialled in themselves |
+| 3 | un-revoked `authorisedLimit` ceiling (§11.7) | overrule a *wrong* map limit by raising the set speed |
+
+Each looked reasonable in isolation. Each ended with **the fork holding authority the driver
+could not take back**, and each was only visible from the driver's seat — never from a test.
+
+**Rule, and it is now the second prime directive after §0.2:**
+
+> Every value the fork commands must be one the driver can override by an ordinary control
+> input, immediately, with the override sticking. If a fork feature can hold a value against
+> the driver's own most recent instruction, that is a bug regardless of how correct the value is.
+
+Map data is often wrong or stale. That is not an edge case, it is the normal condition, and it is
+precisely why the driver has to win by construction rather than by argument.
+
 ---
 
 # 1. HARD CONSTRAINTS OF THIS BRANCH (`nightly-dev` is PREBUILT)
@@ -766,6 +788,36 @@ for a limit that was never posted.
 command a value the map actually supplied. A "sensible default" for missing data is an invented
 measurement, and it will be wrong in exactly the situations where the data is missing. The
 correct behaviour for absent data is to do *nothing* and leave the base system in charge.
+
+## 11.7 The driver's set speed is the final authority (2026-08-07)
+
+Reported: the map wrongly showed 60, the driver set cruise to 100, both displays followed — and
+the car dropped back to 60 the moment they lifted off.
+
+`scc_map`'s steady-state posted-limit ceiling used `authorisedLimit`, which still held the last
+authorised limit (60). Nothing revoked it when the driver raised the set speed, so hook 1 pinned
+the planner's `v_cruise` at 60 permanently.
+
+**The ceiling is removed while the set-speed feature is active.** The reasoning is worth keeping
+because it generalises: *a ceiling only ever does anything when it is below the set speed*, so
+"the map may never hold the car below the set speed" and "there is no ceiling" are the same
+statement. It was redundant regardless — with feature B the posted limit already reaches the car
+**through the set speed**. One authority, not two.
+
+Untouched: curve braking, hazard braking (neither is a speed limit), the pre-sign ramp, and the
+entire fail-open path. The three FAILS-OPEN tests passing **unchanged** is the check that the
+removal did not leak outside `if gated:` — if one of them needs editing, it did.
+
+`authorisedLimit` is now instrumentation only; only `authorisedNextLimit` still gates anything,
+and only the ramp. Pre-authorisation additionally requires the set speed to still be *ours*, so
+the map cannot pull the driver below a number they dialled in even transiently. Cost: after a
+manual set-speed change the ramp stays off until the feature re-takes ownership.
+
+**`V_CRUISE_MAX` 145 → 110** at the same time (operator's cap, §GRT_MODS). The trap: `set_speed.py`
+`MAX_LIMIT_KPH` must **not** track it. Tied together, a real 120 limit reads as *implausible* and
+the feature goes inert on 120 roads while the heartbeat reassuringly logs `implausible_limit`.
+It is a literal 145 — a 120 limit is recognised, then clamped to 110. `at_limit` compares the
+**clamped** limit for the same reason, or a 120 road re-decides every `REOFFER_S` forever.
 
 ## 11.6 STILL UNVERIFIED — does the confirmation alert render?
 

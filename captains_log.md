@@ -1226,6 +1226,64 @@ right at the sign. APPROACH_DECEL stays at 0.5; do not touch it without new evid
 (My episode detector found 0 episodes this drive because it keyed off a large speed error at the
 FIRST frame, which the profile no longer produces. The binding-frames metric replaces it.)
 
+## 2026-08-07 — the driver's set speed is now the FINAL authority + V_CRUISE_MAX 145 → 110
+
+Drive report, 14:45–15:00: map wrongly showed 60, driver set cruise to 100, **both the Staria
+cluster and the comma MAX displayed 100** — and the car still dropped back to 60 the instant they
+lifted off the throttle.
+
+**This also answers the open question from 08-06.** MAX was never "out of sync" in the sense I
+assumed: the display was right and the *car* was wrong. The set speed followed the driver
+correctly; the physical behaviour was pinned by a stale map authorisation.
+
+**Cause:** `scc_map`'s steady-state ceiling used `authorisedLimit`, which held the last authorised
+limit (60). **Nothing revoked it when the driver raised the set speed**, so hook 1 pinned the
+planner's `v_cruise` at 60 permanently. The driver could not overrule the map by any means.
+
+**Fix:** the steady-state posted-limit ceiling is REMOVED while the set-speed feature is active.
+The argument generalises — *a ceiling only ever does anything when it is below the set speed*, so
+"the map may never hold the car below the set speed" and "there is no ceiling" are the same
+statement. It was redundant anyway: with feature B the limit already reaches the car through the
+set speed. One authority, not two.
+
+Untouched: curve braking, hazard braking, the pre-sign ramp, and the whole fail-open path. **All
+three FAILS-OPEN tests pass unchanged** — that is how I know the removal did not leak outside
+`if gated:`. Two gated-ceiling tests were replaced, one of them asserting the reported case
+verbatim (stale 60 authorisation + driver-set 100 → no ceiling).
+
+Pre-authorisation now also requires the set speed to still be **ours**, so the map cannot pull the
+driver below a number they dialled in even transiently. **Cost, stated rather than discovered:**
+after any manual set-speed change the ramp stays off until the feature re-takes ownership.
+
+### V_CRUISE_MAX 145 → 110, and the trap in it
+
+Sentinel-wrapped in `cruise.py`, with a `GRT_MODS.md` row recording that 110 is a *preference*,
+not a technical limit — so a future rebase does not "restore" 145 as a bugfix.
+
+**The trap, caught before it shipped:** `set_speed.py MAX_LIMIT_KPH` was `float(V_CRUISE_MAX)`.
+At 110 a real **120 limit would read as implausible**, and the feature would go inert on exactly
+the roads it matters most — while the heartbeat logged a reassuring `implausible_limit`. It is now
+a literal 145: a 120 limit is recognised and then clamped to 110. `at_limit` also compares the
+**clamped** limit, or a 120 road would re-decide every `REOFFER_S` forever. Both covered by tests.
+
+### The pattern this is the third instance of — now §0.6 of the plan
+
+| # | Defect | What the driver could not do |
+|---|---|---|
+| 1 | 60 km/h no-map fallback | stop the fork inventing a limit the road never posted |
+| 2 | ownership term in the auto rule | keep a round set speed they dialled in themselves |
+| 3 | un-revoked `authorisedLimit` ceiling | overrule a *wrong* map limit by raising the set speed |
+
+> Every value the fork commands must be one the driver can override by an ordinary control input,
+> immediately, with the override sticking. If a fork feature can hold a value against the driver's
+> own most recent instruction, that is a bug regardless of how correct the value is.
+
+Each looked reasonable in isolation; each was only visible from the driver's seat, never from a
+test. Map data being wrong or stale is the normal condition, not an edge case — which is why the
+driver has to win by construction.
+
+Tests: 43 scc_map, 44 hooks, 71 set_speed, 30/30 schema. **NOT YET DEPLOYED.**
+
 ## 2026-08-07 — auto-rule fix DEPLOYED to comma4
 
 Device on `277973d`, AGNOS 18.7, clean tree, healthy. **One commit** — the 2026-08-03 fallback
