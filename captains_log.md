@@ -1226,6 +1226,42 @@ right at the sign. APPROACH_DECEL stays at 0.5; do not touch it without new evid
 (My episode detector found 0 episodes this drive because it keyed off a large speed error at the
 FIRST frame, which the profile no longer produces. The binding-frames metric replaces it.)
 
+## 2026-08-07 — auto-rule fix DEPLOYED to comma4
+
+Device on `277973d`, AGNOS 18.7, clean tree, healthy. **One commit** — the 2026-08-03 fallback
+removal (`005d0035`) had already gone out in the 08-04 sync, so only the auto-rule fix was
+outstanding. 6.4 KB bundle, clean fast-forward from `fe51b09`, back up in ~75 s.
+
+Worth noting for the runbook: my first instinct was to bundle from the old `dcb3550cac` base and
+I listed 23 "missing" commits — but the device HEAD `fe51b09` was *itself in that list*. Checking
+`git merge-base --is-ancestor <device HEAD> nightly-dev` and bundling `fe51b09..nightly-dev`
+turned a 6 MB transfer into 6.4 KB and made the real delta obvious. **Always derive the range
+from the device's actual HEAD, not from a remembered base.**
+
+Verified BEFORE the reboot — schema 30/30, suites 42 scc_map / 44 hooks / 67 set_speed, real
+imports — and the reported case evaluated against the shipped rule **on the device**:
+
+| set speed | new limit | Δ | result |
+|---|---|---|---|
+| 110 | 120 | +10 | **AUTO** (was ASK — the reported bug) |
+| 116 | 120 | +4 | ASK — not a multiple of 10 |
+| 103 | 90 | −13 | ASK — original hand-tuned protection intact |
+| 100 | 60 | −40 | ASK — the >20 km/h safety rule intact |
+
+`_why_not_auto(116, 4)` returns `set_speed_not_multiple_of_10`, i.e. the misleading
+`driver_owns_set_speed` string is gone from the logs.
+
+Verified AFTER the reboot: all processes up incl. `soundd`/`micd` (no audio transient this time);
+`managerState` reports nothing missing; `onroadEvents` only `wrongGear`/`doorOpen`/
+`seatbeltNotLatched` — **no `commIssue`, no `processNotRunning`**, so engagement is not blocked;
+`longitudinalPlan VALID=True`; `grtSetSpeedState` at 20 Hz with `active=True`; **zero `grt:`
+exceptions**.
+
+**On the next drive, the one open question from 08-06:** if MAX ever jumps while a prompt is
+open, look for a `seed_from_map` line in `/data/media/0/grt/set_speed.log` at that moment. That
+is the discriminator for the engage-seed path, which is the only route that can write the set
+speed while a prompt is pending and which I could not rule out statically.
+
 ## 2026-08-06 — auto-adopt rule corrected: ownership dropped; nothing pre-authorised while asking
 
 Two issues from the drive. **Local only — comma4 offline.**
