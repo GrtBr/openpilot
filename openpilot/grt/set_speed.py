@@ -96,7 +96,12 @@ SPEED_EPS_KPH = 0.5
 # than clamped — clamping would silently turn a garbage value into a legal set speed. This also
 # traps a units error: mapd publishes m/s, so a km/h value leaking through reads ~3.6x high.
 MIN_LIMIT_KPH = 20.0
-MAX_LIMIT_KPH = float(V_CRUISE_MAX)
+# Deliberately a literal, NOT float(V_CRUISE_MAX). V_CRUISE_MAX is the operator's cap on how fast
+# they will let the car travel (110); this is "is that a plausible POSTED LIMIT?". Tying them
+# together would make a real 120 limit read as implausible and silently switch the feature off on
+# exactly the roads it matters most, with the heartbeat reporting a reassuring `implausible_limit`.
+# A 120 limit is recognised here and then clamped to V_CRUISE_MAX by _clamped().
+MAX_LIMIT_KPH = 145.0
 
 # waySelectionType values that mean mapd actually knows which way we are on. `fail` is what it
 # reports while parked. The second tier is a deliberate asymmetry: `predicted` is mapd GUESSING
@@ -232,6 +237,14 @@ class SetSpeedLimitTracker:
     if nd <= 0 or not (MIN_LIMIT_KPH <= nl <= MAX_LIMIT_KPH):
       return
     if self._way not in GOOD_WAY_SELECTION:
+      return
+    # Only while the set speed is still OURS. If the driver has dialled in their own number, the
+    # map may not pull them below it even transiently (operator, 2026-08-07). Safe to use the
+    # time-varying ownership term HERE — unlike the auto rule, a stale reading only means "no ramp
+    # shaping", never "the car acted while the display waited".
+    # Cost, stated plainly: after any manual set-speed change the ramp stays off until the feature
+    # re-takes ownership (via `at_limit` or the next adopt).
+    if not _near(v_cruise_kph, self._owned_kph):
       return
     delta = nl - v_cruise_kph
     if delta > 0 and self._way not in GOOD_WAY_SELECTION_UP:
@@ -478,9 +491,11 @@ class SetSpeedLimitTracker:
     # computed against the PREVIOUS one, which is what the ownership test needs.
     self._in_force_kph = limit_kph
 
-    if _near(limit_kph, v_cruise_kph):
-      # Already at the limit: nothing to change, and this re-establishes tracking for a driver
-      # who dialled the posted number in by hand — so the NEXT change auto-adopts.
+    # Compare the CLAMPED limit: on a 120 road with V_CRUISE_MAX = 110 the set speed can never
+    # equal the raw limit, and without this the tracker would re-decide every REOFFER_S forever.
+    if _near(self._clamped(limit_kph), v_cruise_kph):
+      # Already at the limit (or at the cap): nothing to change, and this re-establishes tracking
+      # for a driver who dialled the posted number in by hand — so the NEXT change auto-adopts.
       self._take_ownership(v_cruise_kph)
       self._mark_acted(limit_kph)
       # The set speed already equals the posted limit, so it is accepted by construction.

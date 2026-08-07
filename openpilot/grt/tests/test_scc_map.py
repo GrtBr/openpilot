@@ -159,11 +159,19 @@ c=scc_map.SmartCruiseControlMap()
 for _ in range(3): c.update(GSM(SM(sl=13.9),authorised_kph=50.0,active=False),True,False,30.0,0.0,33.0)
 check("feature not active -> FAILS OPEN", abs(c.v_target-13.9)<1e-6)
 
-# gated: an AUTHORISED limit is obeyed (13.9 m/s == 50 km/h)
+# gated: the steady-state posted-limit ceiling is GONE. The limit reaches the car through the
+# SET SPEED instead, so this branch must never pull v_target down (2026-08-07).
 c=scc_map.SmartCruiseControlMap()
 for _ in range(3): c.update(GSM(SM(sl=13.9),authorised_kph=50.0),True,False,30.0,0.0,33.0)
-# 50 km/h == 13.889 m/s, so min(13.9, 13.889) = the authorised value
-check("gated + authorised -> the limit IS obeyed", abs(c.v_target-50/3.6)<0.05)
+check("gated -> no steady-state posted-limit ceiling, even for an AUTHORISED limit",
+      c.v_target==0.0 and c.output_v_target==UNSET)
+
+# THE REPORTED BUG, 2026-08-07: map says 60, driver sets cruise to 100, car was dragged back to
+# 60 because the stale authorisation pinned v_target. v_cruise here is 100 km/h = 27.8 m/s.
+c=scc_map.SmartCruiseControlMap()
+for _ in range(5): c.update(GSM(SM(sl=60/3.6),authorised_kph=60.0),True,False,27.8,0.0,27.8)
+check("a stale 60 authorisation can NO LONGER hold the car below a driver-set 100",
+      c.v_target==0.0 and c.output_v_target==UNSET)
 
 # gated with NOTHING authorised: the limit must not be acted on at all
 c=scc_map.SmartCruiseControlMap()
@@ -171,10 +179,13 @@ for _ in range(3): c.update(GSM(SM(sl=13.9),authorised_kph=0.0),True,False,30.0,
 check("gated + nothing authorised -> limit NOT obeyed (the reported bug)",
       c.v_target==0.0 and c.output_v_target==UNSET)
 
-# an unauthorised HIGHER mapd suggestion can never exceed what was authorised
+# curve/hazard braking must be entirely unaffected by the ceiling removal -- they are not
+# speed limits. (Asserted again below with authorised_kph=0.)
+# (the curve ceiling is rate-limited downward, so let it converge -- as test 1 does)
 c=scc_map.SmartCruiseControlMap()
-for _ in range(3): c.update(GSM(SM(sl=25.0),authorised_kph=50.0),True,False,30.0,0.0,33.0)
-check("gated -> never exceeds the authorised limit", abs(c.v_target-13.9)<0.05)
+for _ in range(600): c.update(GSM(SM(curve=15.0,sl=13.9),authorised_kph=50.0),True,False,25.0,0.0,30.0)
+check("gated -> a CURVE still lowers the target (only the limit ceiling went)",
+      abs(c.v_target-15.0)<0.05)
 
 # the pre-sign approach ramp is off while gated (it acts on the UPCOMING limit, which cannot
 # have been authorised yet -- documented trade-off in scc_map)

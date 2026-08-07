@@ -451,6 +451,27 @@ def test_nothing_is_preauthorised_while_a_prompt_is_open():
         t.pending_limit_kph == 60.0, str(t.pending_limit_kph))
 
 
+def test_limit_above_v_cruise_max_is_recognised_then_clamped():
+  """V_CRUISE_MAX is 110 on this car. A posted 120 must still be RECOGNISED (the plausibility
+  band is deliberately NOT tied to V_CRUISE_MAX) and then clamped to the cap -- otherwise the
+  feature goes inert on 120 roads while the log reassuringly says `implausible_limit`."""
+  saved = ss.V_CRUISE_MAX
+  ss.V_CRUISE_MAX = 110
+  try:
+    check("a 120 limit is inside the plausibility band", 120.0 <= ss.MAX_LIMIT_KPH)
+    t = make_tracker()
+    check("...and clamps to the cap, not to 120", t._clamped(120.0) == 110.0, str(t._clamped(120.0)))
+    sm = FakeSM()
+    out = engaged_at(t, sm, 120.0)
+    check("engage on a 120 road seeds the cap", out == 110.0, f"got {out}")
+    # at_limit must fire on the CLAMPED value, or this re-decides every REOFFER_S forever
+    out = run(t, sm, out, int(ss.REOFFER_S / 0.01) + STABLE + 50)
+    check("no re-decide loop on a road whose limit exceeds the cap",
+          out == 110.0 and t.pending_limit_kph is None, f"out {out} pending {t.pending_limit_kph}")
+  finally:
+    ss.V_CRUISE_MAX = saved
+
+
 def test_pending_expires():
   t = make_tracker()
   sm = FakeSM()

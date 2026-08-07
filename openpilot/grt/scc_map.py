@@ -274,8 +274,24 @@ class SmartCruiseControlMap:
 
     speed_limit_suggested = float(mapd.speedLimitSuggestedSpeed)
     if gated:
-      # Never exceed what was authorised, and never obey a limit that was not.
-      speed_limit_suggested = min(speed_limit_suggested, authorised_ms) if authorised_ms > 0 else 0.0
+      # THE DRIVER'S SET SPEED IS THE FINAL AUTHORITY (operator, 2026-08-07).
+      #
+      # The steady-state posted-limit ceiling is REMOVED while the set-speed feature is active.
+      # Reported: the map wrongly said 60, the driver set cruise to 100, the MAX display followed
+      # — and the car still dropped back to 60 the moment they lifted off. Cause: `authorised_ms`
+      # held the last authorised limit (60) and nothing revoked it when the driver raised the set
+      # speed, so this branch pinned v_target at 60 forever.
+      #
+      # The deeper point: a ceiling only ever DOES anything when it is below the set speed, so
+      # "the map may never hold the car below the set speed" and "there is no ceiling" are the
+      # same statement. And it is redundant anyway — with the set-speed feature the posted limit
+      # already reaches the car THROUGH the set speed (auto-adopt / confirm). One authority, not
+      # two. Map data is often wrong or stale; the driver must always be able to overrule it.
+      #
+      # Still gated, still un-removed elsewhere: curve braking and hazard braking are NOT speed
+      # limits and are untouched, and the pre-sign approach ramp below still runs for a
+      # PRE-AUTHORISED upcoming limit.
+      speed_limit_suggested = 0.0
     if speed_limit_suggested > 0 and (self.v_target == 0 or speed_limit_suggested < self.v_target):
       self.v_target = speed_limit_suggested
 

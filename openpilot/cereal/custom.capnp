@@ -70,8 +70,10 @@ struct GrtSetSpeedState @0xfc6241ed8877b611 {
   secondsLeft @2 :Float32;      # remaining confirmation window
   setSpeed @3 :Float32;         # current set speed, km/h (0 when unset)
   tracking @4 :Bool;            # set speed still matches the posted limit (feature in charge)
-  # Consumed by scc_map in plannerd, which obeys ONLY authorised limits — so a limit the driver
-  # declined or never answered is not acted on physically either.
+  # INSTRUMENTATION since 2026-08-07: the steady-state posted-limit ceiling was removed (the
+  # driver's set speed is the final authority), so nothing consumes this to hold the car back.
+  # Kept because it is what makes set_speed.log readable. Only authorisedNextLimit still gates
+  # anything, and only the pre-sign approach ramp.
   authorisedLimit @5 :Float32;  # limit the driver/auto rules accepted, km/h (0 = none)
   active @6 :Bool;              # feature enabled AND engaged. False => scc_map FAILS OPEN.
   pendingIsIncrease @7 :Bool;   # which button accepts: True => RES/+, False => SET/-

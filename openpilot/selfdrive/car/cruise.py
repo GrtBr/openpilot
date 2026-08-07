@@ -9,7 +9,9 @@ from openpilot.common.constants import CV
 #          model predictions above this speed can be unpredictable
 # V_CRUISE's are in kph
 V_CRUISE_MIN = 8
-V_CRUISE_MAX = 145
+# GRT-MOD: 145 -> 110. The operator's chosen cap on how fast the car may travel, NOT a technical
+# limit — do not "restore" 145 as a bugfix on a rebase. See GRT_MODS.md.
+V_CRUISE_MAX = 110
 V_CRUISE_UNSET = 255
 V_CRUISE_INITIAL = 40
 V_CRUISE_INITIAL_EXPERIMENTAL_MODE = 105
