@@ -159,12 +159,24 @@ now"). Recorded as a candidate follow-up, not a bug to fix reactively:
   (`hud_control.leadVisible` AND `radarState.leadOne.present` agreeing) is debounced, via Tier 1's
   already-existing signal. The raw distance/speed numbers pass through radard's fused track
   unsmoothed on top of that gate.
-- If further drives confirm this is a real, bothersome jitter (not measurement noise or a one-off),
-  the fix is narrow: apply `_hysteresis_update`-style smoothing (or a simple low-pass) to `dRel`/
-  `vRel` specifically, the same pattern already proven elsewhere on this branch (the e2e
-  acceleration filter, 2026-07-24 entry). Not built now — no evidence yet that it's needed, and
-  building it without a confirmed problem would repeat exactly the mistake this branch's own
-  captains_log warns against (§0.3 of the mapd doc: a fix without a measured problem is a guess).
+- **CORRECTION (2026-08-11):** the candidate fix originally noted here — "the same pattern already
+  proven elsewhere on this branch (the e2e acceleration filter, 2026-07-24 entry)" — pointed at
+  code that no longer exists. That filter was DISCARDED in the 2026-07-28 hard reset to upstream
+  (see that entry's "Discarded" table); confirmed directly against the current
+  `longitudinal_planner.py:132`, which reads `output_a_target_e2e =
+  sm['modelV2'].action.desiredAcceleration` raw, no filter. Do not cite it as available prior art.
+- **Also corrected, from a deeper look at `radard.py` while chasing the above:** the Staria runs
+  `radarUnavailable=True` (already noted in the 2026-07-24 entry above), so it has NO radar point
+  tracks. `radard.get_lead()` therefore ALWAYS takes the vision-only branch
+  (`get_RadarState_from_vision()`), where `vLeadK`/`aLeadK` are direct copies of the model's raw
+  output — `"vLeadK": float(v_ego + lead_v_rel_pred)`, no Kalman filter applied. The `KF1D`/`Track`
+  Kalman filter class exists in this file but only runs for radar-matched tracks, which never
+  happen on this car. So "swap `vRel` for the already-Kalman-filtered `vLeadK`" (suggested in
+  chat before this entry was corrected) is **not actually a free smoothing win on this vehicle** —
+  `vLeadK` carries no more smoothing than `vRel` does here. If dRel/vRel jitter turns out to be a
+  real problem, it needs an actual new filter (`FirstOrderFilter` or `_hysteresis_update`-style),
+  not a field swap. Not built now — no evidence yet that it's needed (§0.3 of the mapd doc: don't
+  fix a problem you haven't measured).
 
 **Both tiers of this feature are now DONE and road-tested.** No code changes pending. Watching
 item above is the only open thread, and it's explicitly deferred to more drive data at the
