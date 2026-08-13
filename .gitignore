@@ -88,3 +88,5 @@ build/
 .context/
 PLAN.md
 TASK.md
+CLAUDE.md
+graphify-out/
