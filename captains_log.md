@@ -9,6 +9,114 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-08-14 — hook 6: temporary accel FLOOR on the e2e candidate — ALWAYS ON, gated by AGGRESSIVE personality
+
+**What changed** (purely additive, 97 insertions, 0 deletions):
+- NEW `openpilot/grt/e2e_floor.py` — `E2EAccelFloor` state machine.
+- `openpilot/grt/hooks.py` — hook 6 shim `floor_e2e_accel()` + latched singleton. NO feature
+  param: **the aggressive personality is the switch.**
+- `openpilot/selfdrive/controls/lib/longitudinal_planner.py` — ONE line inside GRT-MOD sentinels,
+  placed after `soften_cruise_decel` / before `candidates = [...]`. Ordering after
+  `limit_v_cruise()` is load-bearing: a lowered `v_cruise` shrinks the headroom and stops it arming.
+
+**Why.** Fleet scan of 7.9 h engaged driving on this car (11 routes, 1208 segments, 565,565
+frames): with the set speed at the posted limit (60/80/100/120 in 6710 of 7032 contented
+seconds) the model settles a median 4.5–12.4 km/h BELOW it and then asks for nothing —
+64.8% of lead-free highway time >3 km/h under set speed has |desiredAcceleration| < 0.1.
+Usable headroom under the limit, not taken. Reclaiming it does not mean speeding.
+
+**The safety trade, stated plainly.** Unlike hooks 1/2/5 this hook CANNOT claim "it can never
+make braking weaker." Raising the e2e candidate is exactly how it stops winning the planner
+`min()`, and in experimental mode e2e is the only vision-based caution in the chain
+(`get_cruise_accel` skips the lateral-accel and coast limits; the MPC has no curvature input).
+Still covered: mapped curves/limits/hazards (hook 1), radar leads (MPC), set speed (cruise).
+NOT covered while active: unmapped curves, roadworks, stopped traffic radar has not locked,
+pedestrians, debris, poor visibility.
+
+Safety rests on the ARM CONDITION, not a second veto — measurement showed no usable veto exists
+(`gasPressProbs` sits at 0.926 with 0.1% below its 0.4 threshold in exactly the contented state).
+The hook arms only after the model ACCELERATED for real (band p85 of positive dAccel) and then
+tapered to settled — positive evidence of willingness seconds ago, which "model is quiet" does
+not give. Emergent property: all 23 usable events found offline had |curvature| <= 0.0021 —
+accelerate-then-settle does not happen on curves. Release is instant and LATCHED: re-arming
+requires a fresh strong-acceleration episode, so no lockout timer and no chatter.
+
+**Second arm trigger (added on request): driver switches personality INTO aggressive.**
+Rising edge only, and only from an explicitly-observed non-aggressive state — booting or
+engaging while already in aggressive is not a request. Opens a 3 s window in which the hook
+arms as soon as the situational gates allow, retried every frame rather than tested once, so a
+lead just clearing or a bend just straightening does not silently swallow the press.
+
+This trigger is justified DIFFERENTLY and the difference matters. The taper trigger rests on
+MODEL willingness (it accelerated for real seconds ago, so it was not withholding out of
+caution). The personality trigger has no such evidence — it rests on DRIVER authority: the
+driver just pressed a button, is demonstrably attentive, and is asking for the headroom. Only
+the first argument says anything about the road ahead.
+
+Consequence, written into the module docstring: **the curvature gate is now LOAD-BEARING on the
+personality path.** On the taper path it is near-redundant (accelerate-then-settle does not
+happen on curves — all 23 usable offline events measured <= 0.0021). On the personality path
+nothing else stops a driver requesting the floor mid-bend. Do not weaken `_MAX_CURV_ARM`
+without replacing it. Lead / headroom / throttle_prob gates are shared by both paths via a
+single `_gates_ok()` — one gate set, one place to change it.
+
+**Unit tests** (`scratchpad/test_floor.py`, 9/9 pass): boot-in-aggressive is not a request;
+relaxed->aggressive arms; floor ramps jerk-limited (max step 0.0150 <= 0.0151) and caps at
+0.400; a lead blocks then admits the request when it clears in-window; the request expires if
+the gate never opens; a mid-curve request is refused; an objection releases instantly and stays
+out through 10 s of quiet; a fresh strong->taper does re-arm afterwards; negative raw is never
+lifted.
+
+**Regression:** full replay after the refactor is byte-identical on the taper path —
+`strong=482 settled=34 armed=10`, 49 s active, max lift +0.400.
+
+**Verified offline.** Replayed the REAL state machine over all 565,565 logged frames
+(`scratchpad/replay_floor.py`): 10 arms, 49 s active = 0.17% of engaged time; every arm on
+straight road (curv 0.0001–0.0015) with 7.5–46.8 km/h headroom; releases spread across
+reached-set-speed (3), model-objected (3), throttle-prob (3), lead-appeared (1) — all four gate
+families live, none decorative. Mean lift +0.225 m/s², max +0.400. Both files parse.
+
+Funnel (now counted in `self.stats`, so the same breakdown is available on-car):
+`strong=482  settled=34  armed=10  gate_lead=14  gate_headroom=6  gate_tp=6  gate_curv=9`.
+
+Why 10 arms and not the 23 "usable" events the offline scan predicted — named, not hand-waved:
+(a) the offline count applied only the lead and headroom filters, whereas the state machine also
+gates on throttle_prob and curvature, which reject 6 and 9 settles respectively; (b) the offline
+detector partitioned rows by speed band with a band-constant STRONG threshold and a 3 s dedupe,
+while the state machine runs continuously with a speed-interpolated threshold — 34 settles here
+vs 51 events there. Checked and REJECTED: the consecutive-frame STRONG detector is not the
+cause; it finds 585 qualifying pushes under strict consecutive-frame matching (482 after the
+30 km/h and pid preconditions), so STRONG detection is nowhere near the binding constraint.
+
+**Fix applied during review:** the floor no longer lifts a raw e2e that is negative at all. Any
+value in (−0.05, 0) is passed straight through and the floor bleeds off at the same jerk, so
+re-applying ramps instead of stepping. Before this, a model request of −0.044 could be turned
+into +0.40 — a 0.44 m/s² reversal in the one direction the safety argument does not cover.
+Max lift is now exactly the 0.40 cap.
+
+**Also fixed during review:** the param read was constructing a fresh `Params()` every 60
+frames inside a 20 Hz loop; it is now cached in `_e2e_floor_params`, matching how hook 2 reuses
+`scc.params`.
+
+**NOT verified, and cannot be offline.** The model's reaction to actually being pushed is in no
+log. Replay is open-loop. The first drive is the test, and the release path is the thing to watch.
+
+**Does NOT address the uphill droop** (car 7 km/h under set for 100 s on grade with ECU torque
+headroom; root cause `kp = ki = 0` and no grade input to either branch). Uphill at >10 km/h
+deficit the model is active, not contented, so this hook will rarely arm there.
+
+**Operator decision on the switch (2026-08-14).** I recommended a separate feature param,
+default OFF, on three grounds: it is the only practical kill switch on a prebuilt branch; the
+hook has never been driven; and it overloads `aggressive` (which upstream means only
+`T_FOLLOW` 1.25 vs 1.45) with a much larger meaning. **Operator overruled all three and chose
+ALWAYS ON**, reasoning that selecting a different personality is itself the switch — it is on
+the wheel, usable mid-drive without stopping, and needs no shell. Rollback path agreed: switch
+out of aggressive, report back, then fix or revert. The param gate was removed accordingly.
+Do not reintroduce it without asking.
+
+**Requires:** experimental mode ON (otherwise the e2e candidate is not in the `min()` at all)
+and AGGRESSIVE personality. Any other personality = hook fully inert.
+
 ## 2026-08-05 — curve approach: rate-limit the ceiling descent to APPROACH_DECEL (fixes the harsh curve slow-down)
 
 Operator: the slow-down *before* a curve is too rapid. Root-caused from the 11:28 drive, fixed

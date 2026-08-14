@@ -155,6 +155,19 @@ class LongitudinalPlanner:
     # GRT-MOD-END
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
+    # GRT-MOD-START — offer back unused headroom below the set speed (default OFF, param
+    # GrtE2EAccelFloor, aggressive personality only). UNLIKE hooks 1/2/5 this one CAN make the
+    # car less cautious: it RAISES the e2e candidate, which is how that candidate stops winning
+    # the min() below, and in experimental mode e2e is the only vision-based caution in the
+    # chain (get_cruise_accel skips the lateral-accel and coast limits, and the MPC has no
+    # curvature input). Mapped curves/limits/hazards are still covered by hook 1, radar leads by
+    # the MPC branches, the set speed by the cruise candidate. Safety rests on the arm condition
+    # — the model must have just accelerated for real and tapered off — plus instant latched
+    # release. MUST stay after limit_v_cruise(): a lowered v_cruise shrinks the headroom this
+    # hook sees and stops it arming. See openpilot/grt/e2e_floor.py before touching this.
+    output_a_target_e2e = grt_hooks.floor_e2e_accel(output_a_target_e2e, sm, v_ego, v_cruise)
+    # GRT-MOD-END
+
     candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
                   (self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop)]
     if sm['selfdriveState'].experimentalMode:

@@ -313,3 +313,83 @@ def track_set_speed(sm, CS, v_cruise_helper, enabled: bool, engage_edge: bool = 
       v_cruise_helper.v_cruise_cluster_kph = new_v_cruise
   except Exception:
     _log_exception("set_speed update")
+
+
+# ----------------------------------------------------------------------------------------
+# Hook 6 — temporary acceleration FLOOR on the e2e candidate (default OFF).
+# ----------------------------------------------------------------------------------------
+_e2e_floor = None
+_e2e_floor_broken = False
+
+
+def _e2e_floor_singleton():
+  """Return the e2e floor state machine, or None if it cannot be built (latched)."""
+  global _e2e_floor, _e2e_floor_broken
+  if _e2e_floor_broken:
+    return None
+  if _e2e_floor is None:
+    try:
+      from openpilot.grt.e2e_floor import E2EAccelFloor
+      _e2e_floor = E2EAccelFloor()
+    except Exception:
+      _e2e_floor_broken = True
+      _log_exception("e2e_floor construction; e2e floor disabled")
+      return None
+  return _e2e_floor
+
+
+def floor_e2e_accel(a_e2e: float, sm, v_ego: float, v_cruise: float) -> float:
+  """Hook 6. Offer back the headroom the model leaves unused below the set speed.
+
+  READ openpilot/grt/e2e_floor.py BEFORE CHANGING ANYTHING HERE. Unlike hooks 1/2/5 this
+  hook CANNOT claim "it can never make braking weaker" — raising the e2e candidate is
+  exactly how it stops winning the planner's min(), and in experimental mode the e2e
+  candidate is the only vision-based caution in the chain. That trade is deliberate and
+  the safety argument rests entirely on the arm condition (the model must have just
+  accelerated for real and tapered off) plus instant, latched release.
+
+  ALWAYS ON — no feature param, unlike hook 2. This is the operator's explicit decision
+  (2026-08-14): the AGGRESSIVE PERSONALITY IS THE SWITCH. Selecting any other personality
+  disables this hook completely, which is a control the driver already has on the wheel and
+  can use mid-drive without stopping. Do not reintroduce a param gate without asking —
+  a second switch was considered and deliberately rejected.
+
+  Called with v_cruise AFTER hook 1 has run, so a mapped curve / speed limit / hazard that
+  lowered v_cruise also shrinks the headroom this hook sees and stops it arming. That
+  ordering is load-bearing — keep this call after limit_v_cruise().
+
+  Never raises: any failure returns the model's own value unchanged.
+  """
+  try:
+    if not sm['selfdriveState'].experimentalMode:
+      return a_e2e            # the e2e candidate is not even in the min() in this mode
+
+    fl = _e2e_floor_singleton()
+    if fl is None:
+      return a_e2e
+
+    cs = sm['carState']
+    model = sm['modelV2']
+    probs = model.meta.disengagePredictions.gasPressProbs
+    return fl.update(
+      a_e2e=float(a_e2e),
+      v_ego=float(v_ego),
+      v_cruise=float(v_cruise),
+      lead=bool(sm['radarState'].leadOne.present),
+      throttle_prob=float(probs[1]) if len(probs) > 1 else 1.0,
+      curvature=float(model.action.desiredCurvature),
+      aggressive=_enum_is_aggressive(sm['selfdriveState'].personality),
+      long_pid=str(sm['controlsState'].longControlState) == 'pid',
+      driver_input=bool(cs.gasPressed or cs.brakePressed or cs.standstill),
+      experimental=True,
+    )
+  except Exception:
+    _log_exception("floor_e2e_accel")
+    return a_e2e
+
+
+def _enum_is_aggressive(personality) -> bool:
+  try:
+    return str(personality) == 'aggressive'
+  except Exception:
+    return False
