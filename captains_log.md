@@ -114,6 +114,23 @@ the wheel, usable mid-drive without stopping, and needs no shell. Rollback path 
 out of aggressive, report back, then fix or revert. The param gate was removed accordingly.
 Do not reintroduce it without asking.
 
+**DEPLOYED to comma4 2026-08-14.** git bundle `b500214..nightly-dev` (18 KB) -> scp -> `git
+fetch <bundle> && git merge --ff-only` -> reboot. Device was 2 docs-only commits behind at
+`b500214` (verified an ancestor first, so a true fast-forward); now at `0b2b418`, clean tree.
+`prebuilt` untouched, no scons, no cereal SCP. Bundle deleted after.
+
+Verified ON DEVICE with the real openpilot deps (not test stubs): `grt.hooks`, `grt.e2e_floor`
+and the planner all import; `floor_e2e_accel` present; the planner's `update()` source contains
+the call; a synthetic relaxed->aggressive switch armed via the personality path and the floor
+capped at exactly 0.400. Post-reboot: manager and plannerd running, tree clean.
+
+**False alarm investigated and cleared:** swaglog showed 47,642 `grt: scc_map update failed`.
+All of them date to **2026-07-29 08:05-08:06** and the traceback is the `lead.status` bug already
+recorded as fixed (its line numbers no longer match current source). Zero occurrences in the
+newest swaglog and none since that date; `scc_map` constructs cleanly on the current code and no
+longer references that field. Hook 1 is healthy — which matters, because hook 6's safety argument
+depends on hook 1 still covering mapped curves.
+
 **Requires:** experimental mode ON (otherwise the e2e candidate is not in the `min()` at all)
 and AGGRESSIVE personality. Any other personality = hook fully inert.
 
