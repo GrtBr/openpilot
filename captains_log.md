@@ -9,6 +9,40 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-08-15 — hooks 6/7: tests moved into the repo, and the personality HANDOFF characterised
+
+Both hooks' tests now live in `openpilot/grt/tests/` (`test_e2e_floor.py` 16,
+`test_accel_ramp.py` 14) instead of a scratchpad, following the house style: stubbed deps,
+standalone runnable, docstring listing the safety-relevant properties. Existing suites
+(`test_hooks`, `test_scc_map`, `test_set_speed`) unaffected.
+
+**The gap that prompted this:** hooks 6 and 7 are mutually exclusive by personality, so
+neither single-hook suite covered the HANDOFF — and switching personality mid-drive is
+exactly what the operator does when evaluating them. Now covered by a `Chain` harness that
+mirrors the planner (e2e candidate -> hook 6 -> min() -> hook 7 -> output).
+
+**Measured, and left UNFIXED deliberately:**
+
+| transition | step | demand | after the ~5 m/s^3 wire clip |
+|---|---|---|---|
+| aggressive -> relaxed | **-0.380** m/s^2 | 7.6 m/s^3 | 0.076 s |
+| relaxed -> aggressive | **+0.550** m/s^2 | 11.0 m/s^3 | 0.110 s |
+
+Both are real. Neither is smoothed, and that is a decision rather than an oversight:
+hook 6's release must stay instant (its core safety property) and hook 7 must not delay
+falls (its core safety property). Fixing either would mean weakening the thing that makes
+these hooks safe. Both steps are also SMALLER than the ~1.634 m/s^2 per-tick steps the plan
+itself produces in normal driving, both are bounded by the wire clip, and the upward one
+never exceeds the planner's own value. 4000 frames of rapid personality churn leave neither
+hook stuck and never exceed the raw candidate by more than hook 6's 0.40 cap.
+
+**Still open — read the NEXT drive's swaglog for RELEASE-REASON DISTRIBUTION.** In the
+08-15 replay 3 of 4 sessions ended on `_MAX_ACTIVE_T = 20 s`, which means the recalibrated
+release logic is largely untested in the field: a detector that fired constantly was
+replaced by one that in this sample barely fires, and the duration cap masks it. If the
+next drive is still mostly `max duration`, we know -0.20 / 0.30 s is not obviously wrong —
+not that it is right.
+
 ## 2026-08-15 — hook 7: rising-edge JERK CAP on the accel command, relaxed personality
 
 **What changed** (additive): NEW `openpilot/grt/accel_ramp.py`; hook 7 shim
