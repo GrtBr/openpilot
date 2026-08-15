@@ -9,6 +9,59 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-08-15 — hook 6 RECALIBRATED after first road drive: gate was closing on noise
+
+**Symptom (operator):** "closing gate seems too sensitive." Confirmed: sessions lasted
+0.04-11 s. Two independent faults, both mine, both found in the hook's own swaglog output.
+
+**Fault 1 — `_ABANDON_ACCEL = -0.05` was reading noise as objection.** Every logged
+"model objected" release tripped at raw_e2e of **-0.050 / -0.051 / -0.051 / -0.057**, i.e.
+by 0-7 THOUSANDTHS of a m/s^2. Measured on the drive (300 s, highway, set 110 km/h):
+`desiredAcceleration` is negative **37%** of the time, p10 = -0.098, and it crosses -0.05
+**47 times (~9/min)** with median excursion depth -0.075. -0.05 sat near the 15th
+percentile. With a single-frame trip and a latched release the gate could never stay open.
+
+Every SHORT (<0.4 s) excursion bottomed at -0.096 or shallower, so a threshold of -0.20
+plus a debounce ignores all 21 of them while still catching the real ones (-0.357, -0.754,
+-1.467). Now **-0.20 sustained for 0.30 s**.
+
+Critically this threshold governs whether we LATCH OUT, not whether we override — a
+negative raw is passed through unlifted regardless (the 08-14 fix), so widening it never
+commands acceleration against a deceleration request.
+
+**Checked before shipping:** would `_ABANDON_DROP` just become the new dominant releaser?
+Yes — at 0.15 it fires **3.0x/min** on this drive. Raised to **0.35** (0.6x/min). Fixing
+only the threshold would barely have helped.
+
+**Fault 2 — the personality edge armed on values merely PASSED THROUGH.** Two releases
+logged `preconditions` at +39 ms and +90 ms with raw_e2e POSITIVE (+0.144, +0.139), which
+is not an objection at all. The rlog shows why: the driver was cycling the wheel button,
+and intermediate personalities publish 9-160 ms apart —
+`relaxed -> standard -> aggressive(20 ms) -> standard -> aggressive(120 ms) -> relaxed -> ...`
+Each transit through aggressive fired an edge, armed, then released as it moved on.
+Now requires aggressive **held 0.40 s** and fires once per selection (re-armed only by
+leaving aggressive). Boot-in-aggressive still not a request.
+
+**Fault 3 (diagnostic) — "preconditions" did not say WHICH.** Cost a whole log-diving
+round. Releases now name it: `precondition: driver input`, `not aggressive`, `not pid`, etc.
+
+**Verified.** Replayed the REAL state machine over today's 5 segments, old vs new. The old
+config reproduces the drive faithfully (4 arms; 4.0 / 1.6 / 10.7 / 0.2 s, mean 4.1 s —
+matches the swaglog's 3.9 / 2.0 / 11.1 s), which validates the replay:
+
+| | sessions | mean | releases |
+|---|---|---|---|
+| as driven | 4.0, 1.6, 10.7, 0.2 s | 4.1 s | 4x false objection |
+| recalibrated | 20.0, 20.0, 18.2, 20.0 s | **19.6 s** | 3x max-duration, 1x genuine |
+
+Unit tests 16/16, including regression cases for both faults ("cycling THROUGH aggressive
+does not arm", "a -0.055 blip does NOT release").
+
+**WATCH NEXT DRIVE:** `_MAX_ACTIVE_T = 20 s` is now the BINDING constraint — 3 of 4
+sessions ended on it rather than on anything the model did. That cap is a deliberate
+safety bound (conditions drift away from the evidence that armed us), so it was left
+alone, but it is the next thing to tune if 20 s feels short.
+
 ## 2026-08-14 — hook 6: temporary accel FLOOR on the e2e candidate — ALWAYS ON, gated by AGGRESSIVE personality
 
 **What changed** (purely additive, 97 insertions, 0 deletions):

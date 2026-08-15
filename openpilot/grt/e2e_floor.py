@@ -72,9 +72,13 @@ paths (`_gates_ok`), deliberately: one gate set, one place to change it.
 
 RELEASE
 -------
-Instant and total on any objection, and it STAYS out: re-arming requires a fresh
-strong-acceleration episode, so the hook cannot re-apply during the same quiet period.
-That gives the "hand control back to e2e" guarantee with no lockout timer to tune.
+Total, and it STAYS out: re-arming requires a fresh strong-acceleration episode (or a
+fresh deliberate personality selection), so the hook cannot re-apply during the same quiet
+period. That gives the "hand control back to e2e" guarantee with no lockout timer to tune.
+
+The objection must be SUSTAINED (_ABANDON_ACCEL for _ABANDON_T), not instantaneous — see
+the recalibration note on those constants. A negative raw value is passed through unlifted
+the whole time regardless, so the debounce delays the LATCH-OUT, never the deference.
 
 WHAT THIS DOES NOT ADDRESS
 --------------------------
@@ -114,8 +118,22 @@ _MAX_CURV_ARM = 0.0020      # 1/m. All 23 usable events measured <= 0.0021.
 
 # Release gates (deliberately looser than the arm gates; we latch out either way)
 _MAX_CURV_RELEASE = 0.0030  # 1/m
-_ABANDON_ACCEL = -0.05      # m/s^2. ANY meaningful negative from the model releases.
-_ABANDON_DROP = 0.15        # m/s^2 drop in raw e2e over _ABANDON_DROP_T -> model withdrawing
+# RECALIBRATED 2026-08-15 from the first on-road drive. The original -0.05 / no-debounce /
+# 0.15-drop settings closed the gate almost instantly: sessions lasted 2-11 s and every logged
+# "model objected" release tripped at raw_e2e of -0.050 to -0.057, i.e. by 0-7 THOUSANDTHS.
+# Measured on that drive (300 s, highway, set 110): dAccel is negative 37% of the time, p10 is
+# -0.098, and it dips below -0.05 forty-seven times (~9/min) with a median excursion depth of
+# only -0.075. -0.05 sat at roughly the 15th percentile — it was reading noise as objection.
+# Every short (<0.4 s) excursion bottomed out at -0.096 or shallower, so -0.20 plus a debounce
+# ignores all of them while still catching the real ones (-0.357, -0.754, -1.467).
+# NOTE this threshold governs whether we LATCH OUT, not whether we override: a negative raw is
+# passed straight through regardless (see the active block), so widening it does not command
+# acceleration against a deceleration request.
+_ABANDON_ACCEL = -0.20      # m/s^2, sustained for _ABANDON_T
+_ABANDON_T = 0.30           # s, how long the objection must hold. Kills the single-frame blips.
+# The drop detector had to move too: at 0.15 it fired 3.0x/min on this drive and would simply
+# have become the new dominant releaser once the threshold above was widened.
+_ABANDON_DROP = 0.35        # m/s^2 drop in raw e2e over _ABANDON_DROP_T -> model withdrawing
 _ABANDON_DROP_T = 0.5       # s
 _RELEASE_HEADROOM = 0.28    # m/s == 1 km/h; we have arrived, let cruise take it
 
@@ -132,6 +150,12 @@ _MAX_ACTIVE_T = 20.0        # s. Conditions drift away from the evidence that ar
 # A short window rather than a single frame, so the request is not silently swallowed when a
 # gate happens to be closed on the exact frame the button is pressed.
 _PERSONALITY_WINDOW = 3.0   # s
+# The personality must be STABLE on aggressive before it counts as a request. On 2026-08-15 the
+# driver cycled relaxed->standard->aggressive with the wheel button; the intermediate values are
+# published 9-160 ms apart, so the hook armed on values merely being passed THROUGH and then
+# released 39 ms and 90 ms later with reason "preconditions". 0.40 s clears that comfortably and
+# is imperceptible once the driver has actually settled.
+_PERSONALITY_STABLE_T = 0.40  # s
 
 _WAIT, _ACTIVE = 0, 1
 
@@ -179,7 +203,9 @@ class E2EAccelFloor:
                   "personality_edge": 0, "armed_personality": 0, "personality_expired": 0}
     # None until we have seen one frame, so a car that boots already in aggressive does NOT
     # count as the driver having just asked for it.
-    self.prev_aggressive = None
+    self.saw_non_aggressive = False   # set once a non-aggressive personality is observed
+    self.aggr_t = 0.0          # s aggressive has been held continuously
+    self.object_t = 0.0        # s raw e2e has been below _ABANDON_ACCEL continuously
     self.pending_t = 0.0       # s remaining in the personality-request window
 
   # -- helpers ------------------------------------------------------------------------
@@ -196,6 +222,7 @@ class E2EAccelFloor:
     self.state = _WAIT
     self.floor = 0.0
     self.active_t = 0.0
+    self.object_t = 0.0
     # Requiring a fresh STRONG episode is what gives "it stays out". Do not shortcut this.
     self._reset_detector()
     self.last_reason = reason
@@ -252,14 +279,22 @@ class E2EAccelFloor:
     self.frame += 1
     self.raw_hist.append(a_e2e)
 
-    # --- trigger 2: the driver switched INTO aggressive -------------------------------
-    # Edge only, and only from an explicitly-observed non-aggressive state, so booting or
-    # engaging while already in aggressive is not treated as a request.
-    if self.prev_aggressive is False and aggressive:
+    # --- trigger 2: the driver SETTLED on aggressive ----------------------------------
+    # Requires (a) having actually observed a non-aggressive state, so booting or engaging
+    # in aggressive is not a request, and (b) aggressive held for _PERSONALITY_STABLE_T, so
+    # values merely passed THROUGH while cycling the wheel button do not arm. Fires once per
+    # selection: the flag is only re-armed by leaving aggressive again.
+    if aggressive:
+      self.aggr_t += DT_MDL
+    else:
+      self.aggr_t = 0.0
+      self.saw_non_aggressive = True
+    if self.saw_non_aggressive and self.aggr_t >= _PERSONALITY_STABLE_T:
+      self.saw_non_aggressive = False
       self.stats["personality_edge"] += 1
       self.pending_t = _PERSONALITY_WINDOW
-      self._log(f"personality -> aggressive; arm request open for {_PERSONALITY_WINDOW:.0f}s")
-    self.prev_aggressive = bool(aggressive)
+      self._log(f"personality settled on aggressive; arm request open for "
+                f"{_PERSONALITY_WINDOW:.0f}s")
 
     if self.pending_t > 0.0:
       self.pending_t = max(0.0, self.pending_t - DT_MDL)
@@ -270,17 +305,35 @@ class E2EAccelFloor:
     quiet = min(max(_QUIET_FRAC * strong, _QUIET_MIN), _QUIET_MAX)
     headroom = v_cruise - v_ego
 
-    # Hard preconditions. Any of these missing and we are simply not in the game.
-    basics_ok = (experimental and aggressive and long_pid and not driver_input
-                 and v_ego >= _MIN_SPEED)
+    # Hard preconditions. Named individually so a release says WHICH one went, rather than
+    # a bare "preconditions" that costs a log-diving session to interpret.
+    missing = ""
+    if not experimental:
+      missing = "not experimental"
+    elif not aggressive:
+      missing = "not aggressive"
+    elif not long_pid:
+      missing = "not pid"
+    elif driver_input:
+      missing = "driver input"
+    elif v_ego < _MIN_SPEED:
+      missing = "below min speed"
+    basics_ok = not missing
+
+    # Sustained-objection accumulator. Updated every frame regardless of state so it can
+    # never carry stale credit into a fresh arm.
+    if a_e2e < _ABANDON_ACCEL:
+      self.object_t += DT_MDL
+    else:
+      self.object_t = 0.0
 
     # ---------------- release path (checked first, against raw a_e2e) ----------------
     if self.state == _ACTIVE:
       reason = ""
-      if not basics_ok:
-        reason = "preconditions"
-      elif a_e2e < _ABANDON_ACCEL:
-        reason = "model objected"
+      if missing:
+        reason = f"precondition: {missing}"
+      elif self.object_t >= _ABANDON_T:
+        reason = f"model objected ({self.object_t:.2f}s)"
       elif len(self.raw_hist) == self.raw_hist.maxlen and \
               (self.raw_hist[0] - a_e2e) > _ABANDON_DROP:
         reason = "model withdrawing"
