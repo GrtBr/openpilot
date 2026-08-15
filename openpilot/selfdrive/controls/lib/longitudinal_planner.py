@@ -183,6 +183,17 @@ class LongitudinalPlanner:
 
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
+
+    # GRT-MOD-START — gentle the RISE of the command in relaxed personality (jerk cap, not a
+    # time constant: the plan's commands are short transients, so a time constant cuts their
+    # amplitude rather than their slope — measured, see grt/accel_ramp.py). Applied AFTER the
+    # min() so it shapes delivery of whichever candidate won rather than biasing the choice.
+    # Cannot make braking weaker: on a rise the output is min(plan, ...) and on a fall it is
+    # exactly plan, so the command is never greater than the planner asked for. A rise that is
+    # merely the release of braking is not delayed.
+    output_a_target = grt_hooks.ramp_relaxed_accel(output_a_target, sm, sm['carControl'].longActive)
+    # GRT-MOD-END
+
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
 
     self.a_desired = float(self.output_a_target)

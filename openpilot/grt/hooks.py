@@ -393,3 +393,57 @@ def _enum_is_aggressive(personality) -> bool:
     return str(personality) == 'aggressive'
   except Exception:
     return False
+
+
+# ----------------------------------------------------------------------------------------
+# Hook 7 — rising-edge jerk cap on the final accel command, RELAXED personality only.
+# ----------------------------------------------------------------------------------------
+_accel_ramp = None
+_accel_ramp_broken = False
+
+
+def _accel_ramp_singleton():
+  """Return the ramp, or None if it cannot be built (latched, as above)."""
+  global _accel_ramp, _accel_ramp_broken
+  if _accel_ramp_broken:
+    return None
+  if _accel_ramp is None:
+    try:
+      from openpilot.grt.accel_ramp import RelaxedAccelRamp
+      _accel_ramp = RelaxedAccelRamp()
+    except Exception:
+      _accel_ramp_broken = True
+      _log_exception("accel_ramp construction; relaxed ramp disabled")
+      return None
+  return _accel_ramp
+
+
+def ramp_relaxed_accel(a_target: float, sm, long_active: bool) -> float:
+  """Hook 7. Gentle the RISE of the accel command in relaxed personality.
+
+  See openpilot/grt/accel_ramp.py for why this is a jerk cap (m/s^3) and not a
+  time-to-target in seconds — the short version is that the plan's commands are brief
+  transients, so a time constant cuts their amplitude instead of their slope.
+
+  Safety, and why this one CAN claim it cannot make braking weaker (unlike hook 6):
+    * on a rise the output is min(plan, ...), on a fall it is exactly plan. So the
+      commanded accel is never GREATER than the planner asked for, in any state — a sudden
+      demand for hard braking passes through in the same frame, unfiltered.
+    * a rise that is merely the release of braking is not delayed: the ramp restarts from
+      max(prev, 0), so only the throttle portion is gentled.
+    * relaxed personality only, and the state is dropped whenever it is not active.
+
+  Applied AFTER the planner's min(), deliberately: this shapes the delivery of whichever
+  candidate won, rather than biasing the selection between them.
+
+  Never raises: any failure returns the planner's own value unchanged.
+  """
+  try:
+    ramp = _accel_ramp_singleton()
+    if ramp is None:
+      return a_target
+    active = long_active and str(sm['selfdriveState'].personality) == 'relaxed'
+    return ramp.update(float(a_target), active)
+  except Exception:
+    _log_exception("ramp_relaxed_accel")
+    return a_target

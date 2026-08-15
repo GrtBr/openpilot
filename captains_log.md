@@ -9,6 +9,54 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-08-15 — hook 7: rising-edge JERK CAP on the accel command, relaxed personality
+
+**What changed** (additive): NEW `openpilot/grt/accel_ramp.py`; hook 7 shim
+`ramp_relaxed_accel()` in `grt/hooks.py`; ONE line in `longitudinal_planner.py` inside
+GRT-MOD sentinels, placed AFTER the `min()` so it shapes delivery of whichever candidate
+won rather than biasing the selection.
+
+**Why a jerk cap and not the "ramp over ~3 s" originally proposed.** The plan's rising
+updates are extremely bottom-heavy — median 0.011 m/s^2 per 50 ms tick (0.2 m/s^3), p90
+0.036 (0.7 m/s^3), max 1.634 (33 m/s^3). A time constant applies to every update equally,
+including the thousands of trim ones: a symmetric tau = 3 s was measured to cut PEAK
+command 1.96 -> 1.28 uphill (-35%) and 0.67 -> 0.16 on the highway (-76%) while leaving
+mean effort untouched. Because the commands are short transients a slow filter never
+reaches the target — an amplitude cut wearing a slope-change costume, the opposite of the
+request. A jerk cap sits out in the tail and catches only the steps.
+
+**Brake release is deliberately NOT rate-limited.** Two variants measured over the full
+7.9 h fleet:
+
+| variant | jerk | peak | +area lost | binds | worst lag |
+|---|---|---|---|---|---|
+| A: limit all rises | 1.5 | 1.96 | 2.2% | 0.8% | **2.93** |
+| **B: ramp restarts from max(prev,0)** | **1.5** | **1.96** | **1.2%** | **0.5%** | **1.22** |
+
+Variant A left the command up to 2.93 m/s^2 behind the plan — dragging the brakes long
+after the plan wanted them off. B halves the area cost and the worst shortfall. Shipped B
+at **1.5 m/s^3** (3x gentler than the ~5 m/s^3 wire clip, inside ISO 15622).
+
+Also considered and REJECTED on measurement: a deficit gate (would have been bypassed
+during the entire event that motivated this — the car was 12 km/h down at the time) and a
+deadband (+/-0.05 costs 16% of highway positive area for no peak benefit).
+
+**Safety — this hook DOES carry the standard claim, unlike hook 6.** On a rise the output
+is `min(plan, ...)`, on a fall it is exactly `plan`, so the command is never GREATER than
+the planner asked for in any state; a sudden demand for hard braking passes through in the
+same frame. Relaxed personality only; state dropped whenever inactive, so re-entering
+relaxed never ramps from a stale value. First active frame ADOPTS the current command
+rather than seeding at zero — seeding at zero would lurch if relaxed is selected
+mid-acceleration.
+
+**Cost, stated plainly:** lag. Up to ~1.2 m/s^2 of instantaneous shortfall, decaying at the
+cap. That is the trade "relaxed" is asking for.
+
+**Tests:** 10/10 new (`scratchpad/test_ramp.py`), hook 6's 16/16 still pass.
+
+**Personality map is now fully fork-specific:** relaxed = gentler throttle rise, standard =
+upstream behaviour, aggressive = hook 6 accel floor. Upstream only ever varied `T_FOLLOW`.
+
 ## 2026-08-15 — hook 6 RECALIBRATED after first road drive: gate was closing on noise
 
 **Symptom (operator):** "closing gate seems too sensitive." Confirmed: sessions lasted
