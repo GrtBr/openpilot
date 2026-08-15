@@ -36,6 +36,25 @@ itself produces in normal driving, both are bounded by the wire clip, and the up
 never exceeds the planner's own value. 4000 frames of rapid personality churn leave neither
 hook stuck and never exceed the raw candidate by more than hook 6's 0.40 cap.
 
+**Also replayed against REAL mid-drive switching** (`scratchpad/replay_switch.py`, today's
+5 segments, 279 s engaged, lead present 0.2%). The driver's actual cycling produced 14
+personality transitions; the worst output step at any of them was **0.008 m/s^2** — 70x
+smaller than the synthetic worst case and imperceptible. Hook 6 active 78.2 s, consistent
+with the recalibration replay.
+
+Limitation worth keeping: **hook 7 never bound in that drive** (0.0 s holding the command
+below the plan) because the relaxed periods were 1-5 s of steady highway cruise while
+cycling toward aggressive. So real data confirms the TYPICAL handoff is negligible; the
+worst case — hook 7 mid-ramp, holding 0.45 below a 1.0 plan, at the moment of the switch —
+is bounded only by the synthetic test at +0.550 m/s^2 (0.11 s after the wire clip). To
+exercise it on road: select relaxed, get a real acceleration going, and switch to
+aggressive DURING the ramp.
+
+(Extraction bug found and fixed while doing this: the first run indexed `ss[l][0]` — the
+timestamp — as the personality, so every frame looked like a transition and both hooks were
+inert. Symptom was 5582 "transitions" and 0.0 s of hook activity. Sanity-check totals, not
+just per-row output.)
+
 **Still open — read the NEXT drive's swaglog for RELEASE-REASON DISTRIBUTION.** In the
 08-15 replay 3 of 4 sessions ended on `_MAX_ACTIVE_T = 20 s`, which means the recalibrated
 release logic is largely untested in the field: a detector that fired constantly was
