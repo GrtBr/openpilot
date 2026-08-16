@@ -9,6 +9,71 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+---
+
+## CURRENT STATE — longitudinal personality hooks (living section, update on change)
+
+Last verified on car: **2026-08-16**, commit `a427236`, plannerd clean, 0 grt exceptions.
+
+### What each personality does (all fork-specific; upstream only ever varied T_FOLLOW)
+
+| personality | behaviour | can it weaken braking? |
+|---|---|---|
+| **relaxed** | hook 7: rising-edge jerk cap on the final command | **No.** On a rise the output is `min(plan, ...)`, on a fall exactly `plan`. |
+| **standard** | upstream behaviour, untouched | n/a |
+| **aggressive** | hook 6: temporary accel floor on the e2e candidate | **Yes** — deliberate, see the hook docstring. |
+
+Hook 6 additionally requires **experimental mode**; without it the e2e candidate is not in
+the planner's `min()` at all and the hook is a no-op. There is NO feature param — the
+personality IS the switch, by operator decision 2026-08-14. Do not reintroduce a param gate
+without asking.
+
+### Live constants (`openpilot/grt/e2e_floor.py`, `openpilot/grt/accel_ramp.py`)
+
+| constant | value | set by |
+|---|---|---|
+| `_FLOOR_JERK` | 0.30 m/s^3 | original design |
+| `_FLOOR_FALL_JERK` | 2.0 m/s^3 | 08-16 stutter fix |
+| `_FLOOR_MAX` | 0.40 m/s^2 | original design |
+| `_ABANDON_ACCEL` / `_ABANDON_T` | −0.20 / 0.30 s | 08-15 recalibration |
+| `_ABANDON_DROP` | 0.35 m/s^2 over 0.5 s | 08-15 recalibration |
+| `_PERSONALITY_STABLE_T` | 0.40 s | 08-15, button-cycling fix |
+| `_MAX_ACTIVE_T` | 20 s | original design |
+| `_MIN_SPEED` / `_MIN_HEADROOM` | 30 km/h / 5 km/h | fleet scan |
+| `_MAX_CURV_ARM` / `_MAX_CURV_RELEASE` | 0.0020 / 0.0030 1/m | fleet scan |
+| `JERK_RELAXED` (hook 7) | 1.5 m/s^3 | fleet scan |
+
+### Diagnosing it on the car
+
+The hook logs every arm and release with a named reason. One command:
+
+    python3 /tmp/parse_swag.py        # copy from analysis/parse_swag.py first; /tmp is wiped on reboot
+
+Release reasons: `model objected (Ns)`, `model withdrawing`, `lead appeared`, `throttle prob`,
+`curvature`, `reached set speed`, `max duration`, `precondition: <which>`.
+
+### Open questions
+
+1. **Release-reason distribution.** In the 08-15 replay 3 of 4 sessions ended on the 20 s
+   `max duration` cap, which would mean the recalibrated release logic is barely exercised.
+   The 08-16 drive ended on `reached set speed` and `lead appeared` — better, but two
+   samples is not a distribution. Read this before tuning anything.
+2. **relaxed → aggressive DURING a ramp** is still untested on road. Bounded at +0.550 m/s^2
+   by the synthetic test; the real 08-16 transitions peaked at 0.008 because hook 7 never
+   bound. To provoke: select relaxed, get a real acceleration going, switch mid-ramp.
+3. **The uphill droop is still unfixed** and remains the larger defect (7 km/h under set for
+   100 s on grade with ECU torque headroom; root cause `kp = ki = 0`, no grade input to
+   either branch). Neither hook addresses it.
+
+### Where the analysis lives
+
+Full diagnosis, all measurement scripts, and the fleet-scan results:
+`~/Comma/openpilot/analysis/` — deliberately OUTSIDE either checkout. It contains route
+timestamps, GPS-derived grade and driving history, and `nightly-dev` pushes to a GitHub
+fork, so it is not committed. Move it in only if that is an explicit decision.
+
+---
+
 ## 2026-08-16 — THROTTLE STUTTER root-caused: my "never lift a negative" fix was a step
 
 **Symptom (operator):** "a very clear stuttering feeling on the throttle, sort of a go don't
