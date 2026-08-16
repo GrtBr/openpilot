@@ -9,6 +9,60 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-08-16 — THROTTLE STUTTER root-caused: my "never lift a negative" fix was a step
+
+**Symptom (operator):** "a very clear stuttering feeling on the throttle, sort of a go don't
+go go in very short succession", 10:50-10:55 local.
+
+**Root cause — mine, introduced 2026-08-14.** The "never lift a negative command" change was
+implemented as a HARD BRANCH: when `a_e2e < 0`, return it straight through. The model's
+output wanders across zero constantly (negative 22-23% of engaged frames), so the command
+alternated between the floor and the raw value.
+
+Evidence, from the exact armed window the hook itself logged (wall clock recovered via the
+`clocks` message, so no inference about which frames were armed):
+
+```
+10:54:49.450   a_cmd +0.385   raw +0.009   <- floor applied
+10:54:49.551         -0.014       -0.014   <- raw crosses zero: DROP 0.40 in ONE frame
+   ... ~0.6 s of nothing / slight braking ...
+10:54:50.150         +0.235       +0.018   <- raw back positive: JUMP 0.27 in one frame
+10:54:50.750         +0.400       +0.263
+```
+
+Window totals: max step **0.414 m/s^2**, 2 steps >0.20, p2p 0.534. Push -> nothing -> push,
+about 0.7 s apart. The FIRST armed window (10:51:22-10:51:31) was clean — max step 0.034,
+1 reversal — because `raw` never went negative there (0.0%). That contrast is what confirms
+the mechanism rather than merely fitting it.
+
+**Correction to my own first pass:** I initially reported "8 flips in 1.1 s" from a crude
+detector that inferred armed windows as `a_cmd - raw > 0.05`. That was an artifact; the real
+figure is 2 large discontinuities in 8 s. Same defect, wrong magnitude. Use the logged arm
+times, not an inferred proxy.
+
+**Fix.** The floor now WITHDRAWS smoothly instead of switching off, and decays toward
+`a_e2e` rather than toward zero (bottoming at zero would hold the command at 0.0 while the
+model asked for -0.15, never deferring at all). Chosen by replaying the exact window:
+
+| variant | max step | steps>0.10 | steps>0.20 |
+|---|---|---|---|
+| old hard branch (as driven) | **0.414** | 2 | 2 |
+| fall jerk 3.0 | 0.150 | 3 | 0 |
+| **fall jerk 2.0 (shipped)** | **0.100** | **0** | **0** |
+| fall jerk 1.5 | 0.075 | 0 | 0 |
+
+2.0 m/s^3 is 2.5x gentler than the ~5 m/s^3 wire clip, so the CAN layer passes it unchanged,
+and it clears the 0.40 cap in 0.20 s.
+
+**Regression the fix introduced, caught by the personality-churn test before deploy.** The
+smooth decay would have held the command up to ~1.0 m/s^2 ABOVE a hard braking request for
+the 0.30 s release debounce. `_ABANDON_T` governs whether we LATCH OUT — it must never
+govern whether we OBEY. Anything beyond `_ABANDON_ACCEL` now sets the floor to `a_e2e` in
+the same frame. Two regression tests added (a -0.25 request obeyed while still armed; a
+-1.20 request obeyed and released via the drop detector).
+
+**Tests:** both suites pass (test_e2e_floor now 20, test_accel_ramp 14).
+
 ## 2026-08-15 — hooks 6/7: tests moved into the repo, and the personality HANDOFF characterised
 
 Both hooks' tests now live in `openpilot/grt/tests/` (`test_e2e_floor.py` 16,

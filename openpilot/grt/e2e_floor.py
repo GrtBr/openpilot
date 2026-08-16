@@ -143,6 +143,16 @@ _FLOOR_MAX = 0.40           # m/s^2 cap. NOTE the planner's cruise candidate is
                             # clip(v_cruise - v_ego, -1.2, ACCEL_MAX=2.0), so it only opposes
                             # this floor once the deficit is under 0.40 m/s (1.4 km/h).
                             # min() does NOT bound us in between -- this cap is the real limit.
+# m/s^3, how fast the floor withdraws when the model goes negative. Chosen by replaying the
+# exact 08-16 stutter window (10:54:48.5-10:54:56.5) through each candidate:
+#   old hard branch  max step 0.414   steps>0.10: 2   steps>0.20: 2   <- what the driver felt
+#   3.0              max step 0.150   steps>0.10: 3   steps>0.20: 0
+#   2.0              max step 0.100   steps>0.10: 0   steps>0.20: 0   <- shipped
+#   1.5              max step 0.075   steps>0.10: 0   steps>0.20: 0
+# 2.0 is 2.5x gentler than the ~5 m/s^3 wire clip (so the CAN layer passes it unchanged) and
+# withdraws the floor from its 0.40 cap in 0.20 s. Lower is smoother but holds a positive
+# command against a negative request for longer; 1.5 would take 0.27 s.
+_FLOOR_FALL_JERK = 2.0
 _MAX_ACTIVE_T = 20.0        # s. Conditions drift away from the evidence that armed us.
 
 # Second arm trigger: the driver switching personality INTO aggressive. See "SECOND ARM
@@ -396,15 +406,34 @@ class E2EAccelFloor:
     # ---------------- active: raise the floor ----------------------------------------
     if self.state == _ACTIVE:
       self.active_t += DT_MDL
-      if a_e2e < 0.0:
-        # NEVER lift a command the model wants negative. Values in (_ABANDON_ACCEL, 0) do not
-        # release the hook — they are trivially small — but turning a deceleration request into
-        # an acceleration is the one thing the safety argument does not cover, so we simply pass
-        # it through. Bleed the floor off at the same jerk meanwhile, so that re-applying it
-        # ramps rather than stepping back up.
-        self.floor = max(0.0, self.floor - _FLOOR_JERK * DT_MDL)
-        return a_e2e
-      self.floor = min(_FLOOR_MAX, self.floor + _FLOOR_JERK * DT_MDL)
+      if a_e2e < _ABANDON_ACCEL:
+        # Beyond the mild band: defer COMPLETELY and IMMEDIATELY. _ABANDON_T governs whether
+        # we LATCH OUT, never whether we obey — a hard braking request must not be held back
+        # for the debounce window. Without this the smooth withdrawal below would keep the
+        # command up to ~1.0 m/s^2 above a -1.2 request for 0.30 s. Caught by the
+        # personality-churn test in test_accel_ramp.py on 2026-08-16.
+        self.floor = a_e2e
+      elif a_e2e < 0.0:
+        # The model wants deceleration. Anything at or beyond _ABANDON_ACCEL has already
+        # released above, so this is the mild band only. WITHDRAW THE FLOOR FAST BUT
+        # CONTINUOUSLY -- do not switch it off.
+        #
+        # This was a hard branch (`return a_e2e`) until 2026-08-16. Because the model's
+        # output wanders across zero constantly, that made the command alternate between the
+        # floor and the raw value: measured at 8 flips in 1.1 s, ~0.36 m/s^2 square wave,
+        # which the driver reported as "go don't go go in very short succession". The
+        # discontinuity was the defect, not which side of zero we were on.
+        #
+        # _FLOOR_FALL_JERK is below the ~5 m/s^3 wire clip, so the withdrawal is never
+        # harsher than what the CAN layer already imposes, and the floor reaches zero from
+        # its cap in 0.13 s. The cost is that a MILDLY negative request (never beyond
+        # _ABANDON_ACCEL) can be held above for at most that long.
+        # Decays toward a_e2e, NOT toward zero: bottoming out at zero would hold the
+        # command at 0.0 for as long as the model asked for -0.15, never deferring at all.
+        # Converging on a_e2e means the hook hands over completely, just smoothly.
+        self.floor = max(a_e2e, self.floor - _FLOOR_FALL_JERK * DT_MDL)
+      else:
+        self.floor = min(_FLOOR_MAX, self.floor + _FLOOR_JERK * DT_MDL)
       if self.floor > a_e2e:
         return self.floor
 
