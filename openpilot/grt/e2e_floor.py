@@ -70,6 +70,30 @@ nothing else stops a driver requesting the floor mid-bend, so do not weaken that
 without replacing it. The lead / headroom / throttle_prob gates are identical on both
 paths (`_gates_ok`), deliberately: one gate set, one place to change it.
 
+LEAD PRESENCE IS NOT A GATE (changed 2026-08-17)
+------------------------------------------------
+The hook used to refuse to arm, and to release, on `radarState.leadOne.present`. Measured
+over the 08-17 drive (542 s engaged+pid):
+
+  * a lead was present 32% of the time (173 s),
+  * but the MPC's lead branch actually won the planner's `min()` in only 19% of those
+    frames -- 81% of "lead present" was a lead that controlled nothing,
+  * when the lead branch DID win, the command was below the model's own value 99% of the
+    time, overriding e2e by up to -1.073 m/s^2,
+  * by distance, the lead branch wins 100% of frames under 25 m, 73% at 25-40 m, 11% at
+    60-90 m and 1% beyond 90 m.
+
+So `min()` already hands control to the MPC whenever a lead genuinely binds, and raising
+the e2e candidate cannot override it. The gate was redundant exactly when it fired -- and
+it was expensive: it blocked 31% of otherwise arm-eligible time (109 s of 349 s) because a
+lead sat 60-120 m ahead controlling nothing. That is the "why did it not keep accelerating"
+complaint of 08-17 09:16.
+
+Note the gate keyed on RADAR presence, so it never protected against a vision-only lead in
+the first place -- removing it loses no protection that `min()` does not already provide.
+A distance-based guard was considered and rejected: the measurement shows `min()` covers
+the close range completely (100% under 25 m), so a guard would only re-add false blocking.
+
 RELEASE
 -------
 Total, and it STAYS out: re-arming requires a fresh strong-acceleration episode (or a
@@ -153,6 +177,14 @@ _FLOOR_MAX = 0.40           # m/s^2 cap. NOTE the planner's cruise candidate is
 # withdraws the floor from its 0.40 cap in 0.20 s. Lower is smoother but holds a positive
 # command against a negative request for longer; 1.5 would take 0.27 s.
 _FLOOR_FALL_JERK = 2.0
+# The decay must not trigger on NOISE. On 08-17 the driver felt two more stutters; both were
+# the floor decaying because raw touched -0.001 and -0.007 for ~0.1 s. The 08-16 fix had cut
+# the step from 0.414 to 0.100, but the fall (2.0) and the rise (0.30) are asymmetric, so a
+# momentary zero-touch still cost a 0.10 dip and a ~0.4 s recovery -- a sawtooth the driver
+# could feel. Require the model to be MEANINGFULLY and PERSISTENTLY negative first. Both of
+# that day's dips would have been ignored entirely.
+_DECAY_DEADBAND = -0.02     # m/s^2, below this counts as "the model actually wants less"
+_DECAY_T = 0.10             # s it must hold before the floor starts withdrawing
 _MAX_ACTIVE_T = 20.0        # s. Conditions drift away from the evidence that armed us.
 
 # Second arm trigger: the driver switching personality INTO aggressive. See "SECOND ARM
@@ -209,13 +241,14 @@ class E2EAccelFloor:
     # (offline replay says it should fire ~1-2x/hour; if the car disagrees, this says which
     # gate is eating the events). Same spirit as scc_map's debug dict.
     self.stats = {"strong": 0, "settled": 0, "armed": 0,
-                  "gate_lead": 0, "gate_headroom": 0, "gate_tp": 0, "gate_curv": 0,
+                  "lead_present_at_arm": 0, "gate_headroom": 0, "gate_tp": 0, "gate_curv": 0,
                   "personality_edge": 0, "armed_personality": 0, "personality_expired": 0}
     # None until we have seen one frame, so a car that boots already in aggressive does NOT
     # count as the driver having just asked for it.
     self.saw_non_aggressive = False   # set once a non-aggressive personality is observed
     self.aggr_t = 0.0          # s aggressive has been held continuously
     self.object_t = 0.0        # s raw e2e has been below _ABANDON_ACCEL continuously
+    self.neg_t = 0.0           # s raw e2e has been below _DECAY_DEADBAND continuously
     self.pending_t = 0.0       # s remaining in the personality-request window
 
   # -- helpers ------------------------------------------------------------------------
@@ -248,10 +281,8 @@ class E2EAccelFloor:
     """Situational gates, identical for BOTH arm triggers. `count` so the funnel only
     records a rejection once per settle, not once per frame of a pending request."""
     ok = True
-    if lead:
-      if count:
-        self.stats["gate_lead"] += 1
-      ok = False
+    # NOT gated on lead presence -- see the LEAD note in the module docstring. Recorded at
+    # arm time instead (see _arm), so the funnel still shows how often a lead was there.
     if headroom < _MIN_HEADROOM:
       if count:
         self.stats["gate_headroom"] += 1
@@ -266,14 +297,17 @@ class E2EAccelFloor:
       ok = False
     return ok
 
-  def _arm(self, via: str, a_e2e, v_ego, headroom, throttle_prob, curvature):
+  def _arm(self, via: str, a_e2e, v_ego, headroom, throttle_prob, curvature, lead=False):
     self.stats["armed"] += 1
+    if lead:
+      self.stats["lead_present_at_arm"] += 1
     self.state = _ACTIVE
     self.floor = a_e2e          # start from where the model actually is
     self.active_t = 0.0
     self.pending_t = 0.0
     self._log(f"armed via {via} v={v_ego * 3.6:.0f}km/h headroom={headroom * 3.6:.1f}km/h "
-              f"raw_e2e={a_e2e:+.3f} tp={throttle_prob:.2f} curv={abs(curvature):.4f}")
+              f"raw_e2e={a_e2e:+.3f} tp={throttle_prob:.2f} curv={abs(curvature):.4f}"
+              f"{' lead' if lead else ''}")
 
   # -- main ---------------------------------------------------------------------------
 
@@ -336,6 +370,10 @@ class E2EAccelFloor:
       self.object_t += DT_MDL
     else:
       self.object_t = 0.0
+    if a_e2e < _DECAY_DEADBAND:
+      self.neg_t += DT_MDL
+    else:
+      self.neg_t = 0.0
 
     # ---------------- release path (checked first, against raw a_e2e) ----------------
     if self.state == _ACTIVE:
@@ -347,8 +385,6 @@ class E2EAccelFloor:
       elif len(self.raw_hist) == self.raw_hist.maxlen and \
               (self.raw_hist[0] - a_e2e) > _ABANDON_DROP:
         reason = "model withdrawing"
-      elif lead:
-        reason = "lead appeared"
       elif throttle_prob < _MIN_THROTTLE_PROB:
         reason = "throttle prob"
       elif abs(curvature) >= _MAX_CURV_RELEASE:
@@ -372,7 +408,7 @@ class E2EAccelFloor:
       if self.pending_t > 0.0 and \
               self._gates_ok(lead, headroom, throttle_prob, curvature, count=False):
         self.stats["armed_personality"] += 1
-        self._arm("personality", a_e2e, v_ego, headroom, throttle_prob, curvature)
+        self._arm("personality", a_e2e, v_ego, headroom, throttle_prob, curvature, lead)
 
       if self.state == _WAIT and not self.tapering:
         if a_e2e > strong:
@@ -396,7 +432,7 @@ class E2EAccelFloor:
             # rather than inferred.
             self.stats["settled"] += 1
             if self._gates_ok(lead, headroom, throttle_prob, curvature, count=True):
-              self._arm("taper", a_e2e, v_ego, headroom, throttle_prob, curvature)
+              self._arm("taper", a_e2e, v_ego, headroom, throttle_prob, curvature, lead)
             self._reset_detector()
         else:
           self.quiet_t = 0.0
@@ -413,7 +449,7 @@ class E2EAccelFloor:
         # command up to ~1.0 m/s^2 above a -1.2 request for 0.30 s. Caught by the
         # personality-churn test in test_accel_ramp.py on 2026-08-16.
         self.floor = a_e2e
-      elif a_e2e < 0.0:
+      elif a_e2e < _DECAY_DEADBAND and self.neg_t >= _DECAY_T:
         # The model wants deceleration. Anything at or beyond _ABANDON_ACCEL has already
         # released above, so this is the mild band only. WITHDRAW THE FLOOR FAST BUT
         # CONTINUOUSLY -- do not switch it off.

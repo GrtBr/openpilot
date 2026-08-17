@@ -152,11 +152,32 @@ def main():
   check(f"a hard -1.20 request is obeyed immediately and releases (got {o[0]:+.3f}, "
         f"state {fl.state})", o[0] == -1.20 and fl.state == 0)
 
-  # --- situational gates ----------------------------------------------------------
+  # 2026-08-17 regression: a NOISE-level touch of zero must not move the floor. Two such
+  # touches (-0.001 and -0.007, ~0.1 s each) were felt as stutter on the 08-17 drive.
   fl = E2EAccelFloor()
   run(fl, 20, aggressive=False)
-  run(fl, 80, aggressive=True, lead=True)
-  check("request expires if the gate never opens",
+  run(fl, 40, aggressive=True, a_e2e=0.30)
+  held = fl.floor
+  o = run(fl, 2, a_e2e=-0.001)
+  check(f"a -0.001 touch does NOT move the floor (was {held:.3f}, now {fl.floor:.3f})",
+        abs(fl.floor - held) < 1e-9 and o[0] == held)
+  o = run(fl, 6, a_e2e=-0.15)
+  check(f"a sustained -0.15 DOES withdraw it (floor {fl.floor:+.3f})", fl.floor < held)
+
+  # --- situational gates ----------------------------------------------------------
+  # 2026-08-17: lead PRESENCE is no longer a gate. min() hands control to the MPC lead
+  # branch whenever a lead genuinely binds (100% of frames under 25 m, measured), so the
+  # gate was redundant when it fired and blocked 31% of arm-eligible time when it did not.
+  fl = E2EAccelFloor()
+  run(fl, 20, aggressive=False)
+  run(fl, 12, aggressive=True, lead=True)
+  check("a distant lead no longer blocks arming (min() covers a binding lead)",
+        fl.state == 1 and fl.stats["lead_present_at_arm"] >= 1)
+
+  fl = E2EAccelFloor()
+  run(fl, 20, aggressive=False)
+  run(fl, 80, aggressive=True, curvature=0.006)
+  check("request still expires if a REAL gate never opens",
         fl.state == 0 and fl.stats["personality_expired"] == 1)
 
   fl = E2EAccelFloor()

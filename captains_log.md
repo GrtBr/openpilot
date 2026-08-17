@@ -13,7 +13,8 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ## CURRENT STATE — longitudinal personality hooks (living section, update on change)
 
-Last verified on car: **2026-08-16**, commit `a427236`, plannerd clean, 0 grt exceptions.
+Last verified on car: **2026-08-17**, plannerd clean, 0 grt exceptions.
+**Lead presence is NOT a gate** — `min()` covers a binding lead (measured 100% under 25 m).
 
 ### What each personality does (all fork-specific; upstream only ever varied T_FOLLOW)
 
@@ -37,6 +38,7 @@ without asking.
 | `_FLOOR_MAX` | 0.40 m/s^2 | original design |
 | `_ABANDON_ACCEL` / `_ABANDON_T` | −0.20 / 0.30 s | 08-15 recalibration |
 | `_ABANDON_DROP` | 0.35 m/s^2 over 0.5 s | 08-15 recalibration |
+| `_DECAY_DEADBAND` / `_DECAY_T` | −0.02 / 0.10 s | 08-17 stutter fix |
 | `_PERSONALITY_STABLE_T` | 0.40 s | 08-15, button-cycling fix |
 | `_MAX_ACTIVE_T` | 20 s | original design |
 | `_MIN_SPEED` / `_MIN_HEADROOM` | 30 km/h / 5 km/h | fleet scan |
@@ -73,6 +75,69 @@ timestamps, GPS-derived grade and driving history, and `nightly-dev` pushes to a
 fork, so it is not committed. Move it in only if that is an explicit decision.
 
 ---
+
+## 2026-08-17 — two more stutters (noise-level zero touches) + LEAD PRESENCE GATE REMOVED
+
+### 1. Stutter, again — the 08-16 fix was necessary but not sufficient
+
+Driver reported two more stutters ~09:10 uphill. Exactly two, and both were zero touches:
+
+```
+09:10:56.898  a_cmd +0.400 -> +0.300   raw +0.001 -> -0.001
+09:10:59.548  a_cmd +0.400 -> +0.300   raw +0.007 -> -0.000
+```
+
+The 08-16 change cut the step from 0.414 to 0.100, but fall (2.0 m/s^3) and rise
+(0.30 m/s^3) are ASYMMETRIC, so a momentary touch of -0.001 — pure noise — still cost a
+0.10 dip plus a ~0.4 s recovery. A sawtooth the driver can feel.
+
+Fix: the decay now needs the model to be MEANINGFULLY and PERSISTENTLY negative —
+`_DECAY_DEADBAND = -0.02` held for `_DECAY_T = 0.10 s`. Both of that day's touches are
+ignored outright. Replay over the 08-17 drive: **max step 0.100 -> 0.036, steps>0.05: 3 -> 0.**
+
+### 2. "Why did it not keep accelerating 0 -> 110?" (~09:16) — three causes, none a bug
+
+1. **09:15:41-47 the CRUISE candidate clamped it at ~52.8 km/h** while the model wanted
+   +0.8..+1.1. `a_cruise = clip(v_cruise - v_ego, -1.2, 2.0)` would be +2.0 at set 110 and
+   52.8 km/h, so `v_cruise` must have been lowered by **hook 1 (mapd curve / speed limit)**.
+   The fork's own map layer, working as designed.
+2. It then accelerated properly to ~78 km/h on e2e commands of +0.3..+1.15.
+3. From 78 -> ~96 km/h it crawled on +0.02..+0.3 for ~90 s and never reached 110 — the
+   "contented below set speed" behaviour hook 6 exists to counter. **Hook 6 never armed**,
+   because a lead sat 60-120 m ahead almost continuously. Which is item 3.
+
+### 3. Lead PRESENCE is no longer a gate — operator was right
+
+Operator asked whether the MPC controls the car when a lead is present even if e2e says
+accelerate, and if so whether the gate could go. Measured over the 08-17 drive (542 s
+engaged+pid):
+
+| | |
+|---|---|
+| lead present | 173 s (32% of engaged) |
+| of which the LEAD BRANCH actually wins `min()` | **19%** — so 81% of "lead present" controlled nothing |
+| when it wins, command is below the model's own value | **99%** of the time |
+| largest margin by which it overrides e2e | **-1.073 m/s^2** |
+
+By distance the lead branch wins **100%** of frames under 25 m, 73% at 25-40 m, 11% at
+60-90 m, **1%** beyond 90 m.
+
+So `min()` already hands control to the MPC whenever a lead genuinely binds, and raising the
+e2e candidate cannot override it — the gate was redundant exactly when it fired. And it was
+expensive: **it blocked 31% of otherwise arm-eligible time (109 s of 349 s)** because a lead
+sat 60-120 m ahead controlling nothing. That is item 2's complaint.
+
+The gate keyed on RADAR presence, so it never protected against a vision-only lead anyway.
+A distance-based guard was considered and REJECTED: `min()` covers the close range
+completely (100% under 25 m), so a guard would only re-add false blocking. Lead presence is
+now recorded at arm time (`lead_present_at_arm`) for observability, and gates nothing.
+
+**Caveat on the validation:** the replay shows arms unchanged at 1, because removing the
+gate does not itself create arms — arming still needs a taper or a personality selection.
+The 31% is eligibility recovered, not arms realised.
+
+**Tests:** both suites pass, with regressions added for the noise touch and for a distant
+lead no longer blocking.
 
 ## 2026-08-16 — THROTTLE STUTTER root-caused: my "never lift a negative" fix was a step
 
