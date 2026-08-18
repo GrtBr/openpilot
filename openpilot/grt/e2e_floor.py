@@ -197,7 +197,17 @@ _FLOOR_FALL_JERK = 0.30
 # that day's dips would have been ignored entirely.
 _DECAY_DEADBAND = -0.08     # m/s^2, below this counts as "the model actually wants less"
 _DECAY_T = 0.30             # s it must hold before the floor starts withdrawing
-_MAX_ACTIVE_T = 20.0        # s. Conditions drift away from the evidence that armed us.
+# s. RAISED 20 -> 120 on 2026-08-18 at the operator's request, and the data supports it:
+# 6 of 10 releases on 08-18 were `max duration`, so the cap was the BINDING constraint and
+# every other release gate was going untested. Replaying the five max-duration sessions with
+# the cap lifted, all five reach set speed naturally at 27.7 / 28.7 / 30.1 / 41.7 / 87.5 s --
+# so 120 s does not make sessions 120 s long, it lets them end on the RIGHT condition
+# (`reached set speed`) instead of an arbitrary clock.
+# BE CLEAR ABOUT WHAT IS GIVEN UP: the 20 s cap existed because the arm evidence (a taper, or
+# a button press) goes stale. At 120 s it is up to two minutes stale, and the cap is no longer
+# a meaningful bound on that. What still guards the session is the PER-FRAME gates -- model
+# objection, withdrawal, throttle_prob, curvature, headroom, preconditions -- all unchanged.
+_MAX_ACTIVE_T = 120.0
 
 # Second arm trigger: the driver switching personality INTO aggressive. See "SECOND ARM
 # TRIGGER" in the module docstring for why this one is justified differently from the taper.
@@ -210,6 +220,13 @@ _PERSONALITY_WINDOW = 3.0   # s
 # released 39 ms and 90 ms later with reason "preconditions". 0.40 s clears that comfortably and
 # is imperceptible once the driver has actually settled.
 _PERSONALITY_STABLE_T = 0.40  # s
+# Leaving aggressive releases, but not instantly: the driver cycles the wheel button, and on
+# 08-18 three of ten sessions died to a mere TRANSIT through another personality -- session 4
+# lasted 1.1 s and session 7 lasted 0.05 s. Entry is already debounced by
+# _PERSONALITY_STABLE_T; this debounces the exit by the same logic. Deliberately short: a real
+# switch away from aggressive must still disable the hook promptly. ONLY the `not aggressive`
+# precondition is debounced -- `not pid`, `driver input` and the rest stay instant.
+_PERSONALITY_EXIT_T = 0.30    # s
 
 _WAIT, _ACTIVE = 0, 1
 
@@ -261,6 +278,7 @@ class E2EAccelFloor:
     self.aggr_t = 0.0          # s aggressive has been held continuously
     self.object_t = 0.0        # s raw e2e has been below _ABANDON_ACCEL continuously
     self.neg_t = 0.0           # s raw e2e has been below _DECAY_DEADBAND continuously
+    self.not_aggr_t = 0.0      # s personality has been off aggressive continuously
     self.pending_t = 0.0       # s remaining in the personality-request window
 
   # -- helpers ------------------------------------------------------------------------
@@ -372,10 +390,11 @@ class E2EAccelFloor:
 
     # Hard preconditions. Named individually so a release says WHICH one went, rather than
     # a bare "preconditions" that costs a log-diving session to interpret.
+    self.not_aggr_t = 0.0 if aggressive else self.not_aggr_t + DT_MDL
     missing = ""
     if not experimental:
       missing = "not experimental"
-    elif not aggressive:
+    elif not aggressive and self.not_aggr_t >= _PERSONALITY_EXIT_T:
       missing = "not aggressive"
     elif not long_pid:
       missing = "not pid"

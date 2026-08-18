@@ -104,6 +104,22 @@ def main():
   check(f"precondition release names the cause (got '{fl.last_reason}')",
         fl.state == 0 and fl.last_reason == "precondition: driver input")
 
+  # 2026-08-18: a mere TRANSIT through another personality must not kill the session.
+  # Three of ten sessions on 08-18 died this way (1.1 s and 0.05 s). Exit is debounced by
+  # _PERSONALITY_EXIT_T; a real switch away still disables promptly.
+  fl = E2EAccelFloor()
+  run(fl, 20, aggressive=False)
+  run(fl, 20, aggressive=True, a_e2e=0.05)
+  armed = fl.state == 1
+  run(fl, 4, aggressive=False, a_e2e=0.05)          # 0.20 s transit, under the 0.30 s exit
+  survived = fl.state == 1
+  run(fl, 12, aggressive=True, a_e2e=0.05)
+  check(f"a 0.20 s transit through another personality does not kill the session "
+        f"(armed {armed}, survived {survived})", armed and survived and fl.state == 1)
+  run(fl, 10, aggressive=False, a_e2e=0.05)         # 0.50 s: a real switch away
+  check(f"a real switch away still releases (got '{fl.last_reason}')",
+        fl.state == 0 and fl.last_reason == "precondition: not aggressive")
+
   # --- floor shape ----------------------------------------------------------------
   fl = E2EAccelFloor()
   run(fl, 20, aggressive=False)

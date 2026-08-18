@@ -40,7 +40,8 @@ without asking.
 | `_DECAY_DEADBAND` / `_DECAY_T` | −0.08 / 0.30 s | 08-18 slow-stutter retune |
 | `_FLOOR_FALL_JERK` | 0.30 m/s³ (symmetric with rise) | 08-18 slow-stutter retune |
 | `_PERSONALITY_STABLE_T` | 0.40 s | 08-15, button-cycling fix |
-| `_MAX_ACTIVE_T` | 20 s | original design |
+| `_MAX_ACTIVE_T` | **120 s** | 08-18, operator request |
+| `_PERSONALITY_EXIT_T` | 0.30 s | 08-18, button-transit fix |
 | `_MIN_SPEED` / `_MIN_HEADROOM` | 30 km/h / 5 km/h | fleet scan |
 | `_MAX_CURV_ARM` / `_MAX_CURV_RELEASE` | 0.0020 / 0.0030 1/m | fleet scan |
 | `JERK_RELAXED` (hook 7) | 1.5 m/s^3 | fleet scan |
@@ -75,6 +76,49 @@ timestamps, GPS-derived grade and driving history, and `nightly-dev` pushes to a
 fork, so it is not committed. Move it in only if that is an explicit decision.
 
 ---
+
+## 2026-08-18 (later) — max duration 20 -> 120 s, and an EXIT debounce on the personality
+
+**`_MAX_ACTIVE_T` 20 -> 120 s** at the operator's request; the data supports it. 6 of 10
+releases that day were `max duration`, so the cap was the binding constraint and every other
+release gate was going untested. Replaying the five max-duration sessions with the cap
+lifted, **all five reach set speed naturally at 27.7 / 28.7 / 30.1 / 41.7 / 87.5 s.** So
+120 s does not make sessions two minutes long — it lets them end on `reached set speed`
+instead of an arbitrary clock. Expect the release-reason distribution to become meaningful
+for the first time.
+
+What is given up, stated: the 20 s cap existed because the arm evidence goes stale. At 120 s
+it is up to two minutes stale and the cap no longer bounds that in any useful way. The
+per-frame gates — objection, withdrawal, throttle_prob, curvature, headroom, preconditions —
+are what guard the session now, and they are unchanged.
+
+**`_PERSONALITY_EXIT_T = 0.30 s`, new.** Leaving aggressive no longer releases instantly.
+Three of ten sessions on 08-18 died to a mere TRANSIT through another personality while the
+driver cycled the wheel button — session 4 lasted 1.1 s, session 7 lasted 0.05 s. Entry was
+already debounced by `_PERSONALITY_STABLE_T = 0.40 s`; this applies the same logic to the
+exit. Deliberately short so a real switch away still disables promptly, and ONLY the
+`not aggressive` precondition is debounced — `not pid`, `driver input` and the rest stay
+instant.
+
+### Correction to the previous entry
+
+I wrote that session 2 "burned its full 20 s with the floor never rising above +0.000" and
+was wasted. **Wrong.** I read the `floor=+0.000` in the release log line — a snapshot at the
+instant the cap expired — as if it described the whole session. What actually happened:
+
+```
+a_cmd  mean +0.260, max +0.400        floor applied in 92% of frames
+vEgo   90.5 -> 106.8 km/h  (+16.3 km/h in 20 s)
+raw    min -0.046, max +0.084, mean +0.007   <- the model asked for NOTHING
+```
+
+The hook worked exactly as intended: the model was content to sit at 90 km/h with 19.5 km/h
+of headroom, and the floor took 16 km/h of it. The lesson is the recurring one this week —
+a terminal value is not a trajectory. Same class as the detector artifacts.
+
+Session 8 (armed at raw -0.092, ended at floor -0.144) WAS a real instance of the problem the
+arm-sign gate addresses. Session 2 was not, and arming at -0.011 turned out to be fine — the
+gate would not have blocked it either way.
 
 ## 2026-08-18 — LOW-FREQUENCY stutter found and retuned; arm-sign gate added
 
