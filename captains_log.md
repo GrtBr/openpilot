@@ -77,6 +77,87 @@ fork, so it is not committed. Move it in only if that is an explicit decision.
 
 ---
 
+## 2026-08-18 — HOOK 8: hold-speed servo. The droop root cause, and a partial fix
+
+### Root cause of the droop, finally
+
+`modeld` never receives the set speed as an input (its inputs are `desire_pulse`,
+`traffic_convention`, `action_t`, plus frames). It emits a comfortable acceleration for the
+scene; it structurally CANNOT hold a speed. Meanwhile the planner DOES contain a speed
+controller — the cruise candidate, `clip(v_cruise - v_ego, -1.2, 2.0)` — and `min()` discards
+it whenever the model is more conservative.
+
+Measured over 298 sustained-headwind episodes (24.7 min, 6.7 h of data):
+
+```
+cruise candidate would command:  mean +1.826   saturated at 2.0 in 80% of frames
+what was actually commanded:     mean +0.045
+cruise was higher than the command in 100% of frames
+mean discarded by min():         +1.781 m/s^2
+```
+
+And the command does NOT build against a persistent error — binned by time into episode:
++0.064 / +0.016 / +0.068 / +0.047 / -0.017 while the deficit sat at ~21 km/h and the
+disturbance at -0.21. Flat or falling in 208 of 298 episodes.
+
+**The only component that knows the target cannot win; the component that wins does not know
+the target.** `kp/ki = 0` is real but is NOT the cause — those sit downstream of `min()`.
+
+### Hook 8, sandboxed in the e2e branch under aggressive
+
+`a_e2e ~ 0` is a REQUEST ("hold this"), not an absence of one. If the car then slows on grade
+the request is violated by the plant, so correcting it is a SERVO on the model's own intent,
+not an override. That claim only holds in a narrow band — calibrated on the 14:06 incident,
+over the 28.3 s where speed was actively falling:
+
+| model's request | time | share |
+|---|---|---|
+| asking to slow (< -0.05) | 12.4 s | **44% — out of scope by design** |
+| no real opinion (-0.05..+0.05) | 14.6 s | **52% — what this addresses** |
+| asking to go (> +0.05) | 1.3 s | 5% |
+
+Wider bands buy "coverage" only by swallowing frames where the model asked to slow: at
+(-0.15,+0.20) coverage reads 82% but 69% of it is negative commands we would be fighting.
+
+**Latch delay measured, not guessed.** Advisor pushed back on a round number. The car does
+NOT settle after band entry — it keeps drifting at -0.17 to -0.23 km/h/s at every delay
+tested — so waiting only gives speed away (0.3 s costs 0.07 km/h, 1.2 s costs 0.23). Latch as
+early as confirmation allows: **0.3 s**.
+
+**ASYMMETRIC anchor drop, and this was the difference between a feature and a no-op.**
+First build dropped the anchor on every band exit; the model left the band 37 times in 50 s,
+so it kept re-anchoring to an already-lower speed and recovered only **2.23 of 22.8 km/h**.
+Keeping the anchor across UPWARD exits (no conflict with holding speed) and ratcheting it up
+to whatever the model achieved recovers **10.04 km/h — 44%**, right at the 52% ceiling.
+Downward exits still drop it at once; that is the safety constraint and is not negotiable.
+
+**This hook CAN claim it never makes braking weaker** — unlike hook 6. The correction is
+positive-only and applied to the e2e CANDIDATE, so cruise and the MPC lead branches still
+bind through `min()`. Stated explicitly in the docstring because a reader who absorbed hook
+6's disclaimer would assume otherwise.
+
+Precedence with hook 6 is `max()`, written as one expression with one comment in the shim.
+They CAN be active together — hook 6's taper settles into `quiet`, which is inside hook 8's
+band — and the churn test covers exactly that overlap.
+
+### Corrections made along the way
+
+- **Retracted:** regressing `a_cmd` on recent speed change gave slope +0.038, r=+0.548. That
+  is confounded — the command CAUSES the speed change. It measured its own effect.
+- **Retracted:** engagement "27% of driving" omitted the headroom gate, without which the
+  controller is a no-op by construction. Real figure at deadband 0.03 is **6%**.
+- **Fixed, not caveated:** concatenating per-date CSVs let episodes span day boundaries (the
+  `prev` reset per file gives the first row `gap=False`). This produced a bogus +70 km/h max
+  and contaminated the p99. Synthetic gap now added at every file boundary; real max 6.12.
+- **Over-generalised:** I called `kp/ki` a red herring. Right about the speed anchor (they are
+  downstream of `min()`); wrong for "make the car deliver what was asked", where they are
+  exactly the mechanism. Operator chose the sandboxed hook over enabling them.
+
+### Honest ceiling
+
+This addresses ~44-52% of ONE incident. The other ~44% is the model genuinely asking to slow
+while the car loses speed, which is out of scope by design. It is NOT "the droop is fixed".
+
 ## 2026-08-18 (drive 2) — hook behaving; two of three complaints are OTHER layers. Cap -> 0.60
 
 **Five armed sessions, and every change from earlier today did what it was meant to.** Zero

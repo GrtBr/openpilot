@@ -371,18 +371,36 @@ def floor_e2e_accel(a_e2e: float, sm, v_ego: float, v_cruise: float) -> float:
     cs = sm['carState']
     model = sm['modelV2']
     probs = model.meta.disengagePredictions.gasPressProbs
-    return fl.update(
+    aggressive = _enum_is_aggressive(sm['selfdriveState'].personality)
+    long_pid = str(sm['controlsState'].longControlState) == 'pid'
+    driver_input = bool(cs.gasPressed or cs.brakePressed or cs.standstill)
+
+    # HOOK 8 -- hold-speed servo. Runs alongside hook 6 and the two are combined with max()
+    # below. PRECEDENCE, stated once here rather than left implicit: both raise the same e2e
+    # candidate, both are positive-only, and neither may lower it, so the larger simply wins.
+    # They can legitimately be active at the same instant -- hook 6's taper settles into
+    # `quiet`, which overlaps hook 8's band -- and that is fine: hook 6 is taking unused
+    # headroom, hook 8 is holding a speed, and whichever asks for more is the binding one.
+    hs = _hold_speed_singleton()
+    a_hold = a_e2e
+    if hs is not None:
+      a_hold = hs.update(a_e2e=float(a_e2e), v_ego=float(v_ego), v_cruise=float(v_cruise),
+                         aggressive=aggressive, long_pid=long_pid,
+                         driver_input=driver_input, experimental=True)
+
+    a_floor = fl.update(
       a_e2e=float(a_e2e),
       v_ego=float(v_ego),
       v_cruise=float(v_cruise),
       lead=bool(sm['radarState'].leadOne.present),
       throttle_prob=float(probs[1]) if len(probs) > 1 else 1.0,
       curvature=float(model.action.desiredCurvature),
-      aggressive=_enum_is_aggressive(sm['selfdriveState'].personality),
-      long_pid=str(sm['controlsState'].longControlState) == 'pid',
-      driver_input=bool(cs.gasPressed or cs.brakePressed or cs.standstill),
+      aggressive=aggressive,
+      long_pid=long_pid,
+      driver_input=driver_input,
       experimental=True,
     )
+    return max(a_floor, a_hold)
   except Exception:
     _log_exception("floor_e2e_accel")
     return a_e2e
@@ -398,8 +416,27 @@ def _enum_is_aggressive(personality) -> bool:
 # ----------------------------------------------------------------------------------------
 # Hook 7 — rising-edge jerk cap on the final accel command, RELAXED personality only.
 # ----------------------------------------------------------------------------------------
+_hold_speed = None
+_hold_speed_broken = False
+
 _accel_ramp = None
 _accel_ramp_broken = False
+
+
+def _hold_speed_singleton():
+  """Return the hold-speed servo, or None if it cannot be built (latched, as above)."""
+  global _hold_speed, _hold_speed_broken
+  if _hold_speed_broken:
+    return None
+  if _hold_speed is None:
+    try:
+      from openpilot.grt.hold_speed import HoldSpeed
+      _hold_speed = HoldSpeed()
+    except Exception:
+      _hold_speed_broken = True
+      _log_exception("hold_speed construction; hold-speed servo disabled")
+      return None
+  return _hold_speed
 
 
 def _accel_ramp_singleton():
