@@ -176,15 +176,27 @@ _FLOOR_MAX = 0.40           # m/s^2 cap. NOTE the planner's cruise candidate is
 # 2.0 is 2.5x gentler than the ~5 m/s^3 wire clip (so the CAN layer passes it unchanged) and
 # withdraws the floor from its 0.40 cap in 0.20 s. Lower is smoother but holds a positive
 # command against a negative request for longer; 1.5 would take 0.27 s.
-_FLOOR_FALL_JERK = 2.0
+# RETUNED 2026-08-18. At 2.0 the withdrawal was fast and the rebuild slow (0.30), so every
+# excursion past the deadband cost a large, slow round trip. Measured across the 10 armed
+# windows of 08-18: 55 dips >0.05, mean depth 0.401, max 0.568 -- half-a-m/s^2 cycles every
+# 2-5 s, which the driver reported as a low oscillating stutter. Made SYMMETRIC with the rise.
+# Sweep over the real raw sequences (fall/deadband/hold -> dips, mean dip, max dip, mean cmd):
+#   2.00 / -0.02 / 0.10 -> 55, 0.401, 0.568, +0.245   <- as driven
+#   0.30 / -0.02 / 0.10 -> 32, 0.212, 0.491, +0.336
+#   0.30 / -0.05 / 0.20 -> 10, 0.189, 0.478, +0.373
+#   0.30 / -0.08 / 0.30 ->  4, 0.154, 0.195, +0.387   <- shipped
+# COST, stated: holding the floor against a mildly-negative model rises from 25% to 38% of
+# armed time and max divergence from 0.440 to 0.553 m/s^2. That band is mild by construction
+# -- immediate deference past _ABANDON_ACCEL and every release gate are unchanged.
+_FLOOR_FALL_JERK = 0.30
 # The decay must not trigger on NOISE. On 08-17 the driver felt two more stutters; both were
 # the floor decaying because raw touched -0.001 and -0.007 for ~0.1 s. The 08-16 fix had cut
 # the step from 0.414 to 0.100, but the fall (2.0) and the rise (0.30) are asymmetric, so a
 # momentary zero-touch still cost a 0.10 dip and a ~0.4 s recovery -- a sawtooth the driver
 # could feel. Require the model to be MEANINGFULLY and PERSISTENTLY negative first. Both of
 # that day's dips would have been ignored entirely.
-_DECAY_DEADBAND = -0.02     # m/s^2, below this counts as "the model actually wants less"
-_DECAY_T = 0.10             # s it must hold before the floor starts withdrawing
+_DECAY_DEADBAND = -0.08     # m/s^2, below this counts as "the model actually wants less"
+_DECAY_T = 0.30             # s it must hold before the floor starts withdrawing
 _MAX_ACTIVE_T = 20.0        # s. Conditions drift away from the evidence that armed us.
 
 # Second arm trigger: the driver switching personality INTO aggressive. See "SECOND ARM
@@ -241,7 +253,7 @@ class E2EAccelFloor:
     # (offline replay says it should fire ~1-2x/hour; if the car disagrees, this says which
     # gate is eating the events). Same spirit as scc_map's debug dict.
     self.stats = {"strong": 0, "settled": 0, "armed": 0,
-                  "lead_present_at_arm": 0, "gate_headroom": 0, "gate_tp": 0, "gate_curv": 0,
+                  "lead_present_at_arm": 0, "gate_headroom": 0, "gate_tp": 0, "gate_curv": 0, "gate_raw_negative": 0,
                   "personality_edge": 0, "armed_personality": 0, "personality_expired": 0}
     # None until we have seen one frame, so a car that boots already in aggressive does NOT
     # count as the driver having just asked for it.
@@ -277,7 +289,7 @@ class E2EAccelFloor:
     except Exception:
       pass
 
-  def _gates_ok(self, lead, headroom, throttle_prob, curvature, count: bool) -> bool:
+  def _gates_ok(self, lead, headroom, throttle_prob, curvature, raw, count: bool) -> bool:
     """Situational gates, identical for BOTH arm triggers. `count` so the funnel only
     records a rejection once per settle, not once per frame of a pending request."""
     ok = True
@@ -294,6 +306,15 @@ class E2EAccelFloor:
     if abs(curvature) >= _MAX_CURV_ARM:
       if count:
         self.stats["gate_curv"] += 1
+      ok = False
+    # Do not arm while the model is already asking for LESS. Added 2026-08-18: sessions 2 and
+    # 8 of that drive armed at raw -0.011 and -0.092, and both were wasted -- session 2 burned
+    # its full 20 s with the floor never rising above 0.000, session 8 ended at -0.144 having
+    # tracked the model down. The 3 s personality window retries every frame, so this waits
+    # for the model to come back to neutral rather than spending a session.
+    if raw < _DECAY_DEADBAND:
+      if count:
+        self.stats["gate_raw_negative"] += 1
       ok = False
     return ok
 
@@ -406,7 +427,7 @@ class E2EAccelFloor:
       # Driver-requested arm. Tried every frame of the window so a momentarily-closed gate
       # (a lead just clearing, a bend straightening) does not swallow the request.
       if self.pending_t > 0.0 and \
-              self._gates_ok(lead, headroom, throttle_prob, curvature, count=False):
+              self._gates_ok(lead, headroom, throttle_prob, curvature, a_e2e, count=False):
         self.stats["armed_personality"] += 1
         self._arm("personality", a_e2e, v_ego, headroom, throttle_prob, curvature, lead)
 
@@ -434,7 +455,7 @@ class E2EAccelFloor:
             # Settled. Situational gates, counted individually so the funnel is visible
             # rather than inferred.
             self.stats["settled"] += 1
-            if self._gates_ok(lead, headroom, throttle_prob, curvature, count=True):
+            if self._gates_ok(lead, headroom, throttle_prob, curvature, a_e2e, count=True):
               self._arm("taper", a_e2e, v_ego, headroom, throttle_prob, curvature, lead)
             self._reset_detector()
         else:

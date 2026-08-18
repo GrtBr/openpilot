@@ -34,11 +34,11 @@ without asking.
 | constant | value | set by |
 |---|---|---|
 | `_FLOOR_JERK` | 0.30 m/s^3 | original design |
-| `_FLOOR_FALL_JERK` | 2.0 m/s^3 | 08-16 stutter fix |
 | `_FLOOR_MAX` | 0.40 m/s^2 | original design |
 | `_ABANDON_ACCEL` / `_ABANDON_T` | −0.20 / 0.30 s | 08-15 recalibration |
 | `_ABANDON_DROP` | 0.35 m/s^2 over 0.5 s | 08-15 recalibration |
-| `_DECAY_DEADBAND` / `_DECAY_T` | −0.02 / 0.10 s | 08-17 stutter fix |
+| `_DECAY_DEADBAND` / `_DECAY_T` | −0.08 / 0.30 s | 08-18 slow-stutter retune |
+| `_FLOOR_FALL_JERK` | 0.30 m/s³ (symmetric with rise) | 08-18 slow-stutter retune |
 | `_PERSONALITY_STABLE_T` | 0.40 s | 08-15, button-cycling fix |
 | `_MAX_ACTIVE_T` | 20 s | original design |
 | `_MIN_SPEED` / `_MIN_HEADROOM` | 30 km/h / 5 km/h | fleet scan |
@@ -75,6 +75,61 @@ timestamps, GPS-derived grade and driving history, and `nightly-dev` pushes to a
 fork, so it is not committed. Move it in only if that is an explicit decision.
 
 ---
+
+## 2026-08-18 — LOW-FREQUENCY stutter found and retuned; arm-sign gate added
+
+**Lead-gate removal worked.** 10 armed sessions today vs 1 yesterday, and every one of the
+9 personality requests armed in the SAME frame (+0.0 s). On 08-17 one request never armed.
+
+**Standing question answered: `max duration` dominates — 6 of 10 releases**, plus one
+`reached set speed` and three `precondition: not aggressive` (button cycling). ZERO
+`model objected`, `model withdrawing`, `throttle prob` or `curvature`. The 20 s cap is the
+binding constraint and the -0.20/0.30 s recalibration is still barely exercised in the field.
+
+### The slow stutter is real, and it is the fall/rise asymmetry
+
+Per-frame steps were capped at 0.100 as designed — the FAST stutter is fixed. But across the
+10 armed windows the command was making half-a-m/s^2 round trips every 2-5 s:
+
+| | armed windows | baseline (engaged, not armed) |
+|---|---|---|
+| variance at 0.17-1.0 Hz (1-6 s period) | 38-95%, median ~78% | 10-49%, median ~24% |
+| dips > 0.05 | 6-15 per session | — |
+| dip depth | **-0.43 to -0.53** | — |
+
+Cause: fall 2.0 m/s^3 vs rise 0.30. Every excursion past the deadband dropped the floor fast
+and then took ~1.3 s to climb back.
+
+**Correction to my own first analysis:** I initially blamed the immediate-deference branch
+(raw < -0.20) for a 0.391 step. Wrong twice over — that step was an artifact of my sweep
+harness force-re-arming with `floor = max(floor, a)`, and the real data has **ZERO**
+excursions past -0.20 in any armed window (min raw -0.174). Hard deference never fired.
+Every dip came from the withdrawal band. Simulate the mechanism alone, not through a
+harness that mutates it.
+
+Clean sweep over the real raw sequences:
+
+| fall / deadband / hold | dips | mean dip | max dip | max step | mean cmd | held above a negative model |
+|---|---|---|---|---|---|---|
+| 2.00 / -0.02 / 0.10 (as driven) | 55 | 0.401 | 0.568 | 0.100 | +0.245 | 31.3 s (25%) |
+| 0.30 / -0.02 / 0.10 | 32 | 0.212 | 0.491 | 0.015 | +0.336 | 46.6 s (37%) |
+| 0.30 / -0.05 / 0.20 | 10 | 0.189 | 0.478 | 0.015 | +0.373 | 47.7 s (38%) |
+| **0.30 / -0.08 / 0.30 (shipped)** | **4** | **0.154** | **0.195** | **0.015** | **+0.387** | 48.0 s (38%) |
+
+Fall is now SYMMETRIC with the rise. **Cost, stated plainly:** time commanding above a
+mildly-negative model rises 25% -> 38%, max divergence 0.440 -> 0.553 m/s^2. That band is
+mild by construction — immediate deference past `_ABANDON_ACCEL` and every release gate are
+unchanged, and the model never went past -0.174 all day.
+
+### Arm-sign gate
+
+Sessions 2 and 8 armed at raw **-0.011** and **-0.092** — the arm gates never checked the
+sign. Session 2 burned its full 20 s with the floor never rising above +0.000; session 8
+ended at -0.144 having tracked the model down. ~24 s of 132 s armed but useless. The hook
+now refuses to arm while `raw < _DECAY_DEADBAND`; the 3 s personality window retries every
+frame, so it waits for neutral instead of spending a session.
+
+**Not yet confirmed on road** — the 55 -> 4 figure is a projection from replay.
 
 ## 2026-08-17 — two more stutters (noise-level zero touches) + LEAD PRESENCE GATE REMOVED
 

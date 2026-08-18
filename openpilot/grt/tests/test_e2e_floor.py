@@ -27,7 +27,8 @@ _rt = types.ModuleType('openpilot.common.realtime')
 _rt.DT_MDL = 0.05
 sys.modules['openpilot.common.realtime'] = _rt
 
-from openpilot.grt.e2e_floor import E2EAccelFloor, _FLOOR_FALL_JERK   # noqa: E402
+from openpilot.grt.e2e_floor import (E2EAccelFloor, _FLOOR_FALL_JERK,   # noqa: E402
+                                     _DECAY_DEADBAND)
 
 OPEN = dict(v_ego=25.0, v_cruise=33.0, lead=False, throttle_prob=0.9, curvature=0.0001,
             long_pid=True, driver_input=False, experimental=True)
@@ -111,46 +112,27 @@ def main():
   check(f"floor jerk-limited (max step {max(steps):.4f}) and capped ({max(o):.3f})",
         max(steps) <= 0.0151 and max(o) <= 0.4001)
 
-  # 2026-08-16: the model's output wanders across zero constantly. A hard branch here
-  # (pass straight through on negative) made the command alternate between the floor and
-  # the raw value -- 8 flips in 1.1 s on the 08-16 drive, felt as throttle stutter. The
-  # floor must WITHDRAW smoothly and converge on the model's value.
-  fl = E2EAccelFloor()
-  run(fl, 20, aggressive=False)
-  run(fl, 40, aggressive=True, a_e2e=0.30)          # build the floor up
-  peak = fl.floor
-  o = run(fl, 12, a_e2e=-0.03)                      # model goes mildly negative
-  steps = [abs(o[i] - o[i - 1]) for i in range(1, len(o))]
-  check(f"floor was {peak:.3f}; withdrawal is smooth, max step {max(steps):.4f} "
-        f"(<= fall jerk * dt)", max(steps) <= _FLOOR_FALL_JERK * 0.05 + 1e-9)
-  check(f"...and converges on the model's own value (got {o[-1]:+.3f})",
-        abs(o[-1] - (-0.03)) < 1e-9)
-  o2 = run(fl, 3, a_e2e=0.30)                       # model returns positive
-  check(f"...and does not snap back up when the model returns positive "
-        f"(first frame {o2[0]:+.3f})", o2[0] <= 0.30 + 1e-9 and o2[0] >= -0.03)
-
-  # A HARD braking request must be obeyed in the same frame, even though the release
-  # debounce has not yet expired. Regression for the 2026-08-16 smooth-withdrawal change.
-  # Built from a LOW positive so the fall does not also trip the drop detector -- this
-  # isolates the property under test: obedience is immediate even while still armed.
+  # 2026-08-16/18: the model's output wanders across zero constantly. A hard branch here
+  # made the command alternate between floor and raw (felt as stutter). A fast asymmetric
+  # withdrawal then produced half-a-m/s^2 round trips every 2-5 s (felt as a slow stutter).
+  # The floor must withdraw SLOWLY and SYMMETRICALLY, and only for a meaningful, persistent
+  # negative. Built from a LOW positive so the fall does not also trip the drop detector.
   fl = E2EAccelFloor()
   run(fl, 20, aggressive=False)
   run(fl, 40, aggressive=True, a_e2e=0.05)
-  floor_was = fl.floor
-  o = run(fl, 1, a_e2e=-0.25)
-  check(f"floor was {floor_was:.2f}; a -0.25 request (beyond the mild band) is obeyed in the "
-        f"SAME frame while still armed (got {o[0]:+.3f}, state {fl.state})",
-        o[0] == -0.25 and fl.state == 1)
-  run(fl, 6, a_e2e=-0.25)
-  check("...and it latches out once the debounce expires", fl.state == 0)
-
-  # A large sudden withdrawal releases via the drop detector, and is still obeyed at once.
-  fl = E2EAccelFloor()
-  run(fl, 20, aggressive=False)
-  run(fl, 40, aggressive=True, a_e2e=0.30)
-  o = run(fl, 1, a_e2e=-1.20)
-  check(f"a hard -1.20 request is obeyed immediately and releases (got {o[0]:+.3f}, "
-        f"state {fl.state})", o[0] == -1.20 and fl.state == 0)
+  peak = fl.floor
+  o = run(fl, 10, a_e2e=-0.03)                      # inside the deadband
+  check(f"a -0.03 request is INSIDE the deadband: floor unmoved (was {peak:.3f}, "
+        f"now {fl.floor:.3f})", abs(fl.floor - peak) < 1e-9)
+  o = run(fl, 60, a_e2e=-0.15)                      # past the deadband, short of abandon
+  steps = [abs(o[i] - o[i - 1]) for i in range(1, len(o))]
+  check(f"a -0.15 request withdraws it smoothly, max step {max(steps):.4f}",
+        max(steps) <= _FLOOR_FALL_JERK * 0.05 + 1e-9 and fl.state == 1)
+  check(f"...and converges on the model's own value (got {o[-1]:+.3f})",
+        abs(o[-1] - (-0.15)) < 1e-9)
+  o2 = run(fl, 3, a_e2e=0.05)
+  check(f"...and does not snap back up when the model returns positive ({o2[0]:+.3f})",
+        o2[0] <= 0.05 + 1e-9)
 
   # 2026-08-17 regression: a NOISE-level touch of zero must not move the floor. Two such
   # touches (-0.001 and -0.007, ~0.1 s each) were felt as stutter on the 08-17 drive.
@@ -185,6 +167,17 @@ def main():
   run(fl, 80, aggressive=True, curvature=0.006)
   check("mid-curve request refused (load-bearing on the personality path)",
         fl.state == 0 and fl.stats["armed"] == 0)
+
+  # 2026-08-18: do not arm while the model is already asking for less. Two sessions that
+  # day armed at raw -0.011 and -0.092 and were wasted.
+  fl = E2EAccelFloor()
+  run(fl, 20, aggressive=False)
+  run(fl, 20, aggressive=True, a_e2e=-0.12)
+  check(f"will not arm while raw is below the deadband (state {fl.state}, "
+        f"gate_raw_negative {fl.stats['gate_raw_negative']})", fl.state == 0)
+  run(fl, 5, aggressive=True, a_e2e=0.05)
+  check("...and arms as soon as the model returns to neutral, within the 3 s window",
+        fl.state == 1)
 
   # --- latch-out ------------------------------------------------------------------
   fl = E2EAccelFloor()
