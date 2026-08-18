@@ -1,135 +1,142 @@
-"""Hook 8 state: hold the speed the model asked for, when the model asks for nothing.
+"""Hook 8: correct the car when it decelerates FASTER than the model asked.
 
-THE DEFECT THIS ADDRESSES
--------------------------
-Measured over 6.4 h of this car's logs plus the 08-18 14:06 incident: the planner contains a
-speed controller (the cruise candidate, `clip(v_cruise - v_ego, -1.2, 2.0)`) but `min()`
-discards it whenever the model is more conservative -- during sustained droop episodes that
-was 100% of frames, throwing away a mean of +1.781 m/s^2 of speed-error correction. The
-model itself CANNOT hold a speed: `modeld` never receives the set speed as an input. It emits
-a comfortable acceleration for the scene it sees.
+THE DEFECT
+----------
+`modeld` never receives the set speed as an input (its inputs are `desire_pulse`,
+`traffic_convention`, `action_t`, plus frames), so the model CANNOT hold a speed -- it emits a
+comfortable acceleration for the scene. The planner does contain a speed controller (the
+cruise candidate) but `min()` discards it whenever the model is more conservative: over 298
+sustained-headwind episodes that was 100% of frames, throwing away a mean of +1.781 m/s^2.
 
-So: the only component that knows the target cannot win, and the component that wins does not
-know the target.
+The only component that knows the target cannot win; the component that wins does not know
+the target. Measured on the 08-18 14:06 incident, the plant under-delivers by a median of
+**0.107 m/s^2** -- the droop in one number.
 
-WHAT THIS DOES, AND WHY IT IS A SERVO AND NOT AN OVERRIDE
----------------------------------------------------------
-`a_e2e ~ 0` is a REQUEST -- "hold this state" -- not an absence of one. If the car then
-decelerates on grade, the model's request is being violated by the plant, not by us.
-Correcting it is making the car deliver what the model asked for.
+WHAT THIS DOES
+--------------
+Pure disturbance rejection on the model's OWN request:
 
-That claim only holds inside a narrow band. Below it the model is genuinely asking to slow,
-and holding speed would FIGHT it. Calibrated on the 14:06 incident (speed fell 114.4 -> 91.5
-km/h with the model near zero), over the 28.3 s where speed was actively falling:
+    u    = a_commanded(t - LAG) - aEgo(t)        > 0 means the plant under-delivered
+    corr = clip(GAIN * (u - DEAD), 0, CAP)
+    out  = a_e2e + corr                          (capped at 0 while a_e2e < 0, see below)
 
-  model asking to slow (< -0.05)   12.4 s   44%   <- OUT OF SCOPE BY DESIGN
-  no real opinion (-0.05..+0.05)   14.6 s   52%   <- what this addresses
-  asking to go (> +0.05)            1.3 s    5%
+It is a SERVO, not an override: whatever the model asked for, this makes the car actually
+deliver it. That holds for ANY commanded value, so unlike an anchor-on-quiet design there is
+no band and no ceiling -- of the frames where the model was actively asking to SLOW at 14:06,
+82% were under-delivering, and correcting those is still honouring the request.
 
-Wider bands buy "coverage" only by swallowing frames where the model asked to slow: at
-(-0.15, +0.20) coverage looks like 82% but 69% of it is negative commands we would be
-fighting. Hence _HS_BAND = 0.05, and an honest ceiling of ~52% of that incident.
+IT BACKS OFF BY ITSELF. The correction is proportional to the error, so as the car reaches
+what was asked the error goes to zero and the correction with it. No flip-off is needed and
+adding one would chatter at the threshold.
+
+BUT P-ONLY LEAVES A RESIDUAL. Against a steady disturbance d the correction settles at
+-GAIN*d/(1+GAIN), so it rejects GAIN/(1+GAIN) of it -- 75% at GAIN=3, not 100%. Removing the
+rest needs integral action, which is deliberately NOT here (windup, and a much bigger step).
+
+WHY THE REFERENCE IS THE ACTUAL COMMAND, NOT a_e2e
+--------------------------------------------------
+`aEgo` responds to whatever won the planner's `min()`. If a lead branch commanded -1.0 and the
+car achieved -1.0, then measuring against a_e2e (~0) would read as a huge under-delivery and
+demand a correction that is pure nonsense. So the lag reference is the ACTUAL commanded accel
+from `carControl.actuators.accel`. When another branch is in charge, u correctly reads ~0.
 
 SAFETY
 ------
-UNLIKE hook 6, this hook CAN carry the standard claim: it can never make braking weaker.
-The correction is POSITIVE-ONLY and is applied to the e2e CANDIDATE, before the planner's
-`min()`. So cruise and the MPC lead branches still bind exactly as they did -- if either wants
-less, it wins. A reader who has absorbed hook 6's disclaimer should note this one is
-different.
+This canNOT carry hook 7's "never makes braking weaker" claim, and that is inherent: to make
+the car achieve -0.10 against a -0.25 disturbance you must COMMAND about +0.15. The command
+and the outcome are different quantities once a disturbance exists.
 
-Overspeed needs no handling here: above set speed the cruise candidate goes negative and wins
-`min()` on its own. The uncovered direction was only losing speed.
+Bounded three ways:
+  * the correction is POSITIVE-ONLY and capped at CAP;
+  * while the model asks for deceleration the output is capped at 0 -- so it can undo
+    over-braking down to coasting, but never accelerates against a deceleration request.
+    Measured cost of that cap: 8.08 -> closed-loop recovery, vs 11.35 uncapped;
+  * it is applied to the e2e CANDIDATE, so `min()` still hands control to cruise or a lead
+    branch whenever either wants less. It cannot override a lead.
+
+CLOSED-LOOP EXPECTATION, not open-loop
+--------------------------------------
+Earlier estimates applied a correction to logged `aEgo` that the ORIGINAL command produced,
+which overstates the result. Iterating the loop against the logged disturbance on the 14:06
+incident (22.8 km/h of droop):
+
+    GAIN 1.0, capped   4.94 km/h   correcting 49% of frames
+    GAIN 3.0, capped   8.08 km/h   correcting 40%      <- shipped
+    GAIN 5.0, capped   8.81 km/h   correcting 40%
+
+GAIN 3 nearly doubles GAIN 1 while correcting LESS often, because it settles the error rather
+than grinding against it. Above 3 the returns fall off, as the residual formula predicts.
 """
+from collections import deque
+
 from openpilot.common.realtime import DT_MDL
 
-# "Quiet" = the model has no real opinion. Its output wanders +/-0.05 continuously, so this is
-# the noise band, not a threshold on intent. See the 44/52/5 split above.
-_HS_BAND = 0.05           # m/s^2
-
-# Confirm the band entry before latching, to reject a single-frame crossing. Measured on the
-# 14:06 band entries: the car does NOT settle after entry -- it keeps drifting at -0.17 to
-# -0.23 km/h/s at every delay tested -- so waiting only gives speed away:
-#   0.3 s -> 0.07 km/h already lost (p10 0.30);  1.2 s -> 0.23 km/h (p10 1.00)
-# Latch as early as confirmation allows.
-_HS_LATCH_T = 0.30        # s
-
-_HS_GAIN = 0.30           # m/s^2 per m/s of speed lost. Fleet p99 correction at this gain was
-                          # 0.324 m/s^2; mean 0.042. Gentle by construction.
-_HS_MAX = 0.30            # m/s^2 cap on the correction.
-
-# Anti-staleness, NOT an authority limit (_HS_MAX does that). If the anchor is this far from
-# the current speed, something other than droop is happening and we stand down rather than
-# chase it. Deliberately set ABOVE the observed maximum error (6.12 km/h over 6.4 h) so it
-# fires only on a genuinely stale anchor, not on real droop.
-_HS_MAX_ERR = 2.22        # m/s == 8 km/h
-
+_HS_LAG = 0.70            # s, established command->response lag for this car
+_HS_SMOOTH = 1.00         # s, the raw under-delivery estimate is noisy
+_HS_GAIN = 3.0            # m/s^2 per m/s^2 of under-delivery. See the closed-loop table.
+_HS_DEAD = 0.05           # m/s^2, ignore under-delivery smaller than this
+_HS_CAP = 0.30            # m/s^2 cap on the correction
 _HS_MIN_SPEED = 8.33      # m/s == 30 km/h, same floor as hook 6
 _HS_MIN_HEADROOM = 0.28   # m/s == 1 km/h. Never push past the set speed; cruise owns that.
+
+_LAG_N = max(1, int(round(_HS_LAG / DT_MDL)))
+_SMOOTH_N = max(1, int(round(_HS_SMOOTH / DT_MDL)))
 
 
 class HoldSpeed:
   """One instance, owned by grt.hooks. See the module docstring."""
 
   def __init__(self):
-    self.anchor = None        # m/s, latched speed the model asked us to hold
-    self.quiet_t = 0.0
-    self.stats = {"latched": 0, "released_slow": 0, "released_stale": 0,
-                  "released_precond": 0, "frames_correcting": 0}
+    self.cmd_hist = deque(maxlen=_LAG_N + 1)
+    self.u_hist = deque(maxlen=_SMOOTH_N)
+    self.stats = {"frames_correcting": 0, "frames_capped_at_zero": 0,
+                  "frames_at_cap": 0, "inactive": 0}
 
-  def reset(self, why: str = ""):
-    if self.anchor is not None and why:
-      self.stats[why] = self.stats.get(why, 0) + 1
-    self.anchor = None
-    self.quiet_t = 0.0
+  def reset(self):
+    self.cmd_hist.clear()
+    self.u_hist.clear()
 
-  def update(self, a_e2e: float, v_ego: float, v_cruise: float, aggressive: bool,
-             long_pid: bool, driver_input: bool, experimental: bool) -> float:
-    """Return the e2e candidate, raised only by what is needed to hold the anchor."""
+  def update(self, a_e2e: float, a_commanded: float, a_ego: float, v_ego: float,
+             v_cruise: float, aggressive: bool, long_pid: bool, driver_input: bool,
+             experimental: bool) -> float:
+    """Return the e2e candidate, raised by what the plant is failing to deliver."""
     if not (experimental and aggressive and long_pid and not driver_input
             and v_ego >= _HS_MIN_SPEED):
-      self.reset("released_precond")
+      self.stats["inactive"] += 1
+      self.reset()
       return a_e2e
 
-    # ASYMMETRIC anchor hygiene. Dropping on EVERY band exit was measured to gut the feature:
-    # over the 14:06 incident the model left the band 37 times in 50 s, so the anchor kept
-    # resetting to an already-lower speed and only 2.23 km/h of a 22.8 km/h droop was held
-    # back. Keeping it across UPWARD exits recovers 10.43 km/h -- ~46%, at the 52% ceiling
-    # set by how often the model is genuinely asking to slow.
-    if a_e2e < -_HS_BAND:
-      # The model wants to SLOW. Holding speed would fight it. Drop at once -- this is the
-      # safety constraint and is not negotiable; 52% of band exits in that incident were
-      # this case, and they are exactly the half of the droop this feature cannot address.
-      self.reset("released_slow")
-      return a_e2e
-    if a_e2e > _HS_BAND:
-      # The model wants to GO. That does not conflict with holding a speed, so the anchor
-      # survives -- and ratchets UP to whatever the model deliberately achieved, so once it
-      # settles we hold the new speed rather than an older, lower one. Never ratchets down.
-      self.quiet_t = 0.0
-      if self.anchor is not None and v_ego > self.anchor:
-        self.anchor = v_ego
-      return a_e2e
-    self.quiet_t += DT_MDL
+    self.cmd_hist.append(a_commanded)
+    if len(self.cmd_hist) < self.cmd_hist.maxlen:
+      return a_e2e                       # not enough history to measure a lag yet
 
-    if self.anchor is None:
-      if self.quiet_t < _HS_LATCH_T:
-        return a_e2e
-      self.anchor = v_ego
-      self.stats["latched"] += 1
+    # u > 0: the car is doing LESS than it was told to, LAG seconds ago.
+    self.u_hist.append(self.cmd_hist[0] - a_ego)
+    if len(self.u_hist) < self.u_hist.maxlen:
       return a_e2e
+    u = sum(self.u_hist) / len(self.u_hist)
 
-    err = self.anchor - v_ego            # positive == we have LOST speed
-    if err > _HS_MAX_ERR:
-      self.reset("released_stale")
-      return a_e2e
     if v_cruise - v_ego < _HS_MIN_HEADROOM:
       return a_e2e                       # at the set speed; cruise owns it from here
 
-    corr = min(_HS_MAX, max(0.0, _HS_GAIN * err))
+    corr = min(_HS_CAP, max(0.0, _HS_GAIN * (u - _HS_DEAD)))
     if corr <= 0.0:
       return a_e2e
+
+    out = a_e2e + corr
+    if a_e2e < 0.0:
+      # The model is asking to slow. Undo over-braking down to coasting, but never
+      # accelerate against a deceleration request. This is the operator's constraint and it
+      # costs ~3 km/h of recovery on the 14:06 incident; it is what keeps the feature from
+      # ever commanding acceleration while the model wants the opposite.
+      capped = min(0.0, out)
+      if capped != out:
+        self.stats["frames_capped_at_zero"] += 1
+      out = capped
+      if out <= a_e2e:
+        return a_e2e
+
     self.stats["frames_correcting"] += 1
-    # ADDITIVE, not a floor: the model's request PLUS what the plant needs to deliver it.
-    # Bounded by construction to |a_e2e| + _HS_MAX < 0.35 m/s^2.
-    return a_e2e + corr
+    if corr >= _HS_CAP - 1e-9:
+      self.stats["frames_at_cap"] += 1
+    return out

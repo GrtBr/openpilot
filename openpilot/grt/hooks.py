@@ -384,7 +384,13 @@ def floor_e2e_accel(a_e2e: float, sm, v_ego: float, v_cruise: float) -> float:
     hs = _hold_speed_singleton()
     a_hold = a_e2e
     if hs is not None:
-      a_hold = hs.update(a_e2e=float(a_e2e), v_ego=float(v_ego), v_cruise=float(v_cruise),
+      # The lag reference is the ACTUAL commanded accel, not a_e2e: aEgo responds to whatever
+      # won the planner's min() last cycle, so measuring against the e2e candidate would read
+      # a lead branch's braking as a huge "under-delivery". See hold_speed.py.
+      a_hold = hs.update(a_e2e=float(a_e2e),
+                         a_commanded=float(sm['carControl'].actuators.accel),
+                         a_ego=float(cs.aEgo),
+                         v_ego=float(v_ego), v_cruise=float(v_cruise),
                          aggressive=aggressive, long_pid=long_pid,
                          driver_input=driver_input, experimental=True)
 

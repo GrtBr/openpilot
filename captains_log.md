@@ -77,6 +77,79 @@ fork, so it is not committed. Move it in only if that is an explicit decision.
 
 ---
 
+## 2026-08-18 (evening) — HOOK 8 REDESIGNED: under-delivery servo, not a speed anchor
+
+Operator proposed the better trigger: **act when the car decelerates faster than the model
+asked**, rather than anchoring a speed when the model goes quiet. Measured, it wins on every
+axis, so the anchor design (committed earlier today) is replaced.
+
+### Why it is better
+
+```
+u = a_commanded(t - 0.7s) - aEgo(t)      > 0 means the plant under-delivered
+```
+
+On the 14:06 incident: median u = **+0.107 m/s^2**, under-delivering in **78%** of frames.
+That single number IS the droop.
+
+Crucially it removes the anchor design's ceiling. The anchor could only act inside a +/-0.05
+band, which excluded the 44% of droop frames where the model was actively asking to slow. But
+of those frames, **82% were also under-delivering** -- the model asked -0.10 and the car did
+-0.35. Correcting that is still honouring the request, so there is no band and no ceiling.
+
+It is also simpler: no anchor, no latch delay, no staleness cap, no band.
+
+### Two corrections to what I had told the operator
+
+**Open-loop overstatement.** Every replay until now applied a correction to logged `aEgo` that
+the ORIGINAL command had produced. The real loop changes `aEgo`, which changes the error,
+which changes the correction. Iterating properly against the logged disturbance:
+
+| config | open-loop (what I quoted) | CLOSED-LOOP (real) |
+|---|---|---|
+| gain 1.0, capped at 0 | 8.56 km/h | **4.94** |
+| gain 3.0, capped at 0 | — | **8.08** |
+| gain 5.0, capped at 0 | — | 8.81 |
+
+Shipped **gain 3.0**: nearly double gain 1.0 while correcting LESS often (40% vs 49% of
+frames), because it settles the error rather than grinding against it.
+
+**P-only leaves a residual, by construction.** corr settles at `-gain*d/(1+gain)`, so gain 3
+rejects 75% of the disturbance, not 100%. Removing the rest needs integral action, which is
+deliberately NOT here (windup, bigger step). The operator asked whether it should "flip off
+once it achieves the request" -- it backs off automatically since the correction is
+proportional; an explicit flip-off would chatter.
+
+### The operator's cap, and why the literal version is a no-op
+
+Operator asked whether the command should be capped at the model's request. Measured:
+capping at `a_cmd` gives **0% of frames, 0.00 km/h** -- mathematically a no-op, because to
+ACHIEVE -0.10 against a -0.25 disturbance you must COMMAND about +0.15. The command and the
+outcome are different quantities once a disturbance exists.
+
+Capping at **zero** is what that instinct was reaching for, and it is shipped: the output
+never rises above 0 while the model asks for deceleration, so it can undo over-braking down
+to coasting but never accelerates against a deceleration request. Costs ~3 km/h of recovery
+(11.35 -> 8.08 closed-loop) and is worth it.
+
+### The correctness detail that could have made this nonsense
+
+The lag reference is the **ACTUAL commanded accel** (`carControl.actuators.accel`), not
+`a_e2e`. `aEgo` responds to whatever won `min()`. If a lead branch commanded -1.0 and the car
+achieved -1.0, measuring against `a_e2e` (~0) would read u = +1.0 and demand a large bogus
+correction. Covered by a regression test.
+
+### Safety, stated
+
+This canNOT carry hook 7's "never makes braking weaker" claim, and that is inherent to
+disturbance rejection. Bounded three ways: positive-only and capped at 0.30; output capped at
+0 while the model asks to slow; applied to the e2e CANDIDATE so `min()` still hands control
+to cruise or a lead branch whenever either wants less. It cannot override a lead.
+
+**Expectation to set: ~8 km/h of a 22.8 km/h droop.** Not a fix, a substantial dent.
+
+NOT DEPLOYED -- comma4 offline until tomorrow morning.
+
 ## 2026-08-18 — HOOK 8: hold-speed servo. The droop root cause, and a partial fix
 
 ### Root cause of the droop, finally
