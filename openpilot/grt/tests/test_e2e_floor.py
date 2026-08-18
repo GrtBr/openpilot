@@ -28,7 +28,7 @@ _rt.DT_MDL = 0.05
 sys.modules['openpilot.common.realtime'] = _rt
 
 from openpilot.grt.e2e_floor import (E2EAccelFloor, _FLOOR_FALL_JERK,   # noqa: E402
-                                     _DECAY_DEADBAND)
+                                     _DECAY_DEADBAND, _FLOOR_MAX, _FLOOR_JERK)
 
 OPEN = dict(v_ego=25.0, v_cruise=33.0, lead=False, throttle_prob=0.9, curvature=0.0001,
             long_pid=True, driver_input=False, experimental=True)
@@ -123,10 +123,11 @@ def main():
   # --- floor shape ----------------------------------------------------------------
   fl = E2EAccelFloor()
   run(fl, 20, aggressive=False)
-  o = run(fl, 60, aggressive=True)
+  o = run(fl, 120, aggressive=True)
   steps = [abs(o[i] - o[i - 1]) for i in range(1, len(o))]
-  check(f"floor jerk-limited (max step {max(steps):.4f}) and capped ({max(o):.3f})",
-        max(steps) <= 0.0151 and max(o) <= 0.4001)
+  check(f"floor jerk-limited (max step {max(steps):.4f}) and capped at _FLOOR_MAX "
+        f"({max(o):.3f})",
+        max(steps) <= _FLOOR_JERK * 0.05 + 1e-9 and max(o) <= _FLOOR_MAX + 1e-4)
 
   # 2026-08-16/18: the model's output wanders across zero constantly. A hard branch here
   # made the command alternate between floor and raw (felt as stutter). A fast asymmetric
@@ -135,7 +136,7 @@ def main():
   # negative. Built from a LOW positive so the fall does not also trip the drop detector.
   fl = E2EAccelFloor()
   run(fl, 20, aggressive=False)
-  run(fl, 40, aggressive=True, a_e2e=0.05)
+  run(fl, 120, aggressive=True, a_e2e=0.05)        # long enough to SATURATE at the cap
   peak = fl.floor
   o = run(fl, 10, a_e2e=-0.03)                      # inside the deadband
   check(f"a -0.03 request is INSIDE the deadband: floor unmoved (was {peak:.3f}, "

@@ -28,7 +28,7 @@ _rt.DT_MDL = 0.05
 sys.modules['openpilot.common.realtime'] = _rt
 
 from openpilot.grt.accel_ramp import RelaxedAccelRamp, JERK_RELAXED   # noqa: E402
-from openpilot.grt.e2e_floor import E2EAccelFloor                     # noqa: E402
+from openpilot.grt.e2e_floor import E2EAccelFloor, _FLOOR_MAX         # noqa: E402
 
 DT = 0.05
 WIRE_JERK = 5.0        # hyundaicanfd.py's a_val rate clip, m/s^3
@@ -143,8 +143,8 @@ def main():
     a = random.choice([0.0, 0.02, 0.3, 0.8, -0.3, -1.2, 1.5])
     worst = max(worst, c.step(a, pers[(i // 37) % 3]) - min(a, 2.0))
   check(f"4000 frames of rapid personality churn: max excess over the raw candidate "
-        f"{worst:+.3f} (only hook 6 may legitimately raise it, capped at 0.40)",
-        worst <= 0.4001)
+        f"{worst:+.3f} (only hook 6 may legitimately raise it, capped at _FLOOR_MAX "
+        f"= {_FLOOR_MAX})", worst <= _FLOOR_MAX + 1e-4)
 
   c = Chain()
   for i in range(60):

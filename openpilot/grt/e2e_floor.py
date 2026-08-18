@@ -163,9 +163,18 @@ _RELEASE_HEADROOM = 0.28    # m/s == 1 km/h; we have arrived, let cruise take it
 
 # The floor itself
 _FLOOR_JERK = 0.30          # m/s^3. Discretionary acceleration: gentler than the 5 m/s^3 wire clip.
-_FLOOR_MAX = 0.40           # m/s^2 cap. NOTE the planner's cruise candidate is
+# RAISED 0.40 -> 0.60 on 2026-08-18 at the operator's request. The cap had become the binding
+# constraint on pace: across 10 armed windows the floor sat AT it 88% of the time, so it alone
+# set how fast the headroom closed. Swept over those same windows:
+#   0.40 -> 5 dips, mean 0.225, maxstep 0.541, mean cmd +0.372, 88% at cap
+#   0.60 -> 5 dips, mean 0.265, maxstep 0.741, mean cmd +0.547, 84% at cap   <- shipped
+# Dip COUNT is unchanged, so this does not re-open the oscillation; delivery rises ~47%.
+# What grows is the worst single step, 0.541 -> 0.741, and that is the IMMEDIATE-DEFERENCE
+# branch: floor at cap, model asks past _ABANDON_ACCEL, floor drops to it in one frame. It is
+# downward, the wire clip stretches it over ~0.15 s, and it must stay instant.
+_FLOOR_MAX = 0.60           # m/s^2 cap. NOTE the planner's cruise candidate is
                             # clip(v_cruise - v_ego, -1.2, ACCEL_MAX=2.0), so it only opposes
-                            # this floor once the deficit is under 0.40 m/s (1.4 km/h).
+                            # this floor once the deficit is under 0.60 m/s (2.2 km/h).
                             # min() does NOT bound us in between -- this cap is the real limit.
 # m/s^3, how fast the floor withdraws when the model goes negative. Chosen by replaying the
 # exact 08-16 stutter window (10:54:48.5-10:54:56.5) through each candidate:

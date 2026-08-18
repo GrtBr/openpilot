@@ -77,6 +77,82 @@ fork, so it is not committed. Move it in only if that is an explicit decision.
 
 ---
 
+## 2026-08-18 (drive 2) — hook behaving; two of three complaints are OTHER layers. Cap -> 0.60
+
+**Five armed sessions, and every change from earlier today did what it was meant to.** Zero
+`max duration` releases (the 120 s cap never fired); 4 of 5 ended on `reached set speed`.
+THREE armed via **taper** — the safe trigger — against one all week previously. Session 4
+armed **with a lead present** and worked. The single objection release was genuine: raw
+-0.208, past the -0.20 threshold.
+
+| # | armed | via | v | headroom | released | held | reason |
+|---|---|---|---|---|---|---|---|
+| — | 11:19:48.996 | request only | — | — | never armed | — | gates closed |
+| 1 | 11:20:50.094 | personality | 82 | 28.3 | 11:21:12.841 | 22.7 s | reached set speed |
+| 2 | 11:22:59.737 | taper | 101 | 9.2 | 11:23:06.185 | 6.4 s | reached set speed |
+| 3 | 11:25:15.619 | taper | 72 | 10.0 | 11:25:22.969 | 7.3 s | reached set speed |
+| 4 | 11:26:36.516 | taper (lead present) | 92 | 17.6 | 11:26:48.564 | 12.0 s | model objected (0.30 s) |
+| 5 | 11:30:23.502 | personality | 36 | 23.6 | 11:30:39.401 | 15.9 s | reached set speed |
+
+### Operator report 1 — 11:25 "hesitant to accelerate to set speed" = HOOK 1, not hook 6
+
+```
+11:24:58  44.0 km/h  set 65   a_cmd +1.623  raw +1.623   src e2e
+11:24:59  49.6       set 75   a_cmd +0.968  raw +1.390   src cruise
+11:25:01  52.5       set 95   a_cmd +0.140  raw +1.144   src cruise
+11:25:03  53.0       set 110  a_cmd +0.001  raw +1.075   src cruise
+```
+
+The dash ramped 60->110 while the CRUISE candidate held the car to +0.001. Back-solving
+`a_cruise = v_cruise - v_ego` puts the INTERNAL target at ~53 km/h. The model wanted +1.0 to
++1.4 throughout. That is **mapd / limit_v_cruise** holding `v_cruise` far below the displayed
+set speed. It released ~11:25:06, the car ran 53->72, and hook 6 then armed seeing only
+**10.0 km/h** of headroom — because mapd was still capping around 82. It used all of it and
+released at 82.
+
+**THIRD occurrence** (08-17 09:16 was the same at 52.8 km/h). This is now the most
+worthwhile thing to chase; `map_curve_target_lat_a` is 2.025 from the 08-04 tuning, but a
+~53 km/h clamp on a highway on-ramp reads more like a speed-limit target than a curve one.
+
+### Operator report 2 — 11:26 "lead gone, should have accelerated, not smooth"
+
+Hook 6 delivered (floor applied 85% of frames). The roughness is UPSTREAM: lead0 braked to
+-1.215 as dRel closed 68->47 m; the lead then pulled away and **the model's own command rose
+to +0.630 and then DECAYED to +0.108 over 4 s** before hook 6 caught it at 11:26:36.5. The
+un-smooth part is that fade, not the floor. Also the clearest case yet FOR the lead-gate
+removal — session 4 armed with a lead present and that is what enabled the recovery.
+
+### Operator report 3 — 11:27-11:28 "stutter on slight uphill" = NOT hook 6
+
+```
+a_cmd == raw in 89% of frames          floor applied: 1%   (hook 6 not armed)
+a_cmd  maxstep 0.060, p2p 0.796        slow-band 23% (baseline-normal)
+aEgo   p2p 1.62, min -1.11, max +0.51
+```
+
+The COMMAND was smooth and tiny. What moved was the CAR: `aEgo` swung 1.62 m/s^2 p2p against
+a near-constant request while speed bled 108.6 -> 106.3. That is the **uphill droop** in mild
+form — the model asks ~+0.05 on grade, the car cannot hold it, and the drivetrain hunts.
+`kp = ki = 0`, no grade input. Outstanding since day one; nothing built this week touches it.
+
+### `_FLOOR_MAX` 0.40 -> 0.60
+
+At the operator's request. The cap had become the binding constraint on pace — across 10
+armed windows the floor sat AT it **88%** of the time. Swept over those windows:
+
+| cap | dips | mean dip | max step | mean cmd | time at cap |
+|---|---|---|---|---|---|
+| 0.40 | 5 | 0.225 | 0.541 | +0.372 | 88% |
+| **0.60** | **5** | 0.265 | **0.741** | **+0.547** | 84% |
+
+Dip COUNT unchanged, so this does not re-open the oscillation; delivery rises ~47%. What
+grows is the worst single step, 0.541 -> 0.741 — that is the immediate-deference branch
+(floor at cap, model asks past `_ABANDON_ACCEL`, floor drops to it in one frame). Downward,
+wire-clipped to ~0.15 s, and it must stay instant.
+
+Three tests had `0.40` hardcoded and now read `_FLOOR_MAX` / `_FLOOR_JERK` instead — the same
+mistake as the earlier fall-jerk test. Tests should track constants, not copy them.
+
 ## 2026-08-18 (later) — max duration 20 -> 120 s, and an EXIT debounce on the personality
 
 **`_MAX_ACTIVE_T` 20 -> 120 s** at the operator's request; the data supports it. 6 of 10
