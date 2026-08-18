@@ -421,7 +421,10 @@ class E2EAccelFloor:
             self.taper_t = 0.0
             self.quiet_t = 0.0
           self.strong_t = 0.0
-      else:
+      elif self.state == _WAIT:
+        # `elif self.state == _WAIT` and not a bare `else`: on the frame a PERSONALITY arm
+        # fires above, state is already _ACTIVE, and a bare else would run one more frame of
+        # taper logic against an armed machine.
         self.taper_t += DT_MDL
         if a_e2e < -quiet:
           self._reset_detector()            # it objected on the way down; not a taper
