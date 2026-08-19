@@ -77,6 +77,32 @@ fork, so it is not committed. Move it in only if that is an explicit decision.
 
 ---
 
+## 2026-08-19 — hook 8 DEPLOYED, plus throttled burst logging
+
+Hook 8 (under-delivery servo) is live on the car at `656937c`, verified after reboot:
+`gain 3.0 dead 0.05 cap 0.3 minspd 8.33`, plannerd clean, 0 grt exceptions.
+
+**Throttled logging added.** Unlike hook 6 this servo is continuous, not event-based -- it
+corrects on ~40% of frames, so a per-transition line would flood swaglog (cf. the
+`lead.status` incident: 38,300 lines in one drive). Instead it summarises each correcting
+BURST:
+
+  * bursts shorter than `_HS_LOG_MIN_T = 1.0 s` are not logged at all
+  * at most one summary per `_HS_LOG_EVERY = 5.0 s`
+  * a burst still running past `_HS_LOG_PROGRESS_T = 10.0 s` reports progress, so a long
+    sustained correction is not invisible until it ends
+
+Line format: `corrected 3.4s v=95km/h corr mean=+0.180 peak=+0.300 peak_u=+0.240 zero_capped=12`
+
+Asserted by test, not assumed: 600 artificially chopped bursts over 10 min produce 59 lines
+(bounded by the rate limit), and one unbroken 60 s correction produces 6 progress lines
+carrying the diagnostics. 16/16 in `test_hold_speed.py`.
+
+**What to read after the next drive:** `frames_at_cap` high means gain 3.0 is too low for the
+disturbances actually met; `frames_capped_at_zero` dominating means the operator's zero-cap is
+doing more work than expected and is worth revisiting. `peak_u` in the burst lines is the raw
+under-delivery and is the honest measure of how bad the grade was.
+
 ## 2026-08-18 (evening) — HOOK 8 REDESIGNED: under-delivery servo, not a speed anchor
 
 Operator proposed the better trigger: **act when the car decelerates faster than the model

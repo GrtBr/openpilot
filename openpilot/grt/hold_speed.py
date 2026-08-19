@@ -79,6 +79,15 @@ _HS_CAP = 0.30            # m/s^2 cap on the correction
 _HS_MIN_SPEED = 8.33      # m/s == 30 km/h, same floor as hook 6
 _HS_MIN_HEADROOM = 0.28   # m/s == 1 km/h. Never push past the set speed; cruise owns that.
 
+# LOGGING. Unlike hook 6 this servo is continuous, not event-based -- it corrects on ~40% of
+# frames, so a per-transition line would flood swaglog (the `lead.status` incident put 38,300
+# lines in one drive). Instead: summarise each correcting BURST when it ends, skip trivial
+# ones, and rate-limit. A burst still running past _HS_LOG_PROGRESS_T also reports, so a long
+# sustained correction is not invisible until it finishes.
+_HS_LOG_MIN_T = 1.0       # s, do not log bursts shorter than this
+_HS_LOG_EVERY = 5.0       # s, at most one burst summary per this interval
+_HS_LOG_PROGRESS_T = 10.0  # s, report a burst that is still going
+
 _LAG_N = max(1, int(round(_HS_LAG / DT_MDL)))
 _SMOOTH_N = max(1, int(round(_HS_SMOOTH / DT_MDL)))
 
@@ -90,7 +99,41 @@ class HoldSpeed:
     self.cmd_hist = deque(maxlen=_LAG_N + 1)
     self.u_hist = deque(maxlen=_SMOOTH_N)
     self.stats = {"frames_correcting": 0, "frames_capped_at_zero": 0,
-                  "frames_at_cap": 0, "inactive": 0}
+                  "frames_at_cap": 0, "inactive": 0, "bursts": 0}
+    # burst accounting for the throttled log
+    self.b_t = 0.0            # s this burst has been correcting
+    self.b_sum = 0.0          # integral of the correction, for a mean
+    self.b_peak = 0.0         # peak correction
+    self.b_peak_u = 0.0       # peak under-delivery seen
+    self.b_zero_capped = 0    # frames the zero-cap bit
+    self.b_reported = 0.0     # s of this burst already reported
+    self.since_log = _HS_LOG_EVERY   # start ready to log
+
+  def _log(self, msg: str):
+    try:
+      from openpilot.common.swaglog import cloudlog
+      cloudlog.warning(f"grt hold_speed: {msg}")
+    except Exception:
+      pass
+
+  def _burst_line(self, tag: str, v_ego: float) -> str:
+    mean = self.b_sum / max(self.b_t / DT_MDL, 1.0)
+    return (f"{tag} {self.b_t:.1f}s v={v_ego * 3.6:.0f}km/h "
+            f"corr mean={mean:+.3f} peak={self.b_peak:+.3f} "
+            f"peak_u={self.b_peak_u:+.3f}"
+            + (f" zero_capped={self.b_zero_capped}" if self.b_zero_capped else ""))
+
+  def _end_burst(self, v_ego: float):
+    if self.b_t >= _HS_LOG_MIN_T and self.since_log >= _HS_LOG_EVERY:
+      self.stats["bursts"] += 1
+      self._log(self._burst_line("corrected", v_ego))
+      self.since_log = 0.0
+    self.b_t = 0.0
+    self.b_sum = 0.0
+    self.b_peak = 0.0
+    self.b_peak_u = 0.0
+    self.b_zero_capped = 0
+    self.b_reported = 0.0
 
   def reset(self):
     self.cmd_hist.clear()
@@ -100,9 +143,11 @@ class HoldSpeed:
              v_cruise: float, aggressive: bool, long_pid: bool, driver_input: bool,
              experimental: bool) -> float:
     """Return the e2e candidate, raised by what the plant is failing to deliver."""
+    self.since_log += DT_MDL
     if not (experimental and aggressive and long_pid and not driver_input
             and v_ego >= _HS_MIN_SPEED):
       self.stats["inactive"] += 1
+      self._end_burst(v_ego)
       self.reset()
       return a_e2e
 
@@ -117,10 +162,12 @@ class HoldSpeed:
     u = sum(self.u_hist) / len(self.u_hist)
 
     if v_cruise - v_ego < _HS_MIN_HEADROOM:
+      self._end_burst(v_ego)
       return a_e2e                       # at the set speed; cruise owns it from here
 
     corr = min(_HS_CAP, max(0.0, _HS_GAIN * (u - _HS_DEAD)))
     if corr <= 0.0:
+      self._end_burst(v_ego)
       return a_e2e
 
     out = a_e2e + corr
@@ -132,11 +179,24 @@ class HoldSpeed:
       capped = min(0.0, out)
       if capped != out:
         self.stats["frames_capped_at_zero"] += 1
+        self.b_zero_capped += 1
       out = capped
       if out <= a_e2e:
+        self._end_burst(v_ego)
         return a_e2e
 
     self.stats["frames_correcting"] += 1
     if corr >= _HS_CAP - 1e-9:
       self.stats["frames_at_cap"] += 1
+
+    self.b_t += DT_MDL
+    self.b_sum += corr
+    self.b_peak = max(self.b_peak, corr)
+    self.b_peak_u = max(self.b_peak_u, u)
+    if self.b_t - self.b_reported >= _HS_LOG_PROGRESS_T:
+      # still going -- report progress so a long correction is not invisible until it ends
+      self.b_reported = self.b_t
+      self.stats["bursts"] += 1
+      self._log(self._burst_line("correcting", v_ego))
+      self.since_log = 0.0
     return out

@@ -28,7 +28,7 @@ _rt.DT_MDL = 0.05
 sys.modules['openpilot.common.realtime'] = _rt
 
 from openpilot.grt.hold_speed import (HoldSpeed, _HS_GAIN, _HS_DEAD,   # noqa: E402
-                                      _HS_CAP, _LAG_N, _SMOOTH_N)
+                                      _HS_CAP, _LAG_N, _SMOOTH_N, _HS_LOG_EVERY)
 from openpilot.grt.e2e_floor import E2EAccelFloor                      # noqa: E402
 
 OK = dict(v_ego=25.0, v_cruise=33.0, aggressive=True, long_pid=True,
@@ -122,6 +122,29 @@ def main():
     hs = HoldSpeed()
     o = run(hs, SETTLE, a_e2e=0.10, a_ego=-0.10, **kw)
     check(f"inert {lbl} (last {o[-1]:+.3f})", o[-1] == 0.10)
+
+  # --- the log must not flood ------------------------------------------------------
+  # This servo is continuous, not event-based. A per-transition line would put tens of
+  # thousands of entries in swaglog over one drive (cf. the lead.status incident).
+  hs = HoldSpeed()
+  lines = []
+  hs._log = lambda m: lines.append(m)
+  # 10 minutes of correcting, chopped into ~0.5 s bursts by the model crossing the deadband
+  for cycle in range(600):
+    run(hs, 10, a_e2e=0.10, a_ego=-0.10)          # correcting
+    run(hs, 10, a_e2e=0.10, a_ego=0.10)           # delivering -> burst ends
+  mins = 600 * 20 * 0.05 / 60.0
+  check(f"short bursts are throttled: {len(lines)} lines over {mins:.0f} min of driving "
+        f"(cap is 1 per {_HS_LOG_EVERY:.0f}s)", len(lines) <= mins * 60 / _HS_LOG_EVERY + 2)
+
+  hs = HoldSpeed()
+  lines = []
+  hs._log = lambda m: lines.append(m)
+  run(hs, SETTLE + 20 * 60, a_e2e=0.10, a_ego=-0.10)   # one 60 s unbroken correction
+  check(f"a long unbroken correction still reports progress ({len(lines)} lines in 60 s)",
+        1 <= len(lines) <= 8)
+  check(f"and the line carries the diagnostics ({lines[0][:60] if lines else 'none'}...)",
+        bool(lines) and 'peak_u' in lines[0] and 'corr mean' in lines[0])
 
   # --- hook 6 / hook 8 interaction -------------------------------------------------
   fl = E2EAccelFloor()
