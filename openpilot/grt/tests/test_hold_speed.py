@@ -28,12 +28,16 @@ _rt.DT_MDL = 0.05
 sys.modules['openpilot.common.realtime'] = _rt
 
 from openpilot.grt.hold_speed import (HoldSpeed, _HS_GAIN, _HS_DEAD,   # noqa: E402
-                                      _HS_CAP, _LAG_N, _SMOOTH_N, _HS_LOG_EVERY)
+                                      _HS_CAP, _LAG_N, _SMOOTH_N, _HS_LOG_EVERY,
+                                      _HS_CORR_JERK)
 from openpilot.grt.e2e_floor import E2EAccelFloor                      # noqa: E402
 
 OK = dict(v_ego=25.0, v_cruise=33.0, aggressive=True, long_pid=True,
           driver_input=False, experimental=True)
 SETTLE = _LAG_N + _SMOOTH_N + 2       # frames before the servo has enough history
+# the correction is RATE-LIMITED, so steady state also needs the ramp to finish
+RAMP = int(_HS_CAP / (_HS_CORR_JERK * 0.05)) + 2
+FULL = SETTLE + RAMP
 
 
 def run(hs, n, a_e2e=0.0, a_commanded=None, a_ego=0.0, **kw):
@@ -54,46 +58,46 @@ def main():
 
   # --- no correction when the plant delivers ---------------------------------------
   hs = HoldSpeed()
-  o = run(hs, SETTLE, a_e2e=0.10, a_ego=0.10)
+  o = run(hs, FULL, a_e2e=0.10, a_ego=0.10)
   check(f"plant delivering -> no correction (last {o[-1]:+.3f})", o[-1] == 0.10)
 
   # --- corrects when under-delivering ----------------------------------------------
   hs = HoldSpeed()
-  o = run(hs, SETTLE, a_e2e=0.10, a_ego=-0.10)      # u = +0.20
+  o = run(hs, FULL, a_e2e=0.10, a_ego=-0.10)      # u = +0.20
   expect = 0.10 + min(_HS_CAP, _HS_GAIN * (0.20 - _HS_DEAD))
   check(f"under-delivery of 0.20 -> corrects (got {o[-1]:+.3f}, expect {expect:+.3f})",
         abs(o[-1] - expect) < 1e-9)
 
   hs = HoldSpeed()
-  o = run(hs, SETTLE, a_e2e=0.10, a_ego=-1.00)
+  o = run(hs, FULL, a_e2e=0.10, a_ego=-1.00)
   check(f"correction is capped at _HS_CAP (got {o[-1]:+.3f})",
         abs(o[-1] - (0.10 + _HS_CAP)) < 1e-9)
 
   hs = HoldSpeed()
-  o = run(hs, SETTLE, a_e2e=0.10, a_ego=0.13)       # OVER-delivering
+  o = run(hs, FULL, a_e2e=0.10, a_ego=0.13)       # OVER-delivering
   check(f"over-delivery -> no correction (got {o[-1]:+.3f})", o[-1] == 0.10)
 
   hs = HoldSpeed()
-  o = run(hs, SETTLE, a_e2e=0.10, a_ego=0.10 - _HS_DEAD * 0.5)
+  o = run(hs, FULL, a_e2e=0.10, a_ego=0.10 - _HS_DEAD * 0.5)
   check(f"under-delivery below the deadband is ignored (got {o[-1]:+.3f})", o[-1] == 0.10)
 
   # --- THE REFERENCE IS THE ACTUAL COMMAND -----------------------------------------
   # A lead branch commands -1.0 and the car achieves -1.0. Measuring against a_e2e (~0)
   # would read u = +1.0 and demand a nonsense correction.
   hs = HoldSpeed()
-  o = run(hs, SETTLE, a_e2e=0.0, a_commanded=-1.00, a_ego=-1.00)
+  o = run(hs, FULL, a_e2e=0.0, a_commanded=-1.00, a_ego=-1.00)
   check(f"a lead branch braking is NOT misread as under-delivery (got {o[-1]:+.3f})",
         o[-1] == 0.0)
 
   # --- capped at zero while the model asks to slow ---------------------------------
   hs = HoldSpeed()
-  o = run(hs, SETTLE, a_e2e=-0.10, a_ego=-0.40)     # u = +0.30
+  o = run(hs, FULL, a_e2e=-0.10, a_ego=-0.40)     # u = +0.30
   check(f"model asking to slow: output never rises above 0 (got {o[-1]:+.3f})",
         o[-1] <= 1e-12)
   check(f"...but it DOES undo over-braking (got {o[-1]:+.3f} vs raw -0.100)", o[-1] > -0.10)
 
   hs = HoldSpeed()
-  o = run(hs, SETTLE, a_e2e=-0.60, a_ego=-0.70)
+  o = run(hs, FULL, a_e2e=-0.60, a_ego=-0.70)
   check(f"a deep braking request is only eased, never inverted (got {o[-1]:+.3f})",
         -0.60 <= o[-1] <= 0.0)
 
@@ -101,15 +105,15 @@ def main():
   worst = 0.0
   for a in (-0.30, -0.10, 0.0, 0.10, 0.30):
     hs = HoldSpeed()
-    o = run(hs, SETTLE, a_e2e=a, a_ego=a - 0.20)
+    o = run(hs, FULL, a_e2e=a, a_ego=a - 0.20)
     worst = min(worst, o[-1] - a)
   check(f"the correction is never negative (min {worst:+.4f})", worst >= -1e-12)
 
   # --- it backs off by itself ------------------------------------------------------
   hs = HoldSpeed()
-  o1 = run(hs, SETTLE, a_e2e=0.10, a_ego=-0.10)
+  o1 = run(hs, FULL, a_e2e=0.10, a_ego=-0.10)
   c_big = o1[-1] - 0.10
-  o2 = run(hs, SETTLE, a_e2e=0.10, a_ego=0.05)      # car catching up
+  o2 = run(hs, FULL, a_e2e=0.10, a_ego=0.05)      # car catching up
   c_small = o2[-1] - 0.10
   check(f"correction shrinks as the car catches up ({c_big:+.3f} -> {c_small:+.3f}); "
         f"no flip-off needed", c_small < c_big and c_small >= 0.0)
@@ -120,8 +124,33 @@ def main():
                   ("at the set speed -- cruise owns it", dict(v_cruise=25.05)),
                   ("on driver input", dict(driver_input=True))):
     hs = HoldSpeed()
-    o = run(hs, SETTLE, a_e2e=0.10, a_ego=-0.10, **kw)
+    o = run(hs, FULL, a_e2e=0.10, a_ego=-0.10, **kw)
     check(f"inert {lbl} (last {o[-1]:+.3f})", o[-1] == 0.10)
+
+  # --- 2026-08-19 regression: the correction must RAMP, never step -------------------
+  # Cause of the reported jerking: with GAIN 3.0 and DEAD 0.05 the correction saturates
+  # once u > 0.15, so on a noisy signal it slammed 0.000 <-> 0.300 every ~150 ms while the
+  # model sat flat. Hook 6 always rate-limited its floor; this had nothing.
+  hs = HoldSpeed()
+  o = run(hs, FULL, a_e2e=0.10, a_ego=-1.00)        # demand full-scale correction
+  steps = [abs(o[n] - o[n - 1]) for n in range(1, len(o))]
+  check(f"the correction RAMPS in, max step {max(steps):.4f} <= jerk*dt "
+        f"({_HS_CORR_JERK * 0.05:.4f})", max(steps) <= _HS_CORR_JERK * 0.05 + 1e-9)
+  o2 = run(hs, FULL, a_e2e=0.10, a_ego=0.10)        # under-delivery gone
+  steps2 = [abs(o2[n] - o2[n - 1]) for n in range(1, len(o2))]
+  check(f"and RAMPS out too, max step {max(steps2):.4f}",
+        max(steps2) <= _HS_CORR_JERK * 0.05 + 1e-9 and abs(o2[-1] - 0.10) < 1e-9)
+
+  # the exact 08-19 signature: u oscillating across the deadband must not produce a square wave
+  hs = HoldSpeed()
+  out = []
+  for cycle in range(40):
+    out += run(hs, 3, a_e2e=0.00, a_ego=-0.20)      # u well above the deadband
+    out += run(hs, 3, a_e2e=0.00, a_ego=0.02)       # u below it
+  steps3 = [abs(out[n] - out[n - 1]) for n in range(1, len(out))]
+  check(f"u dithering across the deadband no longer squares the output "
+        f"(max step {max(steps3):.4f}, p2p {max(out) - min(out):.3f})",
+        max(steps3) <= _HS_CORR_JERK * 0.05 + 1e-9)
 
   # --- the log must not flood ------------------------------------------------------
   # This servo is continuous, not event-based. A per-transition line would put tens of
@@ -140,7 +169,7 @@ def main():
   hs = HoldSpeed()
   lines = []
   hs._log = lambda m: lines.append(m)
-  run(hs, SETTLE + 20 * 60, a_e2e=0.10, a_ego=-0.10)   # one 60 s unbroken correction
+  run(hs, FULL + 20 * 60, a_e2e=0.10, a_ego=-0.10)   # one 60 s unbroken correction
   check(f"a long unbroken correction still reports progress ({len(lines)} lines in 60 s)",
         1 <= len(lines) <= 8)
   check(f"and the line carries the diagnostics ({lines[0][:60] if lines else 'none'}...)",

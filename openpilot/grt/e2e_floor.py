@@ -172,7 +172,8 @@ _FLOOR_JERK = 0.30          # m/s^3. Discretionary acceleration: gentler than th
 # What grows is the worst single step, 0.541 -> 0.741, and that is the IMMEDIATE-DEFERENCE
 # branch: floor at cap, model asks past _ABANDON_ACCEL, floor drops to it in one frame. It is
 # downward, the wire clip stretches it over ~0.15 s, and it must stay instant.
-_FLOOR_MAX = 0.60           # m/s^2 cap. NOTE the planner's cruise candidate is
+_FLOOR_MAX = 0.50           # m/s^2 cap. Operator 2026-08-19: 0.60 helped pace well; 0.50
+                            # trades a little of that back. NOTE the planner's cruise candidate is
                             # clip(v_cruise - v_ego, -1.2, ACCEL_MAX=2.0), so it only opposes
                             # this floor once the deficit is under 0.60 m/s (2.2 km/h).
                             # min() does NOT bound us in between -- this cap is the real limit.

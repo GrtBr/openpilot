@@ -76,6 +76,14 @@ _HS_SMOOTH = 1.00         # s, the raw under-delivery estimate is noisy
 _HS_GAIN = 3.0            # m/s^2 per m/s^2 of under-delivery. See the closed-loop table.
 _HS_DEAD = 0.05           # m/s^2, ignore under-delivery smaller than this
 _HS_CAP = 0.30            # m/s^2 cap on the correction
+# RATE LIMIT on the correction. Added 2026-08-19 after the operator reported jerking on
+# three uphill windows. Cause was mine: with GAIN 3.0 and DEAD 0.05 the correction saturates
+# once u > 0.15, so the whole transition band is 0.10 wide in a NOISY signal -- the servo was
+# effectively bang-bang, slamming 0.000 <-> 0.300 every ~150 ms while the model's own output
+# sat flat at ~0.00 and the plan source never changed. Hook 6 has always rate-limited its
+# floor; this had nothing. Symmetric, same value as hook 6's floor, so a full-scale swing
+# takes 1.0 s instead of one frame.
+_HS_CORR_JERK = 0.30      # m/s^3
 _HS_MIN_SPEED = 8.33      # m/s == 30 km/h, same floor as hook 6
 _HS_MIN_HEADROOM = 0.28   # m/s == 1 km/h. Never push past the set speed; cruise owns that.
 
@@ -98,6 +106,7 @@ class HoldSpeed:
   def __init__(self):
     self.cmd_hist = deque(maxlen=_LAG_N + 1)
     self.u_hist = deque(maxlen=_SMOOTH_N)
+    self.corr = 0.0           # rate-limited correction actually applied
     self.stats = {"frames_correcting": 0, "frames_capped_at_zero": 0,
                   "frames_at_cap": 0, "inactive": 0, "bursts": 0}
     # burst accounting for the throttled log
@@ -135,9 +144,18 @@ class HoldSpeed:
     self.b_zero_capped = 0
     self.b_reported = 0.0
 
+  def _ramp(self, target: float) -> float:
+    """Move the applied correction toward `target` at _HS_CORR_JERK. Symmetric: the way OUT
+    must be rate-limited too, or releasing the correction is itself a step."""
+    step = _HS_CORR_JERK * DT_MDL
+    self.corr = min(target, self.corr + step) if target > self.corr \
+        else max(target, self.corr - step)
+    return self.corr
+
   def reset(self):
     self.cmd_hist.clear()
     self.u_hist.clear()
+    self.corr = 0.0
 
   def update(self, a_e2e: float, a_commanded: float, a_ego: float, v_ego: float,
              v_cruise: float, aggressive: bool, long_pid: bool, driver_input: bool,
@@ -149,7 +167,7 @@ class HoldSpeed:
       self.stats["inactive"] += 1
       self._end_burst(v_ego)
       self.reset()
-      return a_e2e
+      return a_e2e                       # preconditions gone: hard release is correct here
 
     self.cmd_hist.append(a_commanded)
     if len(self.cmd_hist) < self.cmd_hist.maxlen:
@@ -163,27 +181,29 @@ class HoldSpeed:
 
     if v_cruise - v_ego < _HS_MIN_HEADROOM:
       self._end_burst(v_ego)
-      return a_e2e                       # at the set speed; cruise owns it from here
+      corr = self._ramp(0.0)             # ramp out, do not step out
+      return a_e2e + corr if corr > 0.0 else a_e2e
 
-    corr = min(_HS_CAP, max(0.0, _HS_GAIN * (u - _HS_DEAD)))
+    target = min(_HS_CAP, max(0.0, _HS_GAIN * (u - _HS_DEAD)))
+
+    # THE ZERO CAP IS FOLDED INTO THE TARGET, NOT CLAMPED ONTO THE OUTPUT.
+    # Clamping the output was the cause of the 2026-08-19 jerking, and it is the SAME defect
+    # as hook 6's 08-16 zero-crossing bug -- a hard clamp on a signal that crosses zero. The
+    # model wanders across zero continuously, so `out = min(0, a_e2e + corr)` toggled between
+    # 0.00 and ~0.31 frame to frame and squared the command. Folding the limit into the target
+    # lets the rate limiter smooth the transition instead.
+    if a_e2e < 0.0:
+      # Undo over-braking down to coasting, never accelerate against a deceleration request.
+      capped_target = max(0.0, -a_e2e)
+      if capped_target < target:
+        self.b_zero_capped += 1
+        self.stats["frames_capped_at_zero"] += 1
+      target = min(target, capped_target)
+
+    corr = self._ramp(target)
     if corr <= 0.0:
       self._end_burst(v_ego)
       return a_e2e
-
-    out = a_e2e + corr
-    if a_e2e < 0.0:
-      # The model is asking to slow. Undo over-braking down to coasting, but never
-      # accelerate against a deceleration request. This is the operator's constraint and it
-      # costs ~3 km/h of recovery on the 14:06 incident; it is what keeps the feature from
-      # ever commanding acceleration while the model wants the opposite.
-      capped = min(0.0, out)
-      if capped != out:
-        self.stats["frames_capped_at_zero"] += 1
-        self.b_zero_capped += 1
-      out = capped
-      if out <= a_e2e:
-        self._end_burst(v_ego)
-        return a_e2e
 
     self.stats["frames_correcting"] += 1
     if corr >= _HS_CAP - 1e-9:
@@ -199,4 +219,4 @@ class HoldSpeed:
       self.stats["bursts"] += 1
       self._log(self._burst_line("correcting", v_ego))
       self.since_log = 0.0
-    return out
+    return a_e2e + corr

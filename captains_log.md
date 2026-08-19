@@ -77,6 +77,75 @@ fork, so it is not committed. Move it in only if that is an explicit decision.
 
 ---
 
+## 2026-08-19 (later) — hook 8 JERKING: my bug, the SAME zero-crossing defect a third time
+
+Operator: hook 8 "helped speed pretty well but jerking is still an issue", three uphill
+windows 10:21 / 10:25 / 10:29.
+
+**Not the ECU, not the model, not the plan source.** Attribution over those windows:
+
+```
+10:21:00.897  a_cmd +0.000 -> +0.303   raw +0.003 -> +0.003   src e2e->e2e
+10:21:01.047        +0.301 -> +0.000   raw -0.009 -> -0.009
+10:21:01.198        +0.000 -> +0.306   raw +0.006 -> +0.006
+```
+
+Model output flat, plan source unchanged, and the command slamming between 0.000 and 0.30 --
+exactly hook 8's cap -- every ~150 ms. Of the steps >0.08: 0% at a source change, 0% where
+the model also stepped. All mine.
+
+**TWO defects, and the second is the important one.**
+
+1. Hook 8 had NO rate limit on its correction, unlike hook 6's floor. With GAIN 3.0 and
+   DEAD 0.05 the correction saturates once u > 0.15, so the transition band is 0.10 wide in a
+   noisy signal -- effectively bang-bang. Added `_HS_CORR_JERK = 0.30` m/s^3, symmetric.
+
+2. **That alone barely helped (0.306 -> 0.294).** The real cause was the ZERO CAP applied as a
+   hard clamp on the OUTPUT:
+
+   ```
+   a_e2e = -0.02, corr = 0.30  ->  out = min(0, 0.28) = 0.00
+   a_e2e = +0.01, corr = 0.30  ->  out = 0.31            <- 0.31 step
+   ```
+
+   The model wanders across zero continuously, so the cap toggled and squared the command.
+   **This is the identical defect to hook 6's 08-16 zero-crossing bug** -- a hard clamp on a
+   signal that crosses zero -- reintroduced in a new hook eight days later. Fixed by folding
+   the cap into the TARGET so the rate limiter smooths it, rather than clamping the output.
+
+**Result over the three windows:**
+
+| window | max step old -> new | steps >0.08 old -> new |
+|---|---|---|
+| 10:21 | 0.306 -> **0.037** | 9 -> **0** |
+| 10:25 | 0.433 -> 0.180 | 20 -> **4** |
+| 10:29 | 0.300 -> **0.033** | 5 -> **0** |
+
+10:25 is the 46->86 km/h acceleration window; the residual 4 steps are partly the model's own
+(it steps 0.096 there). NOT fully resolved in that case.
+
+**`_FLOOR_MAX` 0.60 -> 0.50** at the operator's request in the same change.
+
+### Answering "is there a downstream block for jerk?"
+
+Yes -- `opendbc/car/hyundai/hyundaicanfd.py: create_acc_control`:
+
+```
+jerk = 5;  jn = jerk / 50                      # 0.1 m/s^2 per CAN frame -> ~5 m/s^3 wire clip
+a_val = np.clip(accel, accel_last - jn, accel_last + jn)
+"JerkLowerLimit": jerk if enabled else 1       # 5.0, hardcoded
+"JerkUpperLimit": 3.0                          # hardcoded
+```
+
+The two `Jerk*Limit` signals are sent TO the Hyundai SCC and tell the ECU how hard to act on a
+given `aReqValue`; sunnypilot makes them speed-dependent (ISO 15622), we do not. That IS the
+right place for "how harshly does the ECU apply a request".
+
+But it was the WRONG place for this fault: the command itself was a square wave, and the wire
+clip at ~5 m/s^3 could only smear a 6 m/s^3 demand, not remove it. Fixing it downstream would
+have masked my defect. Worth revisiting later if the ECU's response to a *clean* command still
+feels harsh.
+
 ## 2026-08-19 — hook 8 DEPLOYED, plus throttled burst logging
 
 Hook 8 (under-delivery servo) is live on the car at `656937c`, verified after reboot:
