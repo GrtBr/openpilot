@@ -246,7 +246,8 @@ def test_auto_adopt_upward():
   engaged_at(t, sm, 100.0)
   sm.set_limit(120.0)
   out = run(t, sm, 100.0, STABLE + 2)
-  check("adopts upward 100 -> 120 while tracking", out == 120.0, f"got {out}")
+  # the raw limit is 120 but the automatic path may not command above AUTO_MAX_KPH
+  check("adopts upward 100 -> 120, capped to AUTO_MAX_KPH", out == 110.0, f"got {out}")
 
 
 def test_chained_adoptions():
@@ -263,13 +264,14 @@ def test_big_drop_prompts_even_while_tracking():
   """The user's absolute safety rule: >20 km/h always asks, tracking or not."""
   t = make_tracker()
   sm = FakeSM()
-  engaged_at(t, sm, 120.0)
-  sm.set_limit(80.0)
-  out = run(t, sm, 120.0, STABLE + 2)
-  check("120 -> 80 (delta 40) does NOT auto-adopt", out == 120.0, f"got {out}")
+  # Both limits below AUTO_MAX_KPH so the cap plays no part -- this test is about the >20 rule.
+  engaged_at(t, sm, 100.0)
+  sm.set_limit(60.0)
+  out = run(t, sm, 100.0, STABLE + 2)
+  check("100 -> 60 (delta 40) does NOT auto-adopt", out == 100.0, f"got {out}")
   check("...it prompts for confirmation instead",
-        t.pending_limit_kph == 80.0 and t.last_action == "pending", t.last_action)
-  check("...and says why", t.tracking is True)
+        t.pending_limit_kph == 60.0 and t.last_action == "pending", t.last_action)
+  check("...even though the feature owned the set speed", t.tracking is True)
 
 
 def test_confirm_restores_tracking():
@@ -405,16 +407,69 @@ def test_no_preauthorisation_when_driver_owns_set_speed():
 
 
 def test_driver_set_round_speed_auto_adopts():
-  """REPORTED 2026-08-06, verbatim: set 110 by hand, new limit 120 -> must AUTO change, not ask.
-  Ownership used to be a third auto condition and made this prompt."""
+  """REPORTED 2026-08-06: a round speed the DRIVER dialled in must still auto-track (ownership is
+  not an auto condition). Uses 90->100 so the AUTO_MAX_KPH cap does not confuse the issue --
+  the original 110->120 example is now capped, see test_auto_cap_binds_silently."""
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 80.0)
+  out = 90.0                                 # driver dials in their own round speed
+  sm.set_limit(100.0)                        # +10, within band, both below the cap
+  out = run(t, sm, out, STABLE + 2)
+  check("driver-set 90 + limit 100 -> AUTO adopts (no prompt, ownership not required)",
+        out == 100.0 and t.pending_limit_kph is None, f"out {out} pending {t.pending_limit_kph}")
+
+
+def test_auto_cap_binds_silently():
+  """The 08-06 example under the 08-07 cap: the feature would want 120 but may only command 110,
+  so the set speed simply stays where it is. It must NOT prompt -- there is nothing to ask."""
   t = make_tracker()
   sm = FakeSM()
   engaged_at(t, sm, 100.0)
-  out = 110.0                                # driver dials in their own round speed
-  sm.set_limit(120.0)                        # +10, within band
-  out = run(t, sm, out, STABLE + 2)
-  check("driver-set 110 + limit 120 -> AUTO adopts (no prompt)",
-        out == 120.0 and t.pending_limit_kph is None, f"out {out} pending {t.pending_limit_kph}")
+  sm.set_limit(120.0)
+  out = run(t, sm, 110.0, STABLE + 2)
+  check("set 110 + limit 120 -> capped at 110, no prompt",
+        out == 110.0 and t.pending_limit_kph is None, f"out {out} pending {t.pending_limit_kph}")
+
+
+def test_cap_never_claws_back_a_manual_choice_above_it():
+  """REPORTED 2026-08-19: the driver must be able to hold a speed above the cap with the buttons.
+  Without the guard, 130 on a 120 road gets dragged to 110 every REOFFER_S forever."""
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  sm.set_limit(120.0)
+  out = run(t, sm, 130.0, STABLE + 2)
+  check("driver-set 130 + limit 120 (both above cap) -> left alone",
+        out == 130.0 and t.pending_limit_kph is None, f"out {out} pending {t.pending_limit_kph}")
+  check("...logged as such", t.last_action == "above_auto_cap", t.last_action)
+  # and it must not creep back after the re-offer cooldown
+  out = run(t, sm, out, int(ss.REOFFER_S / 0.01) + STABLE + 50)
+  check("...and still left alone after the re-offer cooldown", out == 130.0, f"got {out}")
+
+
+def test_road_below_the_cap_still_asks_even_when_driver_is_above_it():
+  """The asymmetry: if the ROAD asks for a reduction, the guard must not swallow it."""
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 100.0)
+  sm.set_limit(60.0)                         # well below the cap -- the road IS asking
+  out = run(t, sm, 130.0, STABLE + 2)
+  check("driver-set 130 + limit 60 -> still prompts",
+        out == 130.0 and t.pending_limit_kph == 60.0, f"out {out} pending {t.pending_limit_kph}")
+
+
+def test_confirm_bypasses_the_auto_cap():
+  """The prompt names a number; accepting it must deliver that number. A confirmation IS the
+  manual +/- override the cap is not meant to block."""
+  t = make_tracker()
+  sm = FakeSM()
+  engaged_at(t, sm, 60.0)
+  sm.set_limit(120.0)                        # +60 -> out of band -> prompts
+  out = run(t, sm, 60.0, STABLE + 2)
+  assert t.pending_limit_kph == 120.0, t.pending_limit_kph
+  out = t.update(sm, fake_cs([button(ButtonType.accelCruise)]), out, True)
+  check("confirming a 120 limit delivers 120, not the 110 cap", out == 120.0, f"got {out}")
 
 
 def test_driver_set_non_round_speed_still_prompts():

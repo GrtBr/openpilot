@@ -95,12 +95,17 @@ SPEED_EPS_KPH = 0.5
 # Plausibility band for a posted limit, in km/h. Anything outside is ignored outright rather
 # than clamped — clamping would silently turn a garbage value into a legal set speed. This also
 # traps a units error: mapd publishes m/s, so a km/h value leaking through reads ~3.6x high.
+# The cap on what the FEATURE may command — NOT a cap on the driver (operator, 2026-08-19).
+# V_CRUISE_MAX stays at upstream's 145 so the steering-wheel +/- buttons can go above this; the
+# automatic path (seed, auto-adopt, confirm) never commands more than AUTO_MAX_KPH.
+AUTO_MAX_KPH = 110.0
+
 MIN_LIMIT_KPH = 20.0
 # Deliberately a literal, NOT float(V_CRUISE_MAX). V_CRUISE_MAX is the operator's cap on how fast
 # they will let the car travel (110); this is "is that a plausible POSTED LIMIT?". Tying them
 # together would make a real 120 limit read as implausible and silently switch the feature off on
 # exactly the roads it matters most, with the heartbeat reporting a reassuring `implausible_limit`.
-# A 120 limit is recognised here and then clamped to V_CRUISE_MAX by _clamped().
+# A 120 limit is recognised here and then clamped to AUTO_MAX_KPH by _clamped().
 MAX_LIMIT_KPH = 145.0
 
 # waySelectionType values that mean mapd actually knows which way we are on. `fail` is what it
@@ -308,10 +313,15 @@ class SetSpeedLimitTracker:
     self._acted_declined = declined
 
   @staticmethod
-  def _clamped(limit_kph: float) -> float:
-    # Same result as upstream's `np.clip(round(v, 1), V_CRUISE_MIN, V_CRUISE_MAX)` for a scalar.
-    # Plain min/max so this module has no numpy dependency and stays testable off-device.
-    return float(min(max(round(limit_kph, 1), V_CRUISE_MIN), V_CRUISE_MAX))
+  def _clamped(limit_kph: float, cap: bool = True) -> float:
+    """`cap=True` (the automatic path: seed and auto-adopt) stops at AUTO_MAX_KPH — the feature
+    never SILENTLY commands more than that. `cap=False` is for a limit the driver explicitly
+    CONFIRMED with the +/- buttons: the prompt named a number, so accepting must deliver that
+    number, and a button press is exactly the manual override the cap is not meant to block.
+    Either way the result is still clamped to upstream's V_CRUISE_MAX.
+    Plain min/max so this module has no numpy dependency and stays testable off-device."""
+    ceiling = min(AUTO_MAX_KPH, V_CRUISE_MAX) if cap else V_CRUISE_MAX
+    return float(min(max(round(limit_kph, 1), V_CRUISE_MIN), ceiling))
 
   @staticmethod
   def _button(CS, which) -> bool:
@@ -442,7 +452,7 @@ class SetSpeedLimitTracker:
       reject_btn = "decelCruise" if self._pending_is_increase else "accelCruise"
 
       if self._button(CS, accept_btn):
-        adopted = self._clamped(self.pending_limit_kph)
+        adopted = self._clamped(self.pending_limit_kph, cap=False)
         self._take_ownership(adopted)
         self._authorise(self.pending_limit_kph)
         self.pending_limit_kph = None
@@ -531,6 +541,25 @@ class SetSpeedLimitTracker:
     # same limit is reconsidered once mapd settles on `current`.
     if delta > 0 and self._way not in GOOD_WAY_SELECTION_UP:
       self._heartbeat("defer_up_on_predicted", v_cruise_kph, limit_kph)
+      return v_cruise_kph
+
+    # THE CAP MUST NOT CLAW BACK A DELIBERATE MANUAL CHOICE (operator, 2026-08-19).
+    # If the driver has pushed the set speed above AUTO_MAX_KPH and the posted limit is ALSO
+    # above it, then nothing about the road is asking them to slow — only our own cap would, and
+    # they overrode it on purpose. Without this, a driver at 130 on a 120 road gets dragged to
+    # 110, pushes + back to 130, and gets dragged again every REOFFER_S. Forever.
+    #
+    # Note the asymmetry: if the posted limit is BELOW the cap (a 60 zone), the ROAD is asking
+    # for the reduction, so the normal rules apply and they get the usual prompt.
+    # `limit_kph <= v_cruise_kph` matters: if the road OFFERS more than the driver is doing
+    # (116 with a 120 limit) there is a real decision to put to them, and confirming it bypasses
+    # the cap. Only suppress when the road is not offering an increase and our cap alone would
+    # pull them down.
+    if (v_cruise_kph > AUTO_MAX_KPH and limit_kph > AUTO_MAX_KPH
+        and limit_kph <= v_cruise_kph):
+      self._mark_acted(limit_kph)
+      self._log("above_auto_cap", limit_kph, v_cruise_kph, None,
+                why="driver_chose_above_cap_and_road_does_not_ask")
       return v_cruise_kph
 
     self._mark_acted(limit_kph)
