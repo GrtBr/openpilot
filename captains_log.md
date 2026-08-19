@@ -64,9 +64,12 @@ Release reasons: `model objected (Ns)`, `model withdrawing`, `lead appeared`, `t
 2. **relaxed → aggressive DURING a ramp** is still untested on road. Bounded at +0.550 m/s^2
    by the synthetic test; the real 08-16 transitions peaked at 0.008 because hook 7 never
    bound. To provoke: select relaxed, get a real acceleration going, switch mid-ramp.
-3. **The uphill droop is still unfixed** and remains the larger defect (7 km/h under set for
-   100 s on grade with ECU torque headroom; root cause `kp = ki = 0`, no grade input to
-   either branch). Neither hook addresses it.
+3. **Set-speed oscillation** — the cruise branch running as a raw P term at near-zero error.
+   Mechanism confirmed 08-19; recorder deployed to capture the internal `v_cruise` so the
+   filter can be fitted to measured data. Awaiting a drive.
+
+CLOSED: mapd `v_cruise` clamping (operator: working as intended, 08-19). The uphill droop is
+addressed by hook 8 as of 08-19 — operator reports speed-up ramp and drooping both solved.
 
 ### Where the analysis lives
 
@@ -76,6 +79,25 @@ timestamps, GPS-derived grade and driving history, and `nightly-dev` pushes to a
 fork, so it is not committed. Move it in only if that is an explicit decision.
 
 ---
+
+## 2026-08-19 — mapd v_cruise clamping: CLOSED, not a defect
+
+Operator's determination: the mapd speed-limit / curve clamping is working as intended and is
+NOT relevant to any of the reported complaints. **Do not re-raise it.**
+
+I flagged it three times as the most worthwhile thing to chase — 08-17 09:16 (~52.8 km/h),
+08-18 11:25 (~53 then ~82) — on the grounds that the model wanted +1.0 to +1.4 while `cruise`
+held the car to +0.001, and that the dash showed 110 while the internal target was far lower.
+
+That observation was correct; the **interpretation** was wrong. A large gap between the
+driver-facing set speed and the internal target is what a map speed-limit layer is FOR. I read
+"the car will not accelerate to the number on the dash" as a defect, when the operator had
+deliberately tuned that layer (`map_curve_target_lat_a` = 2.025, 08-04) and it was doing its
+job. Knowing the roads is domain knowledge I do not have and cannot infer from the logs.
+
+Worth keeping as a general caution: three of the "why won't it accelerate" reports traced to a
+subsystem behaving correctly. A component being the PROXIMATE cause of a behaviour is not
+evidence that the behaviour is wrong.
 
 ## 2026-08-19 (evening) — A/B loop, and a TEMPORARY cruise recorder
 
