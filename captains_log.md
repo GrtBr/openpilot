@@ -2125,6 +2125,44 @@ right at the sign. APPROACH_DECEL stays at 0.5; do not touch it without new evid
 (My episode detector found 0 episodes this drive because it keyed off a large speed error at the
 FIRST frame, which the profile no longer produces. The binding-frames metric replaces it.)
 
+## 2026-08-19 (later) — cap split DEPLOYED to comma4
+
+Device on `6c0f45c`, AGNOS 18.7, clean tree, healthy. 7.7 KB bundle, 2 commits, clean
+fast-forward, manager back on the first poll.
+
+The device was **offline on the first attempt** ("No route to host"); it returned after ~2 min.
+It was also further along than I expected — at `01388ee` (the hook-8 jerk fix from another
+session) — but `git merge-base --is-ancestor` confirmed that was an ancestor of this branch, so
+the fast-forward carried it forward untouched. Deriving the range from the device's ACTUAL HEAD
+rather than a remembered one keeps catching this.
+
+Verified BEFORE the reboot — schema 30/30, suites 43 / 44 / 77 — and the whole point of the
+change confirmed against the device's real modules:
+
+```
+V_CRUISE_MAX (driver buttons) = 145
+AUTO_MAX_KPH (feature)        = 110.0
+MAX_LIMIT_KPH (plausibility)  = 145.0
+auto    _clamped(120)         = 110.0
+confirm _clamped(120, cap=F)  = 120.0
+```
+
+Three constants, three different jobs, none of them tied to each other — which is exactly what
+the last two rounds of bugs were about.
+
+Verified AFTER the reboot: all processes up incl. `soundd`/`micd`; `managerState` reports nothing
+missing; `onroadEvents` only `wrongGear`/`seatbeltNotLatched` — **no `commIssue`, no
+`processNotRunning`**, engagement not blocked; `longitudinalPlan VALID=True`; `grtSetSpeedState`
+at 20 Hz, `active=True`; **zero `grt:` exceptions**.
+
+**On the next drive:**
+1. **The reported case** — push the set speed above 110 with the +/- buttons and confirm it stays
+   there, including through a limit change on a road posted above 110.
+2. On a 120 road the feature settles at **110** and leaves it. If that is not what is wanted,
+   `AUTO_MAX_KPH` is the single knob — but it is the operator's call, not a default to change
+   quietly.
+3. Accepting a prompt for a limit above the cap gives the **posted** number, not 110.
+
 ## 2026-08-19 — the 110 cap now binds the FEATURE, not the driver's buttons
 
 Operator: the auto 110 cap works fine, but the steering-wheel +/- buttons must be able to go
