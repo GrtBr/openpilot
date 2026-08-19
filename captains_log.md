@@ -77,6 +77,73 @@ fork, so it is not committed. Move it in only if that is an explicit decision.
 
 ---
 
+## 2026-08-19 (evening) — A/B loop, and a TEMPORARY cruise recorder
+
+Operator drove the same loop twice, aggressive then relaxed. Best evidence yet.
+
+### The hooks are not the remaining pebble
+
+| window | a_cmd sd | maxstep | steps>0.08 | rev/min | cmd 1-3Hz | hook-raised |
+|---|---|---|---|---|---|---|
+| 14:23-24 AGG "obvious hunting" | 0.046 | 0.061 | 0 | **70** | **8%** | **0%** |
+| 14:48-50 AGG "hunting" | 0.104 | 0.045 | 0 | 1 | 2% | 35% |
+| 14:55 RELAXED "stutter" | 0.086 | 0.548 | 3 | 3 | 6% | 1% |
+
+The WORST-rated window had the hooks doing nothing. Like-for-like over the whole loop,
+relaxed actually had MORE and LARGER discrete steps than aggressive (8 vs 2, maxstep 1.137 vs
+0.536); aggressive has higher continuous variation (sd 0.173 vs 0.134) because the hooks work
+20% of the time. Different textures -- "busy" versus "occasionally lumpy".
+
+### 14:23-14:24 is the CRUISE branch
+
+```
+plan source: cruise 89%, e2e 11%
+corr(a_cmd, plan.accels[0]) = +0.979
+corr(a_cmd, model_raw)      = -0.292
+```
+
+Car pinned at 110 against a 110 set, mean headroom +0.1 km/h. `a_cmd` tracks the planner's own
+output and is NEGATIVELY correlated with the model. The cruise candidate is a raw P term,
+gain 1.0/s, on a `v_ego` that ripples +/-0.4 km/h -> +/-0.11 m/s^2 at ~1 Hz.
+
+Root cause is the same architectural pattern found twice before: `get_cruise_accel` skips
+`j_cruise` under `if not e2e:`, exactly as it skips the lateral-accel and coast limits, on the
+assumption that e2e is the binding constraint. At set speed it is not.
+
+**Restoring `j_cruise` will NOT fix it.** At 110 km/h it is 0.725 m/s^3; the oscillation needs
+only ~0.37 m/s^3 to sustain and would pass straight through. Necessary hygiene, not a fix.
+
+### The retraction, and why the recorder exists
+
+I first "confirmed" the mechanism from a trace sampled 1.5 s apart -- that was aliasing. Then
+I reconstructed `a_cruise = clip(carState.vCruise/3.6 - v_ego, ...)` and got a SMOOTH signal
+(0 rev/min) that did not reproduce the 70 rev/min symptom, and retracted the mechanism.
+
+Both were wrong. `carState.vCruise` is the DRIVER-FACING set speed, not the internal one --
+`limit_v_cruise` lowers it for mapd, and on 08-18 the dash read 110 while the internal target
+was ~53. The reconstruction failed on a missing input, not a wrong theory. The plan-source and
+correlation evidence above then confirmed the original mechanism.
+
+**NEW `openpilot/grt/cruise_log.py`**, wired into hook 5 -- the only place that sees
+`v_cruise` AFTER `limit_v_cruise` together with `v_ego` and the raw cruise candidate. Writes
+one CSV row per planner tick to `<GRT_CONFIG_DIR>/cruise_log.csv`, buffered every 100 rows so
+the 20 Hz loop never waits on the filesystem, capped at 50 MB, latched off on any failure.
+Changes NO behaviour -- the hook returns its input untouched.
+
+**TEMPORARY. Remove once the cruise filter is fitted and shipped.**
+
+Tests (`test_cruise_log.py`, 9/9) assert the properties that matter for something running
+inside plannerd: never raises whatever the filesystem does, latches off rather than retrying
+every frame, buffers, and stops at the cap.
+
+### Why the filter is not being guessed at
+
+Every previous change was replayed against real logs before going near the car. This one
+cannot be -- the key signal is not recorded. Hence: log first, drive once, THEN fit. The
+planned shape is a light low-pass (tau ~0.3-0.5 s) on the cruise term, faded out by magnitude
+so genuine braking is never delayed, and blended rather than thresholded -- three separate
+bugs this week came from hard thresholds on signals that cross zero.
+
 ## 2026-08-19 (later) — hook 8 JERKING: my bug, the SAME zero-crossing defect a third time
 
 Operator: hook 8 "helped speed pretty well but jerking is still an issue", three uphill

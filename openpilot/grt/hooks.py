@@ -190,6 +190,15 @@ def soften_cruise_decel(a_cruise: float, v_cruise: float, v_ego: float) -> float
       approach profile keeps full authority and its late-hazard self-escalation still works.
     * it is skipped when v_cruise is ~0, which is how `forceDecel` demands a stop.
   """
+  # TEMPORARY (2026-08-19): record the INTERNAL cruise inputs. This hook is the only place
+  # that sees v_cruise AFTER limit_v_cruise together with v_ego and the raw cruise candidate,
+  # and none of those three reach any logged message -- which is why the 14:23 set-speed
+  # oscillation could not be reconstructed offline. Records only; changes nothing.
+  # REMOVE once the cruise filter is fitted and shipped.
+  cl = _cruise_log_singleton()
+  if cl is not None:
+    cl.record(v_cruise, v_ego, a_cruise)
+
   try:
     if a_cruise >= -COAST_DECEL:
       return a_cruise                     # already gentler than the floor
@@ -422,11 +431,30 @@ def _enum_is_aggressive(personality) -> bool:
 # ----------------------------------------------------------------------------------------
 # Hook 7 — rising-edge jerk cap on the final accel command, RELAXED personality only.
 # ----------------------------------------------------------------------------------------
+_cruise_log = None
+_cruise_log_broken = False
+
 _hold_speed = None
 _hold_speed_broken = False
 
 _accel_ramp = None
 _accel_ramp_broken = False
+
+
+def _cruise_log_singleton():
+  """TEMPORARY diagnostic recorder; see grt/cruise_log.py. Latched off on any failure."""
+  global _cruise_log, _cruise_log_broken
+  if _cruise_log_broken:
+    return None
+  if _cruise_log is None:
+    try:
+      from openpilot.grt.cruise_log import CruiseLog
+      _cruise_log = CruiseLog()
+    except Exception:
+      _cruise_log_broken = True
+      _log_exception("cruise_log construction; cruise diagnostic disabled")
+      return None
+  return _cruise_log
 
 
 def _hold_speed_singleton():
