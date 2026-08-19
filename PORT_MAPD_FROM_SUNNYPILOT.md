@@ -813,11 +813,32 @@ and only the ramp. Pre-authorisation additionally requires the set speed to stil
 the map cannot pull the driver below a number they dialled in even transiently. Cost: after a
 manual set-speed change the ramp stays off until the feature re-takes ownership.
 
-**`V_CRUISE_MAX` 145 → 110** at the same time (operator's cap, §GRT_MODS). The trap: `set_speed.py`
-`MAX_LIMIT_KPH` must **not** track it. Tied together, a real 120 limit reads as *implausible* and
-the feature goes inert on 120 roads while the heartbeat reassuringly logs `implausible_limit`.
-It is a literal 145 — a 120 limit is recognised, then clamped to 110. `at_limit` compares the
-**clamped** limit for the same reason, or a 120 road re-decides every `REOFFER_S` forever.
+**The 110 cap: on the FEATURE, not on the driver (revised 2026-08-19).** It briefly lived in
+upstream as `V_CRUISE_MAX = 145 → 110` — but that is what the steering-wheel +/- buttons clamp
+against, so it capped the driver too. `V_CRUISE_MAX` is back at upstream's 145 (`cruise.py` is
+untouched by the fork again) and the cap is `AUTO_MAX_KPH = 110` inside `set_speed.py`, applied
+in `_clamped()` to what the feature commands.
+
+Three things that fall out, all of which had to be reasoned about rather than found on the road:
+
+- **A confirmation bypasses the cap** (`_clamped(cap=False)`). The prompt names a number;
+  accepting must deliver that number. Otherwise "Speed limit 120 — press RES/+" hands back 110.
+  A button press is precisely the manual override the cap is not meant to block.
+- **The cap must never claw back a manual choice.** A driver at 130 on a 120 road would be pulled
+  to 110, push + back to 130, and be pulled again every `REOFFER_S`, forever. Suppressed when the
+  driver is above the cap AND the limit is above the cap AND the limit is not offering an
+  increase — that last clause because at 116 with a 120 limit the *road* offers more, which is a
+  real decision to put to the driver.
+- **`MAX_LIMIT_KPH` must not track any of this.** It answers "is that a plausible posted limit?"
+  and is a literal 145. Tied to the cap, a real 120 limit reads as *implausible* and the feature
+  goes inert on 120 roads while the heartbeat reassuringly logs `implausible_limit`. `at_limit`
+  compares the **clamped** limit for the same reason, or a 120 road re-decides forever.
+
+**A caps-vs-instructions conflict worth recording:** 2026-08-06 asked that a driver-set 110 with
+a 120 limit auto-adopt to *120*; 2026-08-07 capped automatic at 110. Those cannot both hold. The
+cap won (the operator later confirmed it "works fine"), so that case now caps silently and does
+**not** prompt — there is nothing to ask. When a new instruction contradicts an older one, say so
+and pick, rather than letting a test quietly encode the loser.
 
 ## 11.6 STILL UNVERIFIED — does the confirmation alert render?
 

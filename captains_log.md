@@ -2125,6 +2125,50 @@ right at the sign. APPROACH_DECEL stays at 0.5; do not touch it without new evid
 (My episode detector found 0 episodes this drive because it keyed off a large speed error at the
 FIRST frame, which the profile no longer produces. The binding-frames metric replaces it.)
 
+## 2026-08-19 — the 110 cap now binds the FEATURE, not the driver's buttons
+
+Operator: the auto 110 cap works fine, but the steering-wheel +/- buttons must be able to go
+above it.
+
+**Cause:** I had implemented the cap as `V_CRUISE_MAX = 110` in upstream's `cruise.py` — and that
+constant is exactly what the manual buttons clamp against (`_update_v_cruise_non_pcm`,
+`initialize_v_cruise`). Capping there capped the driver. This is the §0.6 pattern again, in its
+mildest form: the fork holding a limit the driver could not exceed.
+
+**Fix:** `V_CRUISE_MAX` returns to upstream's 145 — **`cruise.py` is untouched by the fork again**,
+one fewer touchpoint, GRT_MODS row removed. The cap moves inside as `AUTO_MAX_KPH = 110`, applied
+in `_clamped()` to what the *feature* commands.
+
+Three consequences, worked through here rather than discovered on the road:
+
+1. **A confirmation bypasses the cap.** The prompt says "Speed limit 120 km/h — press RES/+ to
+   accept"; accepting must give 120, not 110. A button press IS the manual override the cap is
+   not meant to block. `_clamped(cap=False)` on the confirm path only.
+2. **The cap must never claw back a manual choice.** Without a guard, a driver at 130 on a 120
+   road gets dragged to 110, pushes + back to 130, and is dragged again every `REOFFER_S` —
+   forever. Suppressed when the driver is above the cap AND the limit is above the cap AND the
+   limit is not offering an increase. That last clause is load-bearing: at 116 with a 120 limit
+   the ROAD offers more, so it is still a real decision to put to the driver.
+3. **Seeding on a 120 road now yields 110**, so a driver sitting at 120 is no longer "owned" by
+   the feature. One existing test was incidentally asserting the opposite.
+
+### Two of your instructions genuinely conflicted, and I picked
+
+- **08-06:** "I set cruise to 110 and the new limit is 120 — I expect it to auto change to 120."
+- **08-07:** "V_CRUISE_MAX ... tone it down to 110."
+
+Both cannot hold: the first requires commanding 120 automatically, the second forbids it. **The
+cap won**, since you have since said it works fine. So 110 + a 120 limit now caps silently and
+does **not** prompt — there is nothing to ask, and confirming would be the only way to reach 120
+(which the buttons now also allow directly).
+
+The 08-06 test was rewritten to 90 → 100, which is what it was actually for (ownership is not an
+auto condition), and a new test covers the capped 110 + 120 case. **Lesson recorded in the plan:
+when a new instruction contradicts an older one, say so and choose — do not let a test quietly
+encode the loser.**
+
+Tests: 43 scc_map, 44 hooks, 77 set_speed (5 new), 30/30 schema. **NOT YET DEPLOYED.**
+
 ## 2026-08-07 (later) — set-speed-is-final + 110 cap DEPLOYED to comma4
 
 Device on `b500214`, AGNOS 18.7, clean tree, healthy. 12 KB bundle from the device's actual HEAD
