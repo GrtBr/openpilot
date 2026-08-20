@@ -11,7 +11,8 @@ the `min()`:
 
 where `a_cruise = clip(v_cruise - v_ego, A_CRUISE_MIN, max_accel)` and `A_CRUISE_MIN = -1.2`.
 
-So there are two natural injection points:
+That `min()` is the whole injection surface. Hooks 1 and 2 were the first two points found;
+hooks 5-9 were added later and are listed further down.
 
   hook 1  `limit_v_cruise()`          — lower the v_cruise ceiling before `get_cruise_accel`.
                                         A lower ceiling makes `a_cruise` negative and the
@@ -37,6 +38,56 @@ can be enabled separately during on-car testing, per the phased rollout.
                                         (`VCruiseHelper.v_cruise_kph`) to follow the posted
                                         limit. See grt/set_speed.py. Hooks 1/2 shape how the
                                         car drives; hook 3 changes what the driver reads.
+
+THE LONGITUDINAL-COMFORT HOOKS (5-9)
+------------------------------------
+Hooks 1/2/3 are about WHERE the car should slow down. Hooks 5-9 are about HOW the commanded
+acceleration is delivered, and they came out of on-road reports rather than map data.
+
+  hook 5  `soften_cruise_decel()`      — after `get_cruise_accel`. Raises the cruise branch's
+                                        braking floor to `-COAST_DECEL` (0.5) for PLAIN
+                                        overspeed, so coasting back to the set speed does not
+                                        brake at the full A_CRUISE_MIN = -1.2. Skipped when
+                                        hook 1 lowered v_cruise this frame, and when v_cruise
+                                        is ~0 (forceDecel). KNOWN DEFECT: that skip-guard is
+                                        `target < v_cruise`, which reads False once hook 3 has
+                                        moved the set speed itself down to the posted limit --
+                                        so a mapd-driven approach IS softened when the
+                                        docstring promises it is not.
+
+  hook 6  `floor_e2e_accel()`          — grt/e2e_floor.py. Offers back headroom the model
+                                        leaves unused below the set speed. AGGRESSIVE ONLY.
+                                        **The only hook in this fork that can make the car
+                                        less cautious** -- it raises a candidate, and raising
+                                        a candidate is how it stops winning the `min()`.
+
+  hook 8  `HoldSpeed`                  — grt/hold_speed.py, invoked from inside the same shim
+                                        as hook 6 and combined with `max()`. A disturbance-
+                                        rejection servo: makes the car actually DELIVER what
+                                        the model asked, correcting the droop on grades and
+                                        into headwinds. AGGRESSIVE ONLY.
+
+  hook 9  `AggressiveCandidateRamp`    — grt/accel_ramp.py, applied at the END of the same
+                                        shim. Rising-edge jerk cap on the combined candidate,
+                                        BEFORE the `min()`. Can only LOWER the candidate, so
+                                        the planner can only become more conservative.
+                                        AGGRESSIVE ONLY.
+
+  hook 7  `ramp_relaxed_accel()`       — grt/accel_ramp.py. Rising-edge jerk cap on the FINAL
+                                        command, AFTER the `min()`, so it shapes delivery of
+                                        whichever candidate won rather than biasing the
+                                        choice. RELAXED ONLY. Note hook 7 and hook 9 share a
+                                        module and a shape but never both apply.
+
+PERSONALITY IS THE SWITCH for 6/8/9 -- operator's explicit decision (2026-08-14): no feature
+param, because selecting a different personality is a control the driver already has on the
+wheel and can use mid-drive. Do not add a param gate without asking.
+
+WHY 6/8/9 EXIST AT ALL: `modeld` never receives the set speed (its inputs are `desire_pulse`,
+`traffic_convention`, `action_t` and frames), so the model CANNOT hold a speed -- it emits a
+comfortable acceleration for the scene. The planner's only speed controller is the cruise
+candidate, which `min()` discards whenever the model is more conservative. The component that
+knows the target cannot win; the component that wins does not know the target.
 """
 from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 

@@ -3514,3 +3514,60 @@ worst shortfall of 1.22 m/s^2 (7.9 h fleet); hook 9 @1.0 binds 0.49% with a wors
 in effect. The appearance cannot be fixed by raising the constant: J=1.5 binds 0.03%, J=2.0 binds
 0.00%, and hook 9's whole benefit (22.1 -> 21.7 rev/min) lives in that 0.49%. Documented in
 accel_ramp.py so it is not "tidied" later.
+
+---
+
+## CURRENT STATE — longitudinal comfort (as of 2026-08-20, end of session)
+
+This log is long and contains several RETRACTIONS from the same day. Read this block before
+acting on anything above it.
+
+### On the car (comma4, commit `59fbcf3a8`, deployed and rebooted 2026-08-20)
+
+| hook | file | personality | what it does |
+|---|---|---|---|
+| 5 | `hooks.py` | all | cruise braking floor `-COAST_DECEL` (0.5) for plain overspeed |
+| 6 | `e2e_floor.py` | aggressive | offers back unused headroom below the set speed |
+| 7 | `accel_ramp.py` | **relaxed** | rising-edge jerk cap 1.5 m/s^3 on the FINAL command |
+| 8 | `hold_speed.py` | aggressive | under-delivery servo + **EMA tau 1.0 s** (new today) |
+| 9 | `accel_ramp.py` | aggressive | rising-edge jerk cap 1.0 m/s^3 on the CANDIDATE (new today) |
+
+94 tests pass on device. 0 grt hook failures since boot.
+
+### SOLVED and operator-confirmed
+* speed-up ramp (hook 7) and speed droop (hook 8) — "both solved", 2026-08-19.
+* aggressive-mode hunting — hooks were adding +12.8 reversals/min over the model at a 0.10
+  ruler; now +2.6, **80% removed**, peak correction and speed holding unchanged. Deployed
+  2026-08-20, awaiting the operator's 2-day road test.
+
+### OPEN
+1. **Set-speed stepping.** Internal `v_cruise` jumps in one frame (100->80, 60->40 km/h),
+   `a_cruise = v_cruise - v_ego` has no rate limit, so `min()` takes a ~0.7 m/s^2 step
+   straight to the command. 13 hard events in the 109-min 08-20 drive, ~1 per 8 min.
+   NOT a mapd defect — a limit change is inherently a step; what is missing is a rate limit
+   between the set speed and `a_cruise`. Diagnosis only, no fix attempted.
+2. **hook 3 / hook 5 guard defect.** `_v_cruise_lowered = target < v_cruise` reads False once
+   hook 3 has moved the set speed itself down to the posted limit, so hook 5 softens a
+   mapd-driven approach that its own docstring promises to skip. Car decelerates at 0.5
+   instead of 1.2 toward a lower limit and will overshoot.
+3. **Hook 6 is effectively untested in the field.** It armed **0 times** across the entire
+   08-20 drive (the operator never left aggressive, so its personality-edge trigger had no
+   edge; only 5 strong runs qualified and none completed a taper). Today's hunting result is
+   a HOOK 8 result. Hook 6's own contribution is unmeasured.
+4. **`cruise_log.py` is still recording** (temporary, 50 MB cap). Keep until (1) is closed —
+   the internal `v_cruise` reaches no logged message, so it is the only instrument for it.
+5. 11:59 / 12:00 on 08-20: operator reported hunting, but zero command steps >= 0.05 and
+   1-3 Hz at or below the perceptibility floor. **No mechanism identified.** Note `aEgo`
+   1-3 Hz is ~0.10 m/s^2 flat across personality/speed/command and the IMU shows 3.5 m/s^2
+   p2p broadband — some of what is felt may not be in the command at all.
+
+### METHOD — do not repeat these
+* Measure hunting as **REVERSAL rate** with a fixed amplitude ruler. Step-counting is blind to
+  it (the hooks are rate-limited, so they score zero by construction) and 1-3 Hz band power
+  reads one step as 0.026 while missing 20 Hz planner content above 3 Hz. Both metrics led to
+  a wrong "the hook section is clean" verdict on this same day.
+* Sanity-test any new metric on synthetic input BEFORE trusting it.
+* Enforce **time** contiguity, never index contiguity — a run straddling a 24-min gap invented
+  a -0.618 m/s^2 step that drove a whole wrong recommendation.
+* Use logged `longitudinalPlan.longitudinalPlanSource`, never an `a_cmd >= raw` proxy.
+* Test anything touching hook 8 **closed loop** — it feeds back on `aEgo` with gain 3.

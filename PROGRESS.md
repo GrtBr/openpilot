@@ -14,6 +14,20 @@ Resume rules:
 - Wrap every category-C/D upstream edit in `# GRT-MOD-START/END` and record it in `GRT_MODS.md`.
 - If a `scons -j4` full build is too heavy on the Pi5, build just `openpilot/cereal` to verify codegen and note it.
 
+## SCOPE OF THIS FILE (added 2026-08-20)
+
+This file tracks the **mapd port** only — speed ceilings, curve approach, set-speed tracking
+(hooks 1, 2, 3, 5). It is NOT the state of the fork as a whole.
+
+The **longitudinal comfort** work — hooks 6, 7, 8, 9 (`e2e_floor.py`, `accel_ramp.py`,
+`hold_speed.py`) — is tracked in `captains_log.md`, which carries the measurements. See the
+CURRENT STATE block at the end of that file.
+
+Caveat on the STATE below: its "next step" (judge the curve approach) has been outstanding
+since 2026-08-05. Many drives have happened since, but they were analysed for longitudinal
+comfort, not for curve approach, so **this workstream's status is genuinely unknown rather
+than good** — do not read the absence of complaints as validation.
+
 ## STATE
 
 - **Status:** **CURVE APPROACH SHAPED — `_ramp_curve_ceiling()` rate-limits the map-curve ceiling's descent to `APPROACH_DECEL = 0.5 m/s²`; DEPLOYED, awaiting a drive.** Root-caused from the 11:28 drive of 2026-08-05: mapd publishes `mapCurveSpeed` as a STEP (measured 85.2 → 57.2 km/h in one frame at 72.7 km/h), which saturated `A_CRUISE_MIN` on 70% of curve events at −1.24 m/s² where mapd's own trigger distance was sized for −0.26. `approach_speed()` could not be reused — it needs a distance and `mapdOut` publishes none for curves — so the shaping is in the time domain instead. Replay of all 11 measured events: peak −1.20 → −0.50 m/s², onset jerk −2.81 → −0.84 m/s³, saturation 100% → 0%. Verified the 10% cut did NOT cause the saturation (peak decel identical pre/post at −1.23/−1.24) but tripled Δv per step (2.9 → 8.7 km/h), which is why it became noticeable. 42 scc_map / 44 hooks / 62 set_speed / 30 schema. Prior: **MAP CURVE SPEED CUT 10% + NATIONAL TILE SET — BOTH DEPLOYED to comma4 (`09a174b`), drive done — corner speed OK, approach was too harsh, now fixed above.** `map_curve_target_lat_a` pinned at 2.025 (was mapd's embedded default 2.5; v = √(latA/κ), so ×0.9² = −10% speed). Tiles now 2,046 files / 601 MB covering bands -24…-36, replacing 376 files / 106 MB of -34/-36 only; delivered tiles passed `parity_check_ver2.py` gate 1a (4,468 junction nodes, 0 violations) BEFORE deploy. `APPROACH_DECEL` untouched. Prior: 60 km/h no-map fallback REMOVED — **now deployed** (see captains_log 2026-08-04 SYNC; this line previously read "local only, comma4 OFFLINE"). Prior: DEPLOYED to comma4 (`19c3568`) and healthy; awaiting a drive to judge ramp feel + coast-down feel. RAMP RESTORED for no-confirmation-needed limits (`authorisedNextLimit`) + gentle coast-down to the set speed (`COAST_DECEL = 0.5`, hook 5 in longitudinal_planner). NOT DEPLOYED. Prior: DRIVE 2 REVIEWED; TWO ISSUES FIXED LOCALLY, **NOT DEPLOYED** — (1) physical limit compliance is now gated on driver authorisation (`authorisedLimit` on `grtSetSpeedState`, consumed by `scc_map`); (2) the limit is debounced at 3 s and an offer is retired only when a different limit becomes established, fixing prompts that died in 0.2 s at a flip-flopping way selection. Direction-matched confirmation added (RES/+ for up, SET/- for down). Alert rendering CONFIRMED on the car. Prior: SET-SPEED TRACKING **DEPLOYED TO comma4 AND ENABLED** (device on `dc6e2b5`, AGNOS 18.7, healthy, engagement verified unblocked). **ROAD TEST OUTSTANDING** — the confirmation ALERT could not be verified parked (it only fires engaged), so first drive must confirm the text + chime appear. Feature complete (parts a AND b). Engage seeds
