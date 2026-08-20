@@ -3504,3 +3504,13 @@ CAVEATS carried forward: hook 6 armed 0x on the 08-20 drive so this is validated
 result; the plant replays the logged disturbance; a low-pass filter reduces a zigzag count almost
 by construction, so it is the PAIRED result (reversals down, speed flat, peak intact) that carries
 this, not the reversal column alone.
+
+**Why JERK_AGGRESSIVE (1.0) < JERK_RELAXED (1.5)** — asked 2026-08-20, looks backwards, is not.
+The caps see different signals: hook 7 caps the FINAL command (still carrying the model's raw
+steps, max 1.634 m/s^2 per tick); hook 9 caps the e2e CANDIDATE, already through hook 8's EMA and
+0.30 m/s^3 rate limiter. Measured on each personality's own frames: hook 7 @1.5 binds 0.5% with a
+worst shortfall of 1.22 m/s^2 (7.9 h fleet); hook 9 @1.0 binds 0.49% with a worst shortfall of
+0.068 — same frequency, ~18x gentler consequence. Aggressive IS the less restricted personality
+in effect. The appearance cannot be fixed by raising the constant: J=1.5 binds 0.03%, J=2.0 binds
+0.00%, and hook 9's whole benefit (22.1 -> 21.7 rev/min) lives in that 0.49%. Documented in
+accel_ramp.py so it is not "tidied" later.

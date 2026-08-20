@@ -103,6 +103,27 @@ class RelaxedAccelRamp:
 #   * 1.0 m/s^3 is chosen because it is essentially free (0.02 m/s of acceleration area). 0.5
 #     smooths measurably more but starts eating acceleration authority, which is the opposite
 #     of what the aggressive personality is for.
+#
+# WHY THIS IS 1.0 WHILE JERK_RELAXED IS 1.5, WHICH LOOKS BACKWARDS
+# ----------------------------------------------------------------
+# It is not backwards, and the raw constants are not comparable, because the two caps see
+# DIFFERENT SIGNALS. Hook 7 caps the FINAL command, which still carries the model's raw steps
+# (measured max 1.634 m/s^2 per 50 ms tick = 33 m/s^3). Hook 9 caps the e2e CANDIDATE, which by
+# this point has already been through hook 8's EMA and its 0.30 m/s^3 rate limiter, so it is a
+# far smoother signal. Equal constants would NOT mean equal effect.
+#
+# Measured on each personality's own frames, which is the comparison that means something:
+#
+#                              binds on   worst instantaneous shortfall
+#     hook 7  relaxed  J=1.5      0.5%              1.22 m/s^2      (7.9 h fleet scan)
+#     hook 9  aggressive J=1.0    0.49%             0.068 m/s^2     (5.4 min, 08-20)
+#
+# Same bind FREQUENCY, ~18x gentler CONSEQUENCE. Aggressive is the less rate-restricted
+# personality in effect, which is the correct ordering.
+#
+# The appearance cannot be fixed without deleting the hook: at J=1.5 it binds on 0.03% of frames
+# and at J=2.0 on 0.00%, i.e. raising it to match hook 7 turns this into dead code. Its entire
+# benefit (22.1 -> 21.7 rev/min) comes from that 0.49%. Do not "tidy" this to 1.5.
 JERK_AGGRESSIVE = 1.0
 
 
