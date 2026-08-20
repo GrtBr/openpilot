@@ -83,3 +83,71 @@ class RelaxedAccelRamp:
     out = min(a_target, max(self.prev, 0.0) + JERK_RELAXED * DT_MDL)
     self.prev = out
     return out
+
+
+# ------------------------------------------------------------------------------------------
+# Hook 9 — the same idea for AGGRESSIVE, but on the e2e CANDIDATE instead of the final command.
+# ------------------------------------------------------------------------------------------
+# m/s^3. Sized by REVERSAL rate, not by step count -- see hold_speed.py for why steps are the
+# wrong ruler for this. Measured closed-loop on the 08-20 drive over the 5.4 min where the e2e
+# candidate won min() in aggressive, ON TOP OF hook 8's EMA (rev/min at a 0.10 ruler):
+#
+#     hook 8 as shipped                31.9
+#     + EMA tau 1.0                    22.1
+#     + this cap @ 1.0 m/s^3           21.7    accel area lost 0.02 m/s, speed unchanged
+#     + this cap @ 0.5 m/s^3           20.6    accel area lost 0.24 m/s, speed -0.9 km/h
+#     this cap @ 1.0 ALONE, no EMA     31.1    <- on its own it does almost nothing
+#
+# TWO HONEST CAVEATS, recorded so this is not mistaken for a bigger lever than it is:
+#   * it only earns its place ON TOP of the EMA. Alone it moves 31.9 -> 31.1.
+#   * 1.0 m/s^3 is chosen because it is essentially free (0.02 m/s of acceleration area). 0.5
+#     smooths measurably more but starts eating acceleration authority, which is the opposite
+#     of what the aggressive personality is for.
+JERK_AGGRESSIVE = 1.0
+
+
+class AggressiveCandidateRamp:
+  """Hook 9. Rising-edge jerk cap on the e2e candidate, aggressive personality only.
+
+  WHY THE CANDIDATE AND NOT THE FINAL COMMAND (the difference from hook 7)
+  -----------------------------------------------------------------------
+  Hook 7 sits AFTER the planner's `min()` and shapes whichever candidate won. This one sits
+  BEFORE it, on the e2e candidate only, because that is the branch hooks 6 and 8 inflate and
+  therefore the only branch whose rises need gentling in aggressive. Capping the final command
+  instead would also slow rises that came from the cruise or lead branches, which are not the
+  problem and are already the conservative ones.
+
+  SAFETY
+  ------
+  It can only LOWER the candidate, never raise it. A lower e2e candidate is more likely to win
+  `min()` and commands less acceleration, so the planner can only become MORE conservative --
+  it cannot make braking weaker, and it cannot delay braking. On a fall the value passes
+  through untouched in the same frame.
+
+  Like hook 7 the ramp restarts from `max(prev, 0.0)`, so a rise that is merely the release of
+  a deceleration request is instant and only the throttle portion is gentled.
+  """
+
+  def __init__(self):
+    self.prev = None
+
+  def reset(self):
+    self.prev = None
+
+  def update(self, a_cand: float, active: bool) -> float:
+    """Return the rate-limited candidate. `active` = aggressive AND the servo's preconditions.
+
+    When inactive the state is dropped, so re-entering aggressive never ramps up from a stale
+    value left over from earlier in the drive.
+    """
+    if not active:
+      self.prev = None
+      return a_cand
+
+    if self.prev is None or a_cand <= self.prev:
+      self.prev = a_cand
+      return a_cand
+
+    out = min(a_cand, max(self.prev, 0.0) + JERK_AGGRESSIVE * DT_MDL)
+    self.prev = out
+    return out

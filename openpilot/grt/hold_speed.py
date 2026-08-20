@@ -84,6 +84,46 @@ _HS_CAP = 0.30            # m/s^2 cap on the correction
 # floor; this had nothing. Symmetric, same value as hook 6's floor, so a full-scale swing
 # takes 1.0 s instead of one frame.
 _HS_CORR_JERK = 0.30      # m/s^3
+
+# EMA ON THE CORRECTION TARGET. Added 2026-08-20.
+#
+# The rate limiter above bounds the correction's SLOPE but not its wander: a signal that ramps
+# up then down at 0.30 m/s^3 never steps, yet it adds direction REVERSALS to the command, and
+# reversals -- not steps -- are what "hunting" is. Measured on the 08-20 drive over the frames
+# where the e2e candidate actually won min() in aggressive (5.4 min), with a fixed 0.10 m/s^2
+# amplitude ruler:
+#
+#     model's own output          19.1 reversals/min
+#     command as shipped          31.9        -> the hooks add +12.8, i.e. 1.7x
+#
+# Confirmed directly against the other personality on the 08-19 drive (same loop driven twice,
+# matched mean speed 83 vs 81 km/h): in RELAXED the command tracks the model almost exactly
+# (10.2 vs 9.8 rev/min, +0.4); in AGGRESSIVE it runs +11.3 above it. That is this hook, and it
+# is why the operator reported the hunting as worst in aggressive.
+#
+# Closed-loop (plant a_ego = cmd(t-LAG) + disturbance), EMA on the TARGET with the rate limiter
+# left downstream as an unchanged backstop:
+#
+#     tau      rev/min @0.10     peak corr    speed holding
+#     none          32.2           0.300       baseline
+#     0.5           26.9           0.300       unchanged
+#     1.0           22.1           0.295       unchanged      <- shipped
+#     2.0           19.6           0.264       starts to cost
+#
+# tau 1.0 removes 77% of the added hunting (+13.1 -> +3.0) with the peak correction intact. The
+# authority lives in the correction's MEAN, which an EMA preserves; what it strips is the wander.
+# `corr > 0` rises from 44% to 83% of frames: a smaller correction applied more continuously
+# instead of ramping to full and back.
+#
+# NOTE the speed column says UNCHANGED, not improved. The summed figure looked like +2.06 km/h
+# but 61% of that is one run and 6 of 14 runs are worse -- it is run-to-run scatter. The claim
+# is that the smoothing is FREE, not that it holds speed better.
+#
+# A low-pass filter reduces a zigzag reversal count almost by construction, so the reversal
+# number alone does not justify this. It is the paired result -- reversals down, speed holding
+# flat, peak correction intact -- that does.
+_HS_TAU = 1.00            # s, EMA time constant on the correction target
+
 _HS_MIN_SPEED = 8.33      # m/s == 30 km/h, same floor as hook 6
 _HS_MIN_HEADROOM = 0.28   # m/s == 1 km/h. Never push past the set speed; cruise owns that.
 
@@ -98,6 +138,7 @@ _HS_LOG_PROGRESS_T = 10.0  # s, report a burst that is still going
 
 _LAG_N = max(1, int(round(_HS_LAG / DT_MDL)))
 _SMOOTH_N = max(1, int(round(_HS_SMOOTH / DT_MDL)))
+_HS_ALPHA = DT_MDL / (_HS_TAU + DT_MDL)
 
 
 class HoldSpeed:
@@ -107,6 +148,7 @@ class HoldSpeed:
     self.cmd_hist = deque(maxlen=_LAG_N + 1)
     self.u_hist = deque(maxlen=_SMOOTH_N)
     self.corr = 0.0           # rate-limited correction actually applied
+    self.tgt_f = 0.0          # EMA-smoothed target, upstream of the rate limiter
     self.stats = {"frames_correcting": 0, "frames_capped_at_zero": 0,
                   "frames_at_cap": 0, "inactive": 0, "bursts": 0}
     # burst accounting for the throttled log
@@ -144,9 +186,16 @@ class HoldSpeed:
     self.b_zero_capped = 0
     self.b_reported = 0.0
 
+  def _smooth(self, target: float) -> float:
+    """EMA the target. MUST be called every frame the servo is live -- including the frames
+    where the target is zero -- or the filter state goes stale and re-entry steps."""
+    self.tgt_f += _HS_ALPHA * (target - self.tgt_f)
+    return self.tgt_f
+
   def _ramp(self, target: float) -> float:
     """Move the applied correction toward `target` at _HS_CORR_JERK. Symmetric: the way OUT
-    must be rate-limited too, or releasing the correction is itself a step."""
+    must be rate-limited too, or releasing the correction is itself a step. Kept downstream of
+    the EMA as an unchanged backstop -- the EMA bounds wander, this bounds slope."""
     step = _HS_CORR_JERK * DT_MDL
     self.corr = min(target, self.corr + step) if target > self.corr \
         else max(target, self.corr - step)
@@ -156,6 +205,7 @@ class HoldSpeed:
     self.cmd_hist.clear()
     self.u_hist.clear()
     self.corr = 0.0
+    self.tgt_f = 0.0
 
   def update(self, a_e2e: float, a_commanded: float, a_ego: float, v_ego: float,
              v_cruise: float, aggressive: bool, long_pid: bool, driver_input: bool,
@@ -181,7 +231,7 @@ class HoldSpeed:
 
     if v_cruise - v_ego < _HS_MIN_HEADROOM:
       self._end_burst(v_ego)
-      corr = self._ramp(0.0)             # ramp out, do not step out
+      corr = self._ramp(self._smooth(0.0))   # decay out through BOTH filters, do not step out
       return a_e2e + corr if corr > 0.0 else a_e2e
 
     target = min(_HS_CAP, max(0.0, _HS_GAIN * (u - _HS_DEAD)))
@@ -200,7 +250,10 @@ class HoldSpeed:
         self.stats["frames_capped_at_zero"] += 1
       target = min(target, capped_target)
 
-    corr = self._ramp(target)
+    # EMA first (bounds wander), rate limiter second (bounds slope). The zero-cap above is
+    # already folded into `target`, so both filters see a continuous signal -- the same reason
+    # the 08-19 output clamp had to be folded rather than clamped.
+    corr = self._ramp(self._smooth(target))
     if corr <= 0.0:
       self._end_burst(v_ego)
       return a_e2e

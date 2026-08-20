@@ -29,7 +29,7 @@ sys.modules['openpilot.common.realtime'] = _rt
 
 from openpilot.grt.hold_speed import (HoldSpeed, _HS_GAIN, _HS_DEAD,   # noqa: E402
                                       _HS_CAP, _LAG_N, _SMOOTH_N, _HS_LOG_EVERY,
-                                      _HS_CORR_JERK)
+                                      _HS_CORR_JERK, _HS_TAU)
 from openpilot.grt.e2e_floor import E2EAccelFloor                      # noqa: E402
 
 OK = dict(v_ego=25.0, v_cruise=33.0, aggressive=True, long_pid=True,
@@ -37,7 +37,16 @@ OK = dict(v_ego=25.0, v_cruise=33.0, aggressive=True, long_pid=True,
 SETTLE = _LAG_N + _SMOOTH_N + 2       # frames before the servo has enough history
 # the correction is RATE-LIMITED, so steady state also needs the ramp to finish
 RAMP = int(_HS_CAP / (_HS_CORR_JERK * 0.05)) + 2
-FULL = SETTLE + RAMP
+# ...and since 2026-08-20 there is an EMA on the TARGET upstream of that rate limiter, so
+# steady state now also needs the filter to settle. Derived from _HS_TAU, never hardcoded:
+# 8 tau puts it within 0.04% of the target. (Sizing these from the constants is the lesson
+# from the _FLOOR_MAX incident -- a hardcoded settle window silently rots when a constant
+# is retuned, and reads as a code failure when it is a test failure.)
+EMA_N = int(round(8.0 * _HS_TAU / 0.05))
+FULL = SETTLE + RAMP + EMA_N
+# The EMA approaches its target asymptotically, so steady-state comparisons cannot demand an
+# exact value the way they could when the rate limiter was the only filter.
+TOL = 1e-3
 
 
 def run(hs, n, a_e2e=0.0, a_commanded=None, a_ego=0.0, **kw):
@@ -66,12 +75,12 @@ def main():
   o = run(hs, FULL, a_e2e=0.10, a_ego=-0.10)      # u = +0.20
   expect = 0.10 + min(_HS_CAP, _HS_GAIN * (0.20 - _HS_DEAD))
   check(f"under-delivery of 0.20 -> corrects (got {o[-1]:+.3f}, expect {expect:+.3f})",
-        abs(o[-1] - expect) < 1e-9)
+        abs(o[-1] - expect) < TOL)
 
   hs = HoldSpeed()
   o = run(hs, FULL, a_e2e=0.10, a_ego=-1.00)
   check(f"correction is capped at _HS_CAP (got {o[-1]:+.3f})",
-        abs(o[-1] - (0.10 + _HS_CAP)) < 1e-9)
+        abs(o[-1] - (0.10 + _HS_CAP)) < TOL)
 
   hs = HoldSpeed()
   o = run(hs, FULL, a_e2e=0.10, a_ego=0.13)       # OVER-delivering
@@ -138,8 +147,8 @@ def main():
         f"({_HS_CORR_JERK * 0.05:.4f})", max(steps) <= _HS_CORR_JERK * 0.05 + 1e-9)
   o2 = run(hs, FULL, a_e2e=0.10, a_ego=0.10)        # under-delivery gone
   steps2 = [abs(o2[n] - o2[n - 1]) for n in range(1, len(o2))]
-  check(f"and RAMPS out too, max step {max(steps2):.4f}",
-        max(steps2) <= _HS_CORR_JERK * 0.05 + 1e-9 and abs(o2[-1] - 0.10) < 1e-9)
+  check(f"and RAMPS out too, max step {max(steps2):.4f} (residual {o2[-1] - 0.10:.1e})",
+        max(steps2) <= _HS_CORR_JERK * 0.05 + 1e-9 and abs(o2[-1] - 0.10) < TOL)
 
   # the exact 08-19 signature: u oscillating across the deadband must not produce a square wave
   hs = HoldSpeed()

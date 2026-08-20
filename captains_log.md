@@ -3039,3 +3039,468 @@ IMPLEMENTATION NOTES for whoever builds it:
   behind its own flag (/data/media/0/grt/SmartCruiseControlSetSpeed) default OFF.
 - The speed-limit VALUE should come from mapdOut (current limit), not from our v_target, which
   is an approach profile and deliberately transient.
+
+## 2026-08-20 — Exponential averaging on the hook contribution: MEASURED, NOT SHIPPED
+
+Operator reported throttle hunting at 11:26, 11:52, 11:55, 11:59, 12:00, 12:01 and asked whether
+exponential averaging would smooth the aggressive-mode hook transitions. Answer: **no.** Recorded
+here so it is not re-litigated.
+
+### What the drive actually contained
+Replay of hooks 6+8 over all 13,201 planner frames, using the CORRECT internal `v_cruise` from
+`cruise_log.py` (not `carState.vCruise`). Replay validated against the logged command:
+**mean error +0.0033, sd 0.0310, |err|<0.05 on 94.9%** of e2e-source frames — so conclusions
+below are about the drive, not about the harness.
+
+- **Hook 6 armed 0 times.** Gate was armable on 47.3% of frames, but personality was `aggressive`
+  for all 13,201 frames (no switch to detect) and only 5 strong-accel runs met `_T_STRONG` while
+  otherwise armable, none of which completed a taper-to-quiet. Every bit of hook delta on this
+  drive is hook 8.
+- **Hook 8's transients are already clean.** 2 steps beat the 0.015/frame slew limit in 13,201
+  frames: one at the 30 km/h floor, one at driver disengage. Both legitimate, neither in a
+  reported window. There is no transient defect to fix.
+
+### The EMA, open loop vs closed loop
+Open-loop (filtering the *logged* delta) looked excellent: tau=0.3 pulled cmd/raw from 1.05-1.34
+down to ~1.00-1.09 with the mean contribution preserved to 4 decimals. **That result was wrong**,
+because filtering a logged signal does not put the filter's own lag inside the loop that produced
+it. Hook 8 is a feedback controller carrying 0.70 s of lag reference + 1.0 s of smoothing on `u`
+around GAIN 3.0; another 0.3 s inside that loop erodes phase margin.
+
+Closed loop (plant `a_ego(t) = cmd(t-LAG) + d(t)`, EMA on the target with the rate limiter left
+downstream as an unchanged backstop), 1-3 Hz of the resulting command, engaged contiguous runs
+only — windows straddling an engagement edge were re-scoped, because band power over a step is
+meaningless (`longActive False->True` at 11:26:12.300 is a +1.09 m/s^2 step and is ENGAGEMENT,
+not a defect):
+
+    win        no-hook   hook8   EMA0.2  EMA0.3  EMA0.5  EMA1.0   hook active
+    11:26*      0.0334  0.0371   0.0374  0.0370  0.0370  0.0382       19%
+    11:55       0.0202  0.0236   0.0213  0.0209  0.0205  0.0201       51%
+    11:59       0.0117  0.0127   0.0134  0.0132  0.0128  0.0121       61%
+    12:00       0.0109  0.0134   0.0125  0.0120  0.0115  0.0112       33%
+    12:01       0.0129  0.0139   0.0144  0.0143  0.0142  0.0138       44%
+    mean                0.0201   0.0198  0.0195  0.0192  0.0191
+    mean corr           0.0347   0.0366  0.0367  0.0367  0.0368  (authority preserved)
+
+The EMA helps at 11:55 and 12:00, **hurts at 11:59 and 12:01**, and **does nothing at 11:26** —
+the only window above the ~0.03 m/s^2 perceptibility floor. Mean effect 0.0201 -> 0.0195 (3%).
+The sign flips with how active the correction is: smoothing helps when the correction is large,
+hurts when it is marginal and the servo is already chasing. Not shipped.
+
+### Why no hook change can fix the reported symptom
+- At 11:26 (the one perceptible window, 0.0371 vs a ~0.03 floor) the hook contributes +0.0037 of
+  it. **Deleting hook 8 entirely leaves 0.0334 — still above threshold.** Decomposed on the
+  35.2 s contiguous engaged span (705 frames, all `longActive`, 19-50 km/h):
+
+      model raw                0.0175
+      after min()              0.0334   <- arbitration alone, no hook: 1.91x the model
+      as-driven command        0.0379
+
+  So `min()` arbitration nearly DOUBLES the model's own roughness at low speed, and the hook
+  adds the remainder. For contrast the same decomposition at 12:00 (85-100 km/h) gives
+  0.0105 -> 0.0109 -> 0.0136, i.e. arbitration is 1.04x — benign. The low-speed case is the
+  outlier. Note it is NOT switch chatter: only 2 source switches in 35 s (3/min), 58% of
+  frames non-e2e.
+
+  (An earlier draft of this entry cited "71% non-e2e" from the retired 00-18s window. That
+  window was ~247/360 frames PRE-ENGAGEMENT with `acmd = 0`, and the classifier
+  `'e2e' if acmd >= raw` mislabelled every one of them as cruise/other. Figure withdrawn;
+  the numbers above are computed on engaged frames only.)
+- 11:52 is `lead0` 79% with the hook active 3% — the MPC lead branch, untouchable from here.
+- 11:59/12:00/12:01 sit at 0.0127-0.0139, at or below the perceptibility floor, with hook
+  contributions of 0.0010-0.0025.
+
+Corroborating: on 08-19 the operator reported hunting in **relaxed**, where hooks 6 and 8 are
+gated off entirely (hook 7, the relaxed-only rising-edge jerk cap, was active). Together with
+hook 6 arming 0x across this entire drive, that is two independent observations of hunting with
+hooks 6 and 8 inert.
+
+**Conclusion: the aggressive-mode hook section is clean. The residual hunting lives in `min()`
+arbitration at low speed and in the lead/MPC branch.** Diagnosis only — no code changed.
+
+`cruise_log.py` is STILL ENABLED on the device. The cruise branch is now the live suspect, so it
+is worth keeping rather than removing; operator's call.
+
+### 2026-08-20 addendum — the jolts are v_cruise STEPPING, and my 1-3 Hz metric was blind to them
+
+Operator asked whether the hunting was `min()` flip-flopping between model and planner. Chasing
+that question overturned two claims made higher up in this entry. Both are corrected here.
+
+**Metric limitation, found by sanity-testing the estimator.** `band()` is length-independent and
+leakage-free (a 2 Hz sine reads 0.0707 at every window length; a 0.05 Hz oscillation reads
+0.0000). But **a single 0.5 m/s^2 step in a 35 s window reads 0.0260 in the 1-3 Hz band** — right
+at the perceptibility floor. So a whole-window band figure cannot distinguish one jolt from
+continuous hunting. Worse, the planner runs at 20 Hz, so a one-tick command step puts its energy
+up to 10 Hz — mostly ABOVE the 1-3 Hz band. **The metric I used throughout systematically misses
+exactly the events that feel like a jolt.**
+
+**CORRECTION 1.** "min() arbitration nearly doubles the model's roughness at low speed (1.91x)"
+is withdrawn as a statement about steady roughness. Measured WITHIN each contiguous block at
+11:26, the command is smooth everywhere: `other` blocks 0.0079-0.0148, `e2e` block 0.0153 — all
+well under the floor. The elevated 35 s figure came entirely from the 2 handovers.
+**CORRECTION 2.** "NOT switch chatter: only 2 source switches in 35 s" had the sign of the
+argument backwards. Those 2 switches ARE the event.
+
+**MECHANISM (verified at frame level in two independent sources).** The internal `v_cruise`
+changes in DISCRETE STEPS. `a_cruise = clip(v_cruise - v_ego, -1.2, 2.0)` has gain 1.0 and no
+rate limit, so the step lands on the candidate at full size, `min()` takes it the same frame, and
+hook 5 pins the magnitude at exactly `-COAST_DECEL = -0.500`:
+
+    12:01:55.748  v_cruise 100.00 km/h  a_cruise +2.000 (saturated high)   cmd -0.056 (e2e)
+    12:01:55.798  v_cruise  80.00 km/h  a_cruise -0.501                    cmd -0.500 (cruise)
+                  ^ -5.556 m/s in ONE 50 ms frame; model raw was -0.052 throughout
+
+    11:26:34.273  v_cruise  60.00 km/h  a_cruise +2.000                    cmd +0.209
+    11:26:34.321  v_cruise  40.00 km/h  a_cruise -1.200 (saturated low)    cmd -0.500
+                  ^ 100 Hz carControl confirms +0.209 -> -0.500, a 0.709 step in one frame
+
+**READ THE RECORDER CORRECTLY:** `cl.record(...)` sits at `hooks.py:198`, BEFORE the softening
+block at 202-209, so the CSV's `a_cruise` is the RAW, PRE-hook-5 value. At 11:26 raw was -1.200
+and the command was -0.500, which means **hook 5 BOUND and softened it** — it did not skip. (An
+earlier draft of this addendum claimed the opposite. Withdrawn.) At 12:01 raw was -0.501 vs a
+-0.500 command, a 0.001 difference, so that frame cannot discriminate either way.
+
+**WHY hook 5's skip-guard did not fire — a hook 3 / hook 5 interaction defect.** Hook 5's
+docstring promises it is *"skipped entirely when the mapd controller lowered v_cruise this frame,
+so the approach profile keeps full authority."* The guard is
+`_v_cruise_lowered = target < v_cruise` (hooks.py:124) — a STRICT comparison against the INCOMING
+driver-facing set speed. At 11:26:34.274 `carState.vCruise` AND `vCruiseCluster` both step
+**60 -> 40 km/h**, i.e. **hook 3 (`track_set_speed`) moved the set speed itself** to follow the
+posted limit; the internal value follows one frame later. So by the time hook 1 runs,
+`target == v_cruise` (40 == 40), `target < v_cruise` is **False**, and hook 5 does not skip.
+
+Consequence: approaching a 40 km/h posted limit at 49 km/h, the cruise branch is softened from
+-1.200 to -0.500 and the car will overshoot the new limit. The stated safety property does not
+hold whenever hook 3 has already moved the set speed — which is precisely the mapd-driven case
+the guard exists to protect. **This is a real fork defect, independent of the jolt question.**
+
+**MAGNITUDE — the earlier "gain 1.0, lands at full size" claim overstated by ~8x.** In both
+traces `a_cruise` was SATURATED at +2.000 before the step, so the clip absorbs most of it. The
+jolt is self-bounding: `(previous command) - (whatever floor the candidate lands on)`, i.e.
+0.209 -> -0.500 = **0.709** at 11:26 and -0.056 -> -0.500 = **0.444** at 12:01 — not 5.556.
+Note hook 5 REDUCED the 11:26 jolt (it would have been 1.409 to the -1.200 clip). Hook 5 is
+mitigating here, not causing.
+
+**RATE.** Over today's 109 min: 180 single-frame `v_cruise` steps >= 0.5 m/s (1.6/min), of which
+**13 drove the cruise candidate to <= -0.5** — hard enough to win `min()` against a quiet model
+and produce a braking jolt. ~1 every 8 min. The dominant step size (43 of 180) is 5 km/h, i.e.
+the driver's own button presses, harmless. The 20 and 40 km/h steps are speed-limit transitions.
+
+**Hooks 6 and 8 are not involved:** hook delta was 0.000 at both jolts, which REINFORCES the
+entry above. Hook 5 IS in the path, but softening the magnitude. Scope the claim to 6/8.
+
+**It is NOT flip-flopping.** At 12:00, 21 contiguous blocks with sub-second source switching
+produced NOT ONE command step >= 0.05 in the whole minute — because two candidates that cross in
+`min()` are equal at the crossing, so a handover is inherently continuous. A step requires an
+INPUT to jump. The answer is "min() handing over once, hard, because its input stepped", not
+oscillation between model and planner.
+
+**COVERAGE — only 2 of the 6 reported windows are explained.** Cross-tabbing all 13 hard
+down-steps against the operator's list:
+
+    11:26  v_cruise 60->40   a_cruise raw -1.200   49 km/h   <- explained
+    12:01  v_cruise 100->80  a_cruise raw -0.501   82 km/h   <- explained
+    11:52, 11:55, 11:59, 12:00                               <- NO hard step; unexplained
+
+11:52 is `lead0` 79% (MPC branch). 11:55 has 4 steps/min >= 0.05, largest 0.430, cause not yet
+traced. 11:59 and 12:00 have ZERO command steps >= 0.05 in the entire minute and 1-3 Hz at or
+below the perceptibility floor — nothing measured in the command explains what was felt there.
+Do not let the two explained windows imply all six are solved.
+
+**NOT a mapd defect.** mapd is correctly reporting a new posted limit; a speed-limit change is
+inherently a step. What is missing is any rate limit between the set speed and `a_cruise`.
+Diagnosis only, no code changed — per the operator's standing split, whether to open that front
+is their call. The hook 3 / hook 5 guard defect above is separate and does not need the jolt
+question resolved first.
+
+`cruise_log.py` earned its keep here: none of the above is reconstructable without the internal
+`v_cruise`. Note the file ACCUMULATES ACROSS DRIVES (spans 2026-06-05, 08-19, 08-20) — filter by
+epoch, not time-of-day, or you will mix days.
+
+### 2026-08-20 addendum 2 — redone against the LOGGED plan source; two retractions
+
+Everything above that used a plan-source *proxy* (`'e2e' if a_cmd >= raw - 1e-3`) is superseded.
+`longitudinalPlan.longitudinalPlanSource` is logged and is ground truth. The proxy is biased in
+a way that matters here: hooks 6/8 RAISE the e2e candidate, so the cruise branch can win `min()`
+at a value still ABOVE the model's raw output, and the proxy labels those frames `e2e`.
+
+Re-extracted at the planner's own 20 Hz rate (`longitudinalPlan`, 13,200 frames). True source
+distribution for the drive: **e2e 9972, cruise 1975, lead0 1032, lead1 221**.
+
+**RETRACTION 1 — 11:52 is NOT the lead branch.** I reported "`lead0` 79%, hook active 3%" and
+EXCLUDED 11:52 from the closed-loop EMA table on that basis. Ground truth: **e2e won 100% of the
+engaged frames in that minute.** The exclusion was unjustified and the reason given was wrong.
+11:52 is also the WORST window on the drive by discrete steps — see below.
+
+**RETRACTION 2 — at 11:26 the command is SMOOTHER than the model, not rougher.** Ground truth
+split is 51% e2e / 49% cruise, and 1-3 Hz is cmd 0.0259 vs raw 0.0268, a ratio of **0.97**. The
+earlier "arbitration multiplies model roughness by 1.91x" came from the proxy plus a whole-span
+band figure; both are withdrawn. (The 11:26:34 v_cruise-step jolt still stands — that was
+verified against the recorder CSV and the 100 Hz `carControl` stream, not the proxy.)
+
+**RESTRICTED TO THE FRAMES THE OPERATOR ASKED FOR** — e2e won `min()`, aggressive selected,
+longitudinally engaged: 6,693 frames = 5.6 min = 50.7% of the drive. On these frames `aTarget`
+IS the hook-raised e2e candidate. Replay validated directly against it:
+`aTarget` vs `raw + hook delta` = mean **-0.0038**, sd **0.0286**, |err| < 0.02 on **92.6%**.
+
+    1-3 Hz, frame-weighted over 14 contiguous runs (5.4 min):
+      model raw                 0.0146
+      as-driven aTarget         0.0170     ratio 1.17x
+    hook active on 45.9% of these frames, mean delta +0.0979, max +0.300
+
+    per window, e2e-won frames only:
+      win     e2e   cruise  lead    cmd     raw   ratio  hook%
+      11:26   51%    49%     0%   0.0259  0.0268  0.97    35%
+      11:52  100%     0%     0%   0.0290  0.0276  1.05    30%
+      11:55   86%     1%    12%   0.0166  0.0107  1.56    54%
+      11:59   76%    24%     0%   0.0105  0.0104  1.00    65%
+      12:00   78%    22%     0%   0.0148  0.0098  1.51    37%
+      12:01   79%    21%     0%   0.0128  0.0128  1.00    46%
+
+**THE DECISIVE ATTRIBUTION.** 56 command steps >= 0.05 occur INSIDE e2e-won runs (10.3/min).
+Splitting each into its model component and its hook component:
+
+    attributable to the MODEL (|d raw| >= |d hook|):  56  (100%)
+    attributable to the HOOKS:                         0
+
+The largest single-frame hook-delta change anywhere in those 56 is **0.0150** — exactly
+`_FLOOR_JERK * DT_MDL`, i.e. the rate limiter is honoured to the last digit. The largest command
+step is **-0.618 at 11:51:11.84**, entirely the model. The steps concentrate hard:
+**11:52 holds 38 of the 56**, at 27-52 km/h, with e2e winning 100% of that minute.
+
+**CONCLUSION, now on ground truth.** Over the half of the drive where the hook-raised e2e
+candidate WAS the command, the hooks add 17% to 1-3 Hz roughness (0.0146 -> 0.0170, both under
+the ~0.03 floor) and contribute **zero** discrete steps. Every jolt in those windows is the
+model's own `desiredAcceleration` stepping. The aggressive hook section remains clean; the
+lead for the felt hunting is now the MODEL OUTPUT at low-to-mid speed, with 11:52 the case to
+examine. Diagnosis only, no code changed.
+
+### 2026-08-20 addendum 3 — filtering output_a_target_e2e ITSELF (the right target)
+
+Operator's point: the earlier EMA test filtered the HOOK DELTA, which the attribution above shows
+contributes zero steps and is already rate-limited to 0.0150/frame. The thing producing the 56
+jolts is `output_a_target_e2e` -- the model's own `desiredAcceleration` -- upstream of everything
+previously filtered. Retested on that signal, over the 14 e2e-won/aggressive/engaged runs (5.4 min).
+
+Of the 56 in-run steps >= 0.05: **29 rises, 27 falls** (incl. the -0.618). A rising-edge-only cap
+structurally cannot touch the falls.
+
+    variant                  steps>=.05  max step   1-3Hz   accel lost   brake delay
+    as-driven                        56     0.618  0.0170       0.00        0.00
+    B rising cap 1.0 m/s^3           50     0.618  0.0170       0.03        0.00
+    B rising cap 1.5/2.0/3.0         56     0.618  0.0170       0.00        0.00
+    E ema tau 0.2s                    7     0.097  0.0080       3.58        3.70
+    E ema tau 0.3s                    3     0.062  0.0059       4.52        4.55
+    E ema tau 0.5s                    0     0.039  0.0038       5.77        5.65
+    S symmetric cap 1.5 m/s^3        66     0.075  0.0167       0.00        0.14
+    S symmetric cap 3.0 m/s^3        60     0.150  0.0170       0.00        0.06
+
+**HOOK 7's SHAPE DOES NOT WORK HERE (variant B).** At 1.5-3.0 m/s^3 it changes NOTHING: the cap
+allows 0.075-0.150 per frame and the rises are mostly 0.05-0.09, so they pass untouched; and it
+cannot address the 27 falls at all, including the -0.618. Hook 7 works in relaxed because it
+targets sustained rising ramps; these are brief bidirectional steps.
+
+**METRIC CAVEAT:** "steps >= 0.05" is misleading for a rate limiter -- S turns one 0.618 step into
+~8 frames of 0.075 and the COUNT goes UP while the jolt gets 8x smaller. Read `max step` for the
+rate-limiter rows.
+
+**EMA works but is expensive.** tau 0.3 removes essentially every step (max 0.618 -> 0.062) but
+withholds **4.55 m/s** of integrated braking and gives up 4.52 m/s of accel authority.
+
+**Symmetric jerk cap at 1.5 m/s^3 is the better trade:** worst jolt 0.618 -> 0.075 (8x), brake
+delay 0.14 m/s (32x less than EMA tau 0.3), zero accel authority lost. 1-3 Hz barely moves
+(0.0170 -> 0.0167) -- correct and expected: a slew limit attacks large transients, not small
+oscillation, and the jolts are what the operator feels.
+
+That 0.14 is an UPPER BOUND: the cap raises the candidate on a fall, so e2e may stop winning
+`min()` and a lower branch takes over, clawing braking back. Also note the wire already jerk-limits
+at 3-5 m/s^3 (`hyundaicanfd.py`), so 1.5 planner-side is tighter than what CAN enforces.
+
+Not yet implemented -- discussing with advisor before proposing.
+
+### 2026-08-20 addendum 4 — CORRECTION to addendum 3, and the verdict on filtering the e2e candidate
+
+**GAP ARTIFACT — addendum 3's table is wrong.** Runs were contiguous in INDEX, not TIME. The drive
+has 3 missing segments (gaps of 1436 s, 120 s, 60 s), and one "run" straddled the 24-minute gap,
+making the frame either side look like a single -0.618 step. Enforcing `T[n]-T[n-1] <= 0.2`:
+
+  * steps >= 0.05 inside e2e-won runs: **55**, not 56;
+  * **worst real step is +0.091**, not 0.618;
+  * S@1.5's headline "0.618 -> 0.075, 8x" was entirely that artifact.
+
+Same class of bug as the concatenated per-date CSVs. Index contiguity is not time contiguity.
+
+**CORRECTED comparison** (14 time-contiguous e2e-won/aggressive/engaged runs, 5.4 min):
+
+    variant                  steps>=.05  max step   1-3Hz   accel lost  brake delay
+    as-driven                        55     0.091  0.0163      0.00        0.00
+    B rising cap 1.0-3.0 m/s^3    49-55  0.089-0.091 0.0163   0.00        0.00
+    S symmetric cap 1.5              56     0.075  0.0163      0.00        0.00
+    S symmetric cap 3.0              55     0.091  0.0163      0.00        0.00
+    E ema tau 0.2s                    2     0.055  0.0077      3.58        3.59
+    E ema tau 0.3s                    0     0.049  0.0057      4.52        4.41
+    E ema tau 0.5s                    0     0.039  0.0037      5.77        5.48
+
+**1. Hook 7's shape does not transfer (variant B).** No effect at any jerk value. Two reasons, and
+the first is a DESIGN CHOICE not a tuning miss: `max(prev, 0.0)` resets the allowance to zero
+whenever the previous output was negative — hook 7's deliberate instant-brake-release feature —
+so a large rise from below zero passes unbounded. Second, it structurally cannot touch the 27
+falls (of 55 steps: 29 rises, 27 falls).
+
+**2. A jerk cap has almost nothing to bite on.** The worst real step is 0.091 m/s^2 in one 50 ms
+frame. The CAN layer already jerk-limits at 3-5 m/s^3 = 0.15-0.25 per 50 ms, so 0.091 does not
+even clip at the wire. A 1.5 m/s^3 planner cap moves the worst step 0.091 -> 0.075.
+
+**3. The EMA works on the signal but withholds real braking.** tau 0.3 removes every step and cuts
+1-3 Hz 0.0163 -> 0.0057. Cost, measured per EVENT rather than as an integral (the integral's
+4.5 m/s is a mean of only ~0.03 m/s^2 and hides the shape):
+
+    tau 0.3: 309 shortfall events / 5.4 min; WORST 0.293 m/s^2 withheld for 1.75 s
+             (= 0.513 m/s of speed); 54 events longer than 1.0 s
+             includes 11:58:15.55 where the plan asked -1.086 and 0.167 was withheld for 1.35 s
+    tau 0.5: WORST 0.397 m/s^2 for 1.80 s; 62 events > 1.0 s
+
+These are UPPER BOUNDS: the EMA raises the candidate on a fall, so e2e may stop winning `min()`
+and a lower branch claws the braking back. That cannot be quantified offline — the losing
+candidates are not logged, only the winner.
+
+**RECOMMENDATION: do not filter the e2e candidate.** There is no jolt to remove — the worst step
+is 0.091 m/s^2, inside what CAN already passes. What is actually there is a sustained low-amplitude
+modulation (+-0.05 to 0.09), and **38 of the 55 steps fall in the single 11:52 minute** at
+27-52 km/h. The only filter that touches it buys ~0.01 m/s^2 of smoothness for up to 0.29 m/s^2 of
+withheld braking, which violates the fork's own rule that a feature must never degrade the base
+system. If this is pursued, the lever is upstream — understand what the model is doing at 11:52 —
+not a global filter on the candidate.
+
+Standing caveat: `aEgo` 1-3 Hz is ~0.10 m/s^2 flat across personality, speed and command level,
+and the IMU shows 3.5 m/s^2 p2p broadband. The felt hunting may not be in the command at all.
+
+### 2026-08-20 addendum 5 — THE METRIC WAS WRONG. The hooks DO add hunting, and an EMA fixes it.
+
+**Retract addendum 4's recommendation and the "the hook section is clean" conclusion.** Both
+rested on two metrics that are structurally blind to hunting:
+
+  * **single-frame steps >= 0.05** — the hooks are rate-limited to 0.0150/frame so they CANNOT
+    produce a step. Measuring steps guarantees the hooks score zero. Worse, the threshold
+    (1.0 m/s^3) is below ordinary driving jerk, so it counted a normal pull-away ramp at 11:52
+    as 38 "jolts". Sign-alternation there was only 30% — monotonic ramps, not oscillation.
+  * **1-3 Hz band power** — already shown to read one step as 0.026 and to miss 20 Hz planner
+    content above 3 Hz.
+
+Hunting is direction REVERSAL. A rate-limited signal that ramps up then down adds reversals while
+never stepping. That is precisely what hook 8 does.
+
+(The first reversal counter returned 0 for every input — `direc` never left 0 because the extremum
+was updated before the test. Rewritten and sanity-tested against square waves, ramps and
+sub-ruler dither before use.)
+
+**MEASURED, e2e-won / aggressive / engaged, 5.4 min, fixed amplitude ruler:**
+
+    ruler        cmd rev/min   model rev/min   hooks add
+    0.02 m/s^2          94.1            92.5        +1.7
+    0.05                52.6            41.7       +10.9
+    0.10                31.9            19.1       +12.8   <- hooks nearly DOUBLE it
+
+Per window at ruler 0.05 (cmd vs model): 11:52 **99.0 / 77.4**, 11:55 57.4/46.9,
+11:26 56.9/42.7, 11:59 44.5/34.1, 12:01 44.0/36.9, 12:00 38.2/30.3. **Every window.**
+
+**THIS ANSWERS "why is hunting worst in aggressive"** — asked 2026-08-19, never properly answered.
+The first draft of this claim compared aggressive's command against the MODEL on aggressive
+frames, which is not a personality comparison at all. Measured PROPERLY on the 08-19 drive, where
+the same loop was driven twice, one personality each, e2e-won engaged runs:
+
+    personality    minutes   rev/min @0.05   @0.10   model @0.10   mean v
+    relaxed            3.0            36.3    10.2          9.8      83 km/h
+    aggressive        16.4            48.4    26.9         15.6      81 km/h
+
+**In relaxed the command tracks the model almost exactly (10.2 vs 9.8, +0.4). In aggressive the
+command has +11.3 more reversals than the model.** At matched mean speed (83 vs 81 km/h), the
+driver feels 2.6x the reversal rate in aggressive. That is the hooks, measured directly rather
+than inferred.
+
+**THE FIX — EMA on hook 8's correction target, closed loop** (plant `a_ego = cmd(t-LAG) + d`,
+rate limiter left downstream as an unchanged backstop, `reset()` zeroing the EMA state):
+
+    variant              rev/min @0.05  @0.10   mean corr   km/h vs no-hook   peak corr
+    model only (floor)          41.7     19.1      —              —              —
+    as-driven                   52.6     31.9      —              —              —
+    replay, no EMA              51.5     32.2    0.0437         48.13          0.300
+    EMA tau 0.3s                50.2     30.0    0.0462         51.16          0.300
+    EMA tau 0.5s                49.5     26.9    0.0464         51.30          0.300
+    EMA tau 1.0s                45.4     22.1    0.0455         50.19          0.295
+    EMA tau 2.0s                45.8     19.6    0.0432         47.74          0.264
+
+**tau 1.0 s removes 77% of the added hunting (+13.1 -> +3.0 rev/min at ruler 0.10) at NO MEASURED
+COST to speed holding**, with peak correction unchanged (0.300 -> 0.295). tau 2.0 removes 96% but
+starts costing speed. The authority is carried by the correction's MEAN, which the EMA preserves;
+what it removes is the wander. `corr>0` rises 44% -> 83%: a smaller correction applied more
+continuously instead of ramping to full and back.
+
+**DO NOT claim the speed holding IMPROVES.** An earlier draft did, from the 48.13 -> 50.19 km/h
+summed figure. Per-run breakdown kills that reading: the +2.06 total is **61% one run** (+1.26 of
+it), and **6 of the 14 runs are WORSE** with tau 1.0. The defensible claim is that speed holding
+is UNCHANGED within run-to-run scatter — which is enough, because the reversal reduction is the
+point and it costs nothing.
+
+Also note a low-pass filter reduces a zigzag reversal count almost by construction, so the
+reversal column alone is not proof the fix works — it is the *paired* result (reversals down,
+speed holding flat, peak correction intact) that carries it.
+
+The earlier EMA test (addendum "closed loop", 3% effect) is not contradicted — it was scored with
+1-3 Hz band power, which this signal barely moves. Same filter, right metric, opposite verdict.
+
+**CAVEATS.** (1) Hook 6 armed 0x on this drive, so this is a hook 8 result; hook 6's own
+contribution is untested. (2) The plant replays the LOGGED disturbance — the real model would see
+different motion and respond differently. (3) The sim passed placeholder throttle_prob=1.0 /
+curvature=0.0 to hook 6, harmless only because it never armed.
+
+Proposal, not implemented. comma4 offline. Needs operator go-ahead per the diagnosis/implementation
+split.
+
+### 2026-08-20 — IMPLEMENTED: hook 8 EMA + hook 9 (aggressive candidate rising-edge cap)
+
+Both changes written, tested, verified closed-loop against the SHIPPED code (not a simulation
+subclass). Not yet deployed.
+
+**hook 8 — `openpilot/grt/hold_speed.py`**
+  * `_HS_TAU = 1.00` s, `_HS_ALPHA = DT_MDL / (_HS_TAU + DT_MDL)`, `self.tgt_f` state.
+  * new `_smooth()` EMAs the correction TARGET; `_ramp()` unchanged downstream as the slope
+    backstop. Order is EMA -> rate limiter: the first bounds wander, the second bounds slope.
+  * `_smooth()` is called on EVERY live frame including the no-headroom path
+    (`self._ramp(self._smooth(0.0))`), or the filter state goes stale and re-entry steps.
+  * `reset()` zeroes `tgt_f`, so the hard-release path still releases hard.
+
+**hook 9 — `openpilot/grt/accel_ramp.py`, `AggressiveCandidateRamp`, `JERK_AGGRESSIVE = 1.0`**
+  * mirrors hook 7's shape but applies to the e2e CANDIDATE (before `min()`), not the final
+    command (after). Wired at the end of `floor_e2e_accel()` so it shapes the candidate after
+    hooks 6/8 raise it, gated on `aggressive and long_pid and not driver_input`.
+  * can only LOWER the candidate => the planner can only become more conservative. Falls pass
+    through in the same frame. Ramp restarts from `max(prev, 0.0)` so brake release is instant.
+
+**VERIFIED, closed loop, shipped code, 5.4 min of e2e-won/aggressive frames:**
+
+    build                            @0.05   @0.10    km/h    peak   mean corr
+    BEFORE (no EMA, no hook 9)        51.5    31.9   48.13   0.300     0.0431
+    EMA only                          45.0    22.1   50.19   0.295     0.0450
+    SHIPPED (EMA + hook 9)            44.3    21.7   50.11   0.295     0.0449
+    (model's own floor @0.10 = 19.1)
+
+**Added hunting over the model: +12.8 -> +2.6 rev/min, 80% removed.** Peak correction
+0.300 -> 0.295, mean correction preserved (0.0431 -> 0.0449).
+
+The km/h column is NOT an improvement claim — 6 of 14 runs are worse and 61% of the delta is one
+run. It is there to show the smoothing costs nothing.
+
+**TESTS** — `openpilot/grt/tests/test_hunting_fix.py`, 21 checks, including the reversal counter's
+own sanity tests (square wave / ramp / sub-ruler dither) before anything depends on it. Full GRT
+suite: e2e_floor 26, accel_ramp 14, hold_speed 24, cruise_log 9, hunting_fix 21 = **94 PASS**.
+
+`test_hold_speed.py` needed its settle window widened: it was sized for the rate limiter alone
+(20 frames) and the EMA needs ~8 tau (160). Now DERIVED from `_HS_TAU` rather than hardcoded, and
+steady-state comparisons use a 1e-3 tolerance because an EMA approaches its target asymptotically
+(measured residual 1.7e-5 after 10 s, 5.8e-14 after 30 s).
+
+CAVEATS carried forward: hook 6 armed 0x on the 08-20 drive so this is validated as a hook 8
+result; the plant replays the logged disturbance; a low-pass filter reduces a zigzag count almost
+by construction, so it is the PAIRED result (reversals down, speed flat, peak intact) that carries
+this, not the reversal column alone.

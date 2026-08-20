@@ -415,7 +415,16 @@ def floor_e2e_accel(a_e2e: float, sm, v_ego: float, v_cruise: float) -> float:
       driver_input=driver_input,
       experimental=True,
     )
-    return max(a_floor, a_hold)
+    out = max(a_floor, a_hold)
+
+    # HOOK 9 -- rising-edge jerk cap on the combined candidate, aggressive only. Sits here
+    # rather than at the planner call site so it shapes the candidate AFTER hooks 6 and 8 have
+    # raised it but BEFORE min() sees it. It can only lower `out`, so the planner can only
+    # become more conservative. See AggressiveCandidateRamp for the sizing measurement.
+    rp = _aggr_ramp_singleton()
+    if rp is not None:
+      out = rp.update(out, aggressive and long_pid and not driver_input)
+    return out
   except Exception:
     _log_exception("floor_e2e_accel")
     return a_e2e
@@ -439,6 +448,25 @@ _hold_speed_broken = False
 
 _accel_ramp = None
 _accel_ramp_broken = False
+
+_aggr_ramp = None
+_aggr_ramp_broken = False
+
+
+def _aggr_ramp_singleton():
+  """Return hook 9's candidate ramp, or None if it cannot be built (latched, as above)."""
+  global _aggr_ramp, _aggr_ramp_broken
+  if _aggr_ramp_broken:
+    return None
+  if _aggr_ramp is None:
+    try:
+      from openpilot.grt.accel_ramp import AggressiveCandidateRamp
+      _aggr_ramp = AggressiveCandidateRamp()
+    except Exception:
+      _aggr_ramp_broken = True
+      _log_exception("aggr_ramp construction; aggressive candidate ramp disabled")
+      return None
+  return _aggr_ramp
 
 
 def _cruise_log_singleton():
