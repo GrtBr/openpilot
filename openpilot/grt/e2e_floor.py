@@ -199,6 +199,13 @@ _FLOOR_MAX = 0.50           # m/s^2 cap. Operator 2026-08-19: 0.60 helped pace w
 # armed time and max divergence from 0.440 to 0.553 m/s^2. That band is mild by construction
 # -- immediate deference past _ABANDON_ACCEL and every release gate are unchanged.
 _FLOOR_FALL_JERK = 0.30
+
+# ABANDON fade. How fast the floor's THROTTLE portion runs down to zero once the model has
+# asked past _ABANDON_ACCEL. 1.5 m/s^3 == 0.33 s from _FLOOR_MAX (0.50) to coast. Same value
+# as accel_ramp.JERK_RELAXED, duplicated rather than imported to avoid coupling the two
+# modules; it is the fork's established "gentle but not lazy" jerk. This fades THROTTLE ONLY
+# -- once the floor reaches zero the brake request is taken on the same frame.
+_THROTTLE_FALL_JERK = 1.5   # m/s^3
 # The decay must not trigger on NOISE. On 08-17 the driver felt two more stutters; both were
 # the floor decaying because raw touched -0.001 and -0.007 for ~0.1 s. The 08-16 fix had cut
 # the step from 0.414 to 0.100, but the fall (2.0) and the rise (0.30) are asymmetric, so a
@@ -496,11 +503,26 @@ class E2EAccelFloor:
     if self.state == _ACTIVE:
       self.active_t += DT_MDL
       if a_e2e < _ABANDON_ACCEL:
-        # Beyond the mild band: defer COMPLETELY and IMMEDIATELY. _ABANDON_T governs whether
-        # we LATCH OUT, never whether we obey — a hard braking request must not be held back
-        # for the debounce window. Without this the smooth withdrawal below would keep the
-        # command up to ~1.0 m/s^2 above a -1.2 request for 0.30 s. Caught by the
-        # personality-churn test in test_accel_ramp.py on 2026-08-16.
+        # Beyond the mild band: defer COMPLETELY. _ABANDON_T governs whether we LATCH OUT,
+        # never whether we obey — a hard braking request must not be held back for the
+        # debounce window. Without this the smooth withdrawal below would keep the command up
+        # to ~1.0 m/s^2 above a -1.2 request for 0.30 s. Caught by the personality-churn test
+        # in test_accel_ramp.py on 2026-08-16.
+        #
+        # THROTTLE-OFF IS FADED, THE BRAKE IS NOT (2026-08-25). Until now this was a single
+        # assignment, so a floor sitting at the cap went to the request in ONE frame: measured
+        # at 15:22:44 on 2026-08-22, +0.50 -> -0.175 in 0.01 s, i.e. -62 m/s^3 planner-side.
+        # The CAN layer stretches that over ~0.13 s at its 5 m/s^3 clip, but it is still a
+        # snap, and the operator felt it as "hesitant then jerk".
+        #
+        # Only the THROTTLE portion is faded. While the floor is still positive it runs down
+        # to zero at _THROTTLE_FALL_JERK -- 0.33 s from _FLOOR_MAX to coast -- and the command
+        # stays non-negative for at most that long. The moment the floor is at or below zero
+        # the request is taken instantly, so a real brake is never held above by this branch.
+        # We can never hold +0.50 against -1.2; we only decline to slam the throttle shut.
+        if self.floor > 0.0:
+          self.floor = max(0.0, self.floor - _THROTTLE_FALL_JERK * DT_MDL)
+          return self.floor
         self.floor = a_e2e
       elif a_e2e < _DECAY_DEADBAND and self.neg_t >= _DECAY_T:
         # The model wants deceleration. Anything at or beyond _ABANDON_ACCEL has already

@@ -3571,3 +3571,191 @@ acting on anything above it.
   a -0.618 m/s^2 step that drove a whole wrong recommendation.
 * Use logged `longitudinalPlan.longitudinalPlanSource`, never an `a_cmd >= raw` proxy.
 * Test anything touching hook 8 **closed loop** — it feeds back on `aEgo` with gain 3.
+
+---
+
+## 2026-08-25 — hook 10 (throttle hold) + seam edits in hooks 6 and 8. NOT DEPLOYED.
+
+Implements `grok_fix_stutter.md` (2026-08-24). Diagnosis is that file's; this entry records
+what was built, what deviated, and what is not covered.
+
+### The two 2026-08-22 symptoms
+
+**Distinct throttle off-on.** On this car `aReq ~ 0` is the SCC throttle deadband, so a command
+crossing zero is throttle OFF then ON. It is a SIGN CHANGE, not a step — the worst single-frame
+step at 14:35 was 0.058 m/s^2 and CAN already clips jerk at 5 m/s^3. At 14:35-14:36 (110 vs 110,
+no lead) cruise is `clip(v_cruise - v_ego)`, which at equality is 0, so a +-0.4 km/h ripple went
+slightly negative, beat e2e's +0.07 in the `min()`, and dumped the throttle: **65 zero-crossings
+/min, 59 source flips, worst 8 s at 90/min**. Also 15:28 in RELAXED, uphill, 100% e2e — the model
+dipped through zero and hook 7 only rate-limits RISES, so the cut was instant.
+
+**Slow ~4.5-5.5 s speed hunt, mostly uphill.** Not the fast hook-8 zigzag (already EMA'd). At the
+set speed `a_cruise = 0`, so `min(raised_e2e, 0) = 0` and hooks 6/8 were STRUCTURALLY VETOED.
+16:40 is the clean picture: 60.0 -> 50.9 -> 60.0 against a 60 set. At 17:34-17:40 the hooks
+raised on 7% of frames while cruise won 77% of the `min()`.
+
+### What was built
+
+**Hook 10 — `openpilot/grt/throttle_hold.py` (new, all personalities, no feature param)**
+  * **layer B** `deadband_cruise_accel()` on the CRUISE candidate, after hook 5, before `min()`:
+    at or below the set speed return `ACCEL_MAX` so cruise cannot veto a raised e2e candidate;
+    above it, the ordinary P-term, plus a tiny-negative clip (`-BAND < a < 0 -> 0`) so a ripple
+    just over set does not click the SCC. `forceDecel` (v_cruise ~ 0) is untouched.
+  * **layer A** sign debounce on the FINAL command, after `min()` and hook 7. Holds the
+    PRE-GLITCH command (not 0 — clipping to 0 IS the deadband) through a sign flip shorter than
+    T_HOLD (0.30 s), and never emits 0 while holding throttle on (floor EPSILON = 0.04).
+  * **layer C** backstop: with >= 5 km/h unused headroom and a request milder than ABANDON,
+    refuse to cut throttle. Adds no acceleration; mainly the relaxed 15:28 path.
+  * In every layer a request at or beyond **ABANDON (-0.20)** passes through unfiltered on the
+    same 50 ms tick. There is no time constant anywhere in the file.
+
+**Hook 8 — `hold_speed.py`, two seams**
+  * zero-cap `a_e2e < 0.0` -> `a_e2e < -0.20`. The old threshold made the servo a no-op on the
+    one case it exists for: on a grade the model sits at -0.02..+0.02 and the car bleeds speed.
+  * handoff no longer at 1 km/h of headroom ("cruise owns the set speed") but only when
+    `v_ego > v_cruise`. Cruise cannot hold a speed on a hill; the 1 km/h handoff IS the pump.
+
+**Hook 6 — `e2e_floor.py`, abandon fade.** `_THROTTLE_FALL_JERK = 1.5 m/s^3` runs the THROTTLE
+portion of the floor down instead of assigning `self.floor = a_e2e` in one frame (15:22:44 was
++0.50 -> -0.175 in 0.01 s, -62 m/s^3 planner-side). Once the floor is at or below zero the
+request is taken on the SAME frame. Hook 6 still raises at raw ~ 0 — that is purpose (2).
+
+### DEVIATIONS AND LIMITS — read before tuning
+
+1. **The abandon fade is cut short by hook 6's own `_ABANDON_T`.** 0.50 at 1.5 m/s^3 needs
+   0.33 s, but the latch-out releases at 0.30 s (6 frames). Measured: the floor fades
+   +0.500 -> 0.425 -> 0.350 -> 0.275 -> 0.200 -> 0.125, then the release hands over at -0.25.
+   The snap is roughly **halved (0.75 -> 0.375), not eliminated**. Closing it needs
+   `_THROTTLE_FALL_JERK` ~ 1.67, and the spec fixes 1.5 and forbids retuning `_ABANDON_T`.
+2. **A large SUDDEN drop never reaches the fade at all** — `_ABANDON_DROP` (0.35 over 0.5 s)
+   releases the hook outright first, returning the request untouched. Correct, and asserted.
+3. **Layer B removes the cruise APPROACH TAPER.** Below set, the stock candidate is +0.28 m/s^2
+   at 1 km/h below, and that P-term is what eases the car in. Returning `ACCEL_MAX` deletes it,
+   so the approach is now shaped only by e2e + hooks 6/8, and the frame `v_ego` crosses
+   `v_cruise` the branch snaps to its negative P-term. **Overshoot-then-snap at the set speed is
+   a plausible NEW oscillation and none of the five replay gates covers it** — all five test the
+   droop side. If the car starts hunting AT the set speed rather than below it, look here first.
+4. **Layer A's EPSILON hold has no timeout.** While `last_sign` is positive the command never
+   goes to 0; it goes to 0.04. That ends only when the model asks below zero for 0.30 s, or when
+   `v_ego` crosses `v_cruise`. Sustained EPSILON is ~8.6 km/h per minute, so in RELAXED (no
+   hooks 6/8) layers A+C become the mechanism that walks the car to the set speed — behaviour
+   relaxed did not have before.
+5. **Spec §7's grep order lists hook 2 after the `min()`.** That is a slip: hook 2 APPENDS a
+   candidate, so it must precede `min()`. Hook 2 was not moved. Actual order is
+   hook 1 -> get_cruise_accel -> hook 5 -> **B** -> 6/8/9 -> hook 2 -> min -> hook 7 -> **A+C**.
+6. **Spec §5's layer-A prose says "positive through frame 6, negative from frame 7"; its own
+   pseudocode gives accept-at-frame-6** (`pending_t` reaches 0.30 on the 6th increment and
+   `0.30 < 0.30` is false). The pseudocode was followed — it holds 0.25 s, not 0.30 s, which is
+   the more conservative of the two readings.
+
+### Tests
+
+`test_throttle_hold.py` is new (32 checks). `test_hold_speed.py` (29) and `test_accel_ramp.py`
+(22) were CHANGED, not weakened: the old "output capped at 0 while the model asks to slow" and
+"inert at the set speed" assertions encoded the exact behaviour being removed. Full suite:
+throttle_hold 32, hold_speed 29, accel_ramp 22, hunting_fix 21, e2e_floor 26, cruise_log 9 =
+**139 PASS**.
+
+One trap worth recording: the first version of the abandon-fade test armed hook 6 by stepping
+`a_e2e` 0.60 -> 0.02, which trips `_ABANDON_DROP` and releases the hook, so the floor was 0.000
+and every fade assertion passed **vacuously**. It now arms via the personality edge with a steady
+mild request and ASSERTS `floor > 0` as a precondition. Same failure mode as "hook 6 armed 0x"
+on 2026-08-20 — a hook-6 test can look green while the hook never ran.
+
+### Replay gates — NOT yet run against rlogs
+
+1. 16:40: the 60 -> 51 -> 60 pump must not be `min(..., cruise=0)` at 60.
+2. 17:34: cruise must not sit at 0 while e2e+corr is positive and `v_ego <= v_cruise`.
+3. 15:22:44: no 1-frame +0.50 -> -0.18; throttle fade then brake.
+4. 14:35:50 and 15:28:39: no sign flip out.
+5. A step to -0.5 still appears on the SAME 50 ms tick once floor/hold is already <= 0.
+
+Gates 3, 4 and 5 are covered by unit tests. Gates 1 and 2 need an rlog replay against the
+2026-08-22 drive and have NOT been run. **NOT DEPLOYED — no device change from this work.**
+
+### 2026-08-25 — replay gates 1 and 2 RUN against the 2026-08-22 logs. Both PASS.
+
+Script `analysis/gates.py`. OLD chain = hooks 6/8/9 loaded from git at HEAD (not re-implemented);
+NEW chain = working tree (hook 10 A/B/C + the 6/8 seams). Eight operator-named windows.
+
+**A RECORDER FAULT HAD TO BE FIXED FIRST.** `cruise_log.py` hit its 50 MB cap and LATCHED OFF at
+**16:28:51** on this drive. Every row after that is frozen at `v_cruise 110.0 / a_cruise +0.593`
+— which is exactly windows (e) through (h). Using it there put the reconstruction 0.09-0.13 m/s^2
+above the logged command and claimed a 110 set speed at 16:40 where the car was actually on 60.
+The set speed now comes from `carState.vCruise` and the candidate is rebuilt as
+`clip(v_cruise - v_ego, -1.2, 2.0)`. That reproduces the logged command exactly.
+
+**VALIDATION of the OLD reconstruction against the command the car actually sent** (this is what
+makes the rest meaningful): sd 0.0009 / 0.0033 / 0.0046 / 0.0048 / 0.0405 / 0.0043 / 0.0034 /
+0.0027 across (a)-(h); |err| < 0.05 on **100%** of frames in seven windows and 95% at 16:40 (the
+residual there is hook 1 lowering v_cruise on that hill, which a dash-based set speed cannot see).
+
+    window                          n  cruise won  VETO   @~0   zc/min old   new   B only   A+C
+    (a) 14:35-36 stutter   109-110/110      584    441   350           69     18       70    18
+    (b) 14:45-46 uphill    105-110/110      209    131   123           54     17       40    17
+    (c) 15:08-09 hunting    96-105/110        0      0     0           44      6       34     6
+    (d) 15:22-23 hesitant   66-102/110        0      0     0           47      7       45     7
+    (e) 16:40-41 uphill      51-78/ 80      515    452   136           40      8       40     8
+    (f) 16:58-59 flat      106-108/110        0      0     0           50     12       46    12
+    (g) 17:13-15 uphill     93-108/110        0      0     0           39      3       26     3
+    (h) 17:34-40 uphill    104-111/110     5347   4158  2773           58     17       57    17
+    TOTAL                                  6655   5182  3382
+
+**GATE 1 (16:40) PASSES.** Cruise won 515 of 1200 engaged frames; **452 of those were vetoing a
+POSITIVE raised-e2e candidate while the car was at or below its set speed**, 136 of them with the
+cruise candidate inside +-0.05 of zero. Layer B releases all of them.
+
+**GATE 2 (17:34-17:40) PASSES.** Cruise won 5347 of 7200 frames; **4158 vetoes, of which 2773 had
+cruise at ~0** — i.e. 2.3 minutes of a 6-minute window where cruise sat at zero while the e2e
+candidate was positive and the car was at or below 110. Layer B releases all of them.
+
+Across all eight windows the veto ran on **5182 frames, 30.8% of engaged time**. That is the
+structural defect hooks 6 and 8 were being defeated by, measured.
+
+**Zero-crossings of the command fall in every window**, 39-92%: (a) 69->18, (b) 54->17,
+(c) 44->6, (d) 47->7, (e) 40->8, (f) 50->12, (g) 39->3, (h) 58->17.
+
+**ATTRIBUTION — the two layers do different jobs, and the columns prove it.** `A+C` alone
+reproduces the full new chain's zero-crossing count in EVERY window (18/17/6/7/8/12/3/17).
+`B only` barely moves it (70/40/34/45/40/46/26/57) and at 14:35 is marginally WORSE than the old
+chain (70 vs 69). So **layer A does essentially all of the anti-chatter work; layer B does none of
+it** — B's entire value is authority, i.e. the veto column, not smoothness. That 70-vs-69 is the
+first empirical hint of the documented UNTESTED DIRECTION: releasing cruise hands the approach to
+e2e, and if e2e wanders across zero there are marginally MORE crossings until A cleans up.
+
+**STILL NOT COVERED.** These gates test the droop/veto side only. Overshoot-then-snap at the set
+speed — the consequence of B removing the cruise approach taper — is not measurable from a replay
+of logs recorded WITHOUT the change, because the speed trajectory itself would differ. It needs a
+road test. Watch for hunting AT the set speed rather than below it.
+
+Open loop throughout: layer A is applied to the reconstructed command, and the plant would respond
+differently. This measures whether the sign flips are removed, not the resulting speed.
+NOT DEPLOYED.
+
+### 2026-08-25 — `cruise_log.py` REMOVED
+
+The temporary recorder wired into hook 5 on 2026-08-19 is gone: module, singleton, the
+`record()` call, its 9 tests, and the GRT_MODS entry.
+
+It earned its keep — the internal `v_cruise` reaches no logged message, and without it neither
+the 08-20 set-speed stepping (100->80 and 60->40 km/h in a single frame) nor the hook 3 / hook 5
+guard defect would have been findable. But it **filled its 50 MB cap and latched off mid-drive on
+08-22 at 16:28:51**, and it did so SILENTLY: every subsequent row is frozen at
+`v_cruise 110.0 / a_cruise +0.593`. That stale data made the first run of the hook 10 replay
+gates claim a 110 set speed on a road where the car was on 60, and put the reconstruction
+0.09-0.13 m/s^2 above the command the car actually sent. It was only caught because the
+reconstruction was validated against `carControl.actuators.accel` — a validation step that exists
+precisely so a bad input cannot pass as a result.
+
+**Lesson recorded in the code:** a diagnostic that can go stale without saying so is worse than
+no diagnostic. If the internal `v_cruise` is needed again, publish it on `longitudinalPlan`
+(the `aCruise`/`vCruise` ordinals already exist in log.capnp but sit in the `deprecated` group
+and are never assigned) rather than writing a CSV with a silent cap.
+
+The replay path no longer needs it: the set speed comes from `carState.vCruise` and the cruise
+candidate is rebuilt as `clip(v_cruise - v_ego, -1.2, 2.0)`, which reproduced the logged command
+with sd <= 0.0405 and |err| < 0.05 on 100% of frames in seven of eight windows.
+
+Suite is now 130 (was 139 with cruise_log's 9). The 52.4 MB `cruise_log.csv` still sits on the
+device at `/data/media/0/grt/` — dead weight on a volume that is 90% full. NOT deleted from the
+device by this commit; nothing was deployed.

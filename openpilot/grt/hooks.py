@@ -12,7 +12,7 @@ the `min()`:
 where `a_cruise = clip(v_cruise - v_ego, A_CRUISE_MIN, max_accel)` and `A_CRUISE_MIN = -1.2`.
 
 That `min()` is the whole injection surface. Hooks 1 and 2 were the first two points found;
-hooks 5-9 were added later and are listed further down.
+hooks 5-10 were added later and are listed further down.
 
   hook 1  `limit_v_cruise()`          — lower the v_cruise ceiling before `get_cruise_accel`.
                                         A lower ceiling makes `a_cruise` negative and the
@@ -39,9 +39,9 @@ can be enabled separately during on-car testing, per the phased rollout.
                                         limit. See grt/set_speed.py. Hooks 1/2 shape how the
                                         car drives; hook 3 changes what the driver reads.
 
-THE LONGITUDINAL-COMFORT HOOKS (5-9)
-------------------------------------
-Hooks 1/2/3 are about WHERE the car should slow down. Hooks 5-9 are about HOW the commanded
+THE LONGITUDINAL-COMFORT HOOKS (5-10)
+-------------------------------------
+Hooks 1/2/3 are about WHERE the car should slow down. Hooks 5-10 are about HOW the commanded
 acceleration is delivered, and they came out of on-road reports rather than map data.
 
   hook 5  `soften_cruise_decel()`      — after `get_cruise_accel`. Raises the cruise branch's
@@ -79,9 +79,38 @@ acceleration is delivered, and they came out of on-road reports rather than map 
                                         choice. RELAXED ONLY. Note hook 7 and hook 9 share a
                                         module and a shape but never both apply.
 
+  hook 10 `deadband_cruise_accel()`    — grt/throttle_hold.py, layer B. On the CRUISE
+                                        candidate, after hook 5, before the `min()`. At or
+                                        below the set speed the cruise branch stands down
+                                        (returns ACCEL_MAX) so it cannot veto a raised e2e
+                                        candidate. ALL PERSONALITIES.
+       `hold_throttle()`                — same file, layers A + C. On the FINAL command, after
+                                        the `min()` and after hook 7. A is a SIGN DEBOUNCE
+                                        that holds the pre-glitch command through a dip
+                                        shorter than 0.30 s; C refuses a mild coast while
+                                        >= 5 km/h of set-speed headroom is unused. ALL
+                                        PERSONALITIES -- the SCC deadband chatter it fixes
+                                        was measured in relaxed too.
+
+WHY HOOK 10 EXISTS: on this car `aReq ~ 0` is the SCC throttle DEADBAND, so a command that
+crosses zero is throttle OFF then ON. That is a SIGN CHANGE, not a sharp step -- the worst
+single-frame step on 2026-08-22 was 0.058 m/s^2 and CAN already clips jerk at 5 m/s^3, so
+smoothing the slope cannot help and was measured not to. Separately, at the set speed
+`a_cruise = 0`, so `min(raised_e2e, 0) = 0` and hooks 6 and 8 were STRUCTURALLY VETOED --
+at 17:34-17:40 cruise won 77% of frames while the hooks reached the wheels on 7%.
+
 PERSONALITY IS THE SWITCH for 6/8/9 -- operator's explicit decision (2026-08-14): no feature
 param, because selecting a different personality is a control the driver already has on the
-wheel and can use mid-drive. Do not add a param gate without asking.
+wheel and can use mid-drive. Do not add a param gate without asking. Hook 10 is deliberately
+NOT personality-gated; its layers are bounded so they are safe in every personality.
+
+TWO SEAM CHANGES ON 2026-08-25, recorded here because they alter documented contracts:
+  * hook 8's zero-cap moved from `a_e2e < 0.0` to `a_e2e < -0.20`. The old threshold made the
+    servo a no-op on grades, where the model sits at -0.02..+0.02 and the car bleeds speed.
+    A request at or beyond -0.20 still folds the cap.
+  * hook 8's handoff no longer fires at 1 km/h of headroom ("cruise owns the set speed") but
+    only when the car is actually OVER the set speed. Cruise cannot hold a speed on a hill;
+    the 1 km/h handoff was what produced the ~5 s pump.
 
 WHY 6/8/9 EXIST AT ALL: `modeld` never receives the set speed (its inputs are `desire_pulse`,
 `traffic_convention`, `action_t` and frames), so the model CANNOT hold a speed -- it emits a
@@ -241,15 +270,13 @@ def soften_cruise_decel(a_cruise: float, v_cruise: float, v_ego: float) -> float
       approach profile keeps full authority and its late-hazard self-escalation still works.
     * it is skipped when v_cruise is ~0, which is how `forceDecel` demands a stop.
   """
-  # TEMPORARY (2026-08-19): record the INTERNAL cruise inputs. This hook is the only place
-  # that sees v_cruise AFTER limit_v_cruise together with v_ego and the raw cruise candidate,
-  # and none of those three reach any logged message -- which is why the 14:23 set-speed
-  # oscillation could not be reconstructed offline. Records only; changes nothing.
-  # REMOVE once the cruise filter is fitted and shipped.
-  cl = _cruise_log_singleton()
-  if cl is not None:
-    cl.record(v_cruise, v_ego, a_cruise)
-
+  # The TEMPORARY cruise recorder that lived here from 2026-08-19 was REMOVED on 2026-08-25.
+  # It did its job -- the 08-20 set-speed stepping and the hook 3 / hook 5 guard defect are
+  # only visible in the internal v_cruise, which reaches no logged message -- but it filled
+  # its 50 MB cap and latched off mid-drive on 08-22, silently freezing at
+  # `v_cruise 110.0 / a_cruise +0.593`. That stale data made a replay claim a 110 set speed on
+  # a road where the car was on 60. If the internal value is ever needed again, prefer
+  # publishing it on `longitudinalPlan` over a CSV that goes stale without saying so.
   try:
     if a_cruise >= -COAST_DECEL:
       return a_cruise                     # already gentler than the floor
@@ -491,14 +518,73 @@ def _enum_is_aggressive(personality) -> bool:
 # ----------------------------------------------------------------------------------------
 # Hook 7 — rising-edge jerk cap on the final accel command, RELAXED personality only.
 # ----------------------------------------------------------------------------------------
-_cruise_log = None
-_cruise_log_broken = False
-
 _hold_speed = None
 _hold_speed_broken = False
 
 _accel_ramp = None
 _accel_ramp_broken = False
+
+_throttle_hold = None
+_throttle_hold_broken = False
+
+
+def _throttle_hold_singleton():
+  """Return hook 10's state, or None if it cannot be built (latched, as above)."""
+  global _throttle_hold, _throttle_hold_broken
+  if _throttle_hold_broken:
+    return None
+  if _throttle_hold is None:
+    try:
+      from openpilot.grt.throttle_hold import ThrottleHold
+      _throttle_hold = ThrottleHold()
+    except Exception:
+      _throttle_hold_broken = True
+      _log_exception("throttle_hold construction; hook 10 disabled")
+      return None
+  return _throttle_hold
+
+
+def deadband_cruise_accel(a_cruise: float, v_ego: float, v_cruise: float) -> float:
+  """Hook 10 layer B. Runs on the CRUISE candidate, after hook 5, before the `min()`.
+
+  At or below the set speed the cruise branch stands down, so a positive e2e candidate raised
+  by hooks 6/8 is no longer vetoed by `min(raised_e2e, 0) = 0`. Above the set speed nothing
+  changes. See openpilot/grt/throttle_hold.py -- including the UNTESTED DIRECTION note, since
+  this removes the cruise approach taper.
+
+  Never raises: any failure returns the cruise candidate unchanged.
+  """
+  try:
+    th = _throttle_hold_singleton()
+    if th is None:
+      return a_cruise
+    return th.deadband_cruise_accel(float(a_cruise), float(v_ego), float(v_cruise))
+  except Exception:
+    _log_exception("deadband_cruise_accel")
+    return a_cruise
+
+
+def hold_throttle(a_target: float, sm, v_ego: float, v_cruise: float,
+                  long_active: bool) -> float:
+  """Hook 10 layers A + C. Runs on the FINAL command, after the `min()` and after hook 7.
+
+  All personalities -- unlike hooks 6/8/9 this is not gated on aggressive, because the SCC
+  deadband chatter it fixes was measured in relaxed too (15:28 on 2026-08-22).
+
+  `sm` is accepted for symmetry with the other shims and for future gating; the layers need
+  only the command, the speeds and `long_active`.
+
+  Never raises: any failure returns the planner's own command unchanged.
+  """
+  try:
+    th = _throttle_hold_singleton()
+    if th is None:
+      return a_target
+    return th.update(float(a_target), float(v_ego), float(v_cruise), bool(long_active))
+  except Exception:
+    _log_exception("hold_throttle")
+    return a_target
+
 
 _aggr_ramp = None
 _aggr_ramp_broken = False
@@ -518,22 +604,6 @@ def _aggr_ramp_singleton():
       _log_exception("aggr_ramp construction; aggressive candidate ramp disabled")
       return None
   return _aggr_ramp
-
-
-def _cruise_log_singleton():
-  """TEMPORARY diagnostic recorder; see grt/cruise_log.py. Latched off on any failure."""
-  global _cruise_log, _cruise_log_broken
-  if _cruise_log_broken:
-    return None
-  if _cruise_log is None:
-    try:
-      from openpilot.grt.cruise_log import CruiseLog
-      _cruise_log = CruiseLog()
-    except Exception:
-      _cruise_log_broken = True
-      _log_exception("cruise_log construction; cruise diagnostic disabled")
-      return None
-  return _cruise_log
 
 
 def _hold_speed_singleton():

@@ -9,13 +9,18 @@ Runs with STUBBED openpilot deps so it works on a dev box that cannot import ope
 The safety-relevant properties asserted here:
   * the correction is POSITIVE-ONLY and capped, so it can only ever raise the e2e candidate,
     and `min()` still hands control to cruise or a lead branch whenever either wants less,
-  * while the model asks for DECELERATION the output is capped at 0 -- it can undo
-    over-braking down to coasting but never accelerates against a deceleration request,
+  * while the model asks for a REAL brake -- past _HS_ABANDON (-0.20) -- the output is
+    capped at 0: it can undo over-braking down to coasting but never accelerates against a
+    genuine deceleration request. Between -0.20 and 0 a POSITIVE hold is allowed, and that
+    is deliberate (2026-08-25): the old cap at 0.0 made the servo a no-op on grades, which
+    is the one case it exists for,
   * the lag reference is the ACTUAL commanded accel, so a lead branch's braking is NOT
     misread as the plant under-delivering,
   * it BACKS OFF on its own as the car reaches what was asked (proportional, no flip-off),
-  * it is inert outside aggressive, below the minimum speed, at the set speed, and on
-    driver input.
+  * it is inert outside aggressive, below the minimum speed, and on driver input. It is NO
+    LONGER inert near the set speed -- it stands down only when the car is actually OVER it,
+    because cruise cannot hold a speed on a grade and the 1 km/h handoff was what produced
+    the ~5 s pump.
 """
 import pathlib
 import sys
@@ -29,7 +34,7 @@ sys.modules['openpilot.common.realtime'] = _rt
 
 from openpilot.grt.hold_speed import (HoldSpeed, _HS_GAIN, _HS_DEAD,   # noqa: E402
                                       _HS_CAP, _LAG_N, _SMOOTH_N, _HS_LOG_EVERY,
-                                      _HS_CORR_JERK, _HS_TAU)
+                                      _HS_CORR_JERK, _HS_TAU, _HS_ABANDON)
 from openpilot.grt.e2e_floor import E2EAccelFloor                      # noqa: E402
 
 OK = dict(v_ego=25.0, v_cruise=33.0, aggressive=True, long_pid=True,
@@ -98,12 +103,24 @@ def main():
   check(f"a lead branch braking is NOT misread as under-delivery (got {o[-1]:+.3f})",
         o[-1] == 0.0)
 
-  # --- capped at zero while the model asks to slow ---------------------------------
+  # --- the zero-cap now sits at _HS_ABANDON, not at 0 -------------------------------
+  # CHANGED 2026-08-25. The old assertion was "while the model asks for DECELERATION the
+  # output is capped at 0". That capped the servo out of existence on exactly the case it
+  # exists for: on a grade the model sits at -0.02..+0.02 ("I don't desire more throttle")
+  # while the car bleeds speed. The cap now triggers only past _HS_ABANDON, so the mild band
+  # allows a positive hold and a REAL brake still folds it.
   hs = HoldSpeed()
-  o = run(hs, FULL, a_e2e=-0.10, a_ego=-0.40)     # u = +0.30
-  check(f"model asking to slow: output never rises above 0 (got {o[-1]:+.3f})",
-        o[-1] <= 1e-12)
-  check(f"...but it DOES undo over-braking (got {o[-1]:+.3f} vs raw -0.100)", o[-1] > -0.10)
+  o = run(hs, FULL, a_e2e=-0.04, a_ego=-0.24)     # mild "no more throttle", u = +0.20
+  check(f"mild negative ({-0.04:+.2f} > {_HS_ABANDON}): output MAY be positive "
+        f"(got {o[-1]:+.3f}) -- this is purpose (1)", o[-1] > 0.0)
+  check(f"...and is still bounded by _HS_CAP (got {o[-1]:+.3f} <= "
+        f"{-0.04 + _HS_CAP:+.3f})", o[-1] <= -0.04 + _HS_CAP + 1e-9)
+
+  hs = HoldSpeed()
+  o = run(hs, FULL, a_e2e=-0.50, a_ego=-0.70)     # a REAL brake, u = +0.20
+  check(f"past _HS_ABANDON: output still capped at 0 (got {o[-1]:+.3f})", o[-1] <= 1e-12)
+  check(f"...but over-braking is still undone (got {o[-1]:+.3f} vs raw -0.500)",
+        o[-1] > -0.50)
 
   hs = HoldSpeed()
   o = run(hs, FULL, a_e2e=-0.60, a_ego=-0.70)
@@ -130,7 +147,6 @@ def main():
   # --- inert where it should be ----------------------------------------------------
   for lbl, kw in (("outside aggressive personality", dict(aggressive=False)),
                   ("below the minimum speed", dict(v_ego=5.0)),
-                  ("at the set speed -- cruise owns it", dict(v_cruise=25.05)),
                   ("on driver input", dict(driver_input=True))):
     hs = HoldSpeed()
     o = run(hs, FULL, a_e2e=0.10, a_ego=-0.10, **kw)
@@ -204,6 +220,29 @@ def main():
         f"({hs.stats['frames_correcting']}) in the same run",
         fl.stats['armed'] >= 1 and hs.stats['frames_correcting'] >= 1)
   check(f"combined output stays bounded (max {max(out):.3f})", max(out) <= 1.0)
+
+  # --- HANDOFF: the 1 km/h "cruise owns the set speed" rule is GONE -----------------
+  # CHANGED 2026-08-25. Handing over at 1 km/h of headroom is what produced the ~5 s pump:
+  # cruise cannot hold a speed on a grade, so the car coasted, drooped, headroom re-opened,
+  # and the servo woke up again. It now stands down only when the car is actually OVER the
+  # set speed, where cruise genuinely should own it.
+  hs = HoldSpeed()
+  o = run(hs, FULL, a_e2e=0.10, a_ego=-0.10, v_ego=25.0, v_cruise=25.0 + 0.5 / 3.6)
+  check(f"0.5 km/h BELOW the set speed: servo still corrects (got {o[-1]:+.3f})",
+        o[-1] > 0.10 + 1e-9)
+
+  hs = HoldSpeed()
+  o = run(hs, FULL, a_e2e=0.10, a_ego=-0.10, v_ego=25.0, v_cruise=25.0 - 0.5 / 3.6)
+  check(f"0.5 km/h ABOVE the set speed: correction decays out (got {o[-1]:+.3f})",
+        abs(o[-1] - 0.10) < 1e-3)
+  steps = [abs(o[n] - o[n - 1]) for n in range(1, len(o))]
+  check(f"...and decays through the filters, never steps (max {max(steps):.4f})",
+        max(steps) <= _HS_CORR_JERK * 0.05 + 1e-9)
+
+  hs = HoldSpeed()
+  o = run(hs, FULL, a_e2e=0.10, a_ego=-0.10, v_ego=25.0, v_cruise=25.0)
+  check(f"exactly AT the set speed: servo still corrects (got {o[-1]:+.3f})",
+        o[-1] > 0.10 + 1e-9)
 
   print("\nALL PASS" if ok else "\nFAILURES PRESENT")
   return 0 if ok else 1

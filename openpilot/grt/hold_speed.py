@@ -18,7 +18,7 @@ Pure disturbance rejection on the model's OWN request:
 
     u    = a_commanded(t - LAG) - aEgo(t)        > 0 means the plant under-delivered
     corr = clip(GAIN * (u - DEAD), 0, CAP)
-    out  = a_e2e + corr                          (capped at 0 while a_e2e < 0, see below)
+    out  = a_e2e + corr                          (capped at 0 while a_e2e < ABANDON, below)
 
 It is a SERVO, not an override: whatever the model asked for, this makes the car actually
 deliver it. That holds for ANY commanded value, so unlike an anchor-on-quiet design there is
@@ -48,11 +48,17 @@ and the outcome are different quantities once a disturbance exists.
 
 Bounded three ways:
   * the correction is POSITIVE-ONLY and capped at CAP;
-  * while the model asks for deceleration the output is capped at 0 -- so it can undo
-    over-braking down to coasting, but never accelerates against a deceleration request.
-    Measured cost of that cap: 8.08 -> closed-loop recovery, vs 11.35 uncapped;
+  * while the model asks for a REAL brake -- a request at or beyond _HS_ABANDON (-0.20) --
+    the output is capped at 0, so it can undo over-braking down to coasting but never
+    accelerates against a genuine deceleration request. Between -0.20 and 0 the servo IS
+    allowed to hold a positive command: that band is the model saying "I do not desire more
+    throttle", not "slow down", and holding through it is the whole purpose of this hook.
+    The threshold was 0.0 until 2026-08-25, which made the servo a no-op on grades -- see
+    the comment at the cap itself;
   * it is applied to the e2e CANDIDATE, so `min()` still hands control to cruise or a lead
-    branch whenever either wants less. It cannot override a lead.
+    branch whenever either wants less. It cannot override a lead. NOTE that hook 10 layer B
+    now stops the CRUISE branch vetoing this at or below the set speed -- that was the
+    structural reason this servo could not do its job (see grt/throttle_hold.py).
 
 CLOSED-LOOP EXPECTATION, not open-loop
 --------------------------------------
@@ -125,7 +131,11 @@ _HS_CORR_JERK = 0.30      # m/s^3
 _HS_TAU = 1.00            # s, EMA time constant on the correction target
 
 _HS_MIN_SPEED = 8.33      # m/s == 30 km/h, same floor as hook 6
-_HS_MIN_HEADROOM = 0.28   # m/s == 1 km/h. Never push past the set speed; cruise owns that.
+
+# The request beyond which this servo must never push. Same value as hook 6's _ABANDON_ACCEL
+# and hook 10's ABANDON -- they answer the same question ("is this a real brake?") and MUST
+# NOT drift apart. Kept local so this module reads standalone.
+_HS_ABANDON = -0.20       # m/s^2
 
 # LOGGING. Unlike hook 6 this servo is continuous, not event-based -- it corrects on ~40% of
 # frames, so a per-transition line would flood swaglog (the `lead.status` incident put 38,300
@@ -229,7 +239,14 @@ class HoldSpeed:
       return a_e2e
     u = sum(self.u_hist) / len(self.u_hist)
 
-    if v_cruise - v_ego < _HS_MIN_HEADROOM:
+    # HANDOFF. Until 2026-08-25 this decayed the correction out as soon as headroom fell below
+    # _HS_MIN_HEADROOM (1 km/h), on the reasoning that "cruise owns the set speed". CRUISE
+    # CANNOT OWN A HILL: on 2026-08-22 at 17:34-17:40 the car sat at 109.6 against a 110 set,
+    # cruise won the min() on 77% of frames, and the hooks reached the wheels on 7%. Handing
+    # over at 1 km/h is what produced the ~5 s pump -- coast on grade, droop, headroom opens,
+    # servo works again, repeat. Now the servo only stands down when the car is actually OVER
+    # the set speed, where cruise genuinely should own it.
+    if v_ego > v_cruise:
       self._end_burst(v_ego)
       corr = self._ramp(self._smooth(0.0))   # decay out through BOTH filters, do not step out
       return a_e2e + corr if corr > 0.0 else a_e2e
@@ -242,8 +259,19 @@ class HoldSpeed:
     # model wanders across zero continuously, so `out = min(0, a_e2e + corr)` toggled between
     # 0.00 and ~0.31 frame to frame and squared the command. Folding the limit into the target
     # lets the rate limiter smooth the transition instead.
-    if a_e2e < 0.0:
-      # Undo over-braking down to coasting, never accelerate against a deceleration request.
+    if a_e2e < _HS_ABANDON:
+      # ZERO-CAP THRESHOLD, moved from 0.0 to _HS_ABANDON on 2026-08-25.
+      #
+      # The old test `a_e2e < 0.0` made this servo a NO-OP for exactly the case it exists to
+      # fix. On a grade the model sits at -0.02 .. +0.02 -- "I do not desire more throttle" --
+      # and the car bleeds speed. With the cap at zero, any mildly negative frame forced
+      # `a_e2e + corr <= 0`, so the grade correction was discarded on precisely the frames
+      # where the speed was falling. Measured 2026-08-22: hooks raising on 24-48% of frames
+      # through the uphill hunts, yet the command still pumping on a ~4.5-5.5 s period.
+      #
+      # A mild "no more throttle" must still allow a POSITIVE hold. A real vision or lead
+      # brake -- anything at or beyond _HS_ABANDON -- still folds the cap, so the servo can
+      # never accelerate against a genuine deceleration request.
       capped_target = max(0.0, -a_e2e)
       if capped_target < target:
         self.b_zero_capped += 1

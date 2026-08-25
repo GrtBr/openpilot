@@ -16,6 +16,7 @@ The safety-relevant properties asserted here:
     wire-level clip (~5 m/s^3, hyundaicanfd.py) stretches out — and neither hook is left
     stuck afterwards.
 """
+import math
 import pathlib
 import random
 import sys
@@ -28,7 +29,8 @@ _rt.DT_MDL = 0.05
 sys.modules['openpilot.common.realtime'] = _rt
 
 from openpilot.grt.accel_ramp import RelaxedAccelRamp, JERK_RELAXED   # noqa: E402
-from openpilot.grt.e2e_floor import E2EAccelFloor, _FLOOR_MAX         # noqa: E402
+from openpilot.grt.e2e_floor import (E2EAccelFloor, _FLOOR_MAX,        # noqa: E402
+                                     _THROTTLE_FALL_JERK)
 
 DT = 0.05
 WIRE_JERK = 5.0        # hyundaicanfd.py's a_val rate clip, m/s^3
@@ -139,12 +141,76 @@ def main():
   random.seed(7)
   pers = ['relaxed', 'standard', 'aggressive']
   worst = 0.0
+  worst_abs = 0.0
   for i in range(4000):
     a = random.choice([0.0, 0.02, 0.3, 0.8, -0.3, -1.2, 1.5])
-    worst = max(worst, c.step(a, pers[(i // 37) % 3]) - min(a, 2.0))
-  check(f"4000 frames of rapid personality churn: max excess over the raw candidate "
-        f"{worst:+.3f} (only hook 6 may legitimately raise it, capped at _FLOOR_MAX "
-        f"= {_FLOOR_MAX})", worst <= _FLOOR_MAX + 1e-4)
+    out = c.step(a, pers[(i // 37) % 3])
+    worst = max(worst, out - min(a, 2.0))
+    worst_abs = max(worst_abs, out - max(min(a, 2.0), _FLOOR_MAX))
+  # CHANGED 2026-08-25. The old bound was "excess over the raw candidate <= _FLOOR_MAX",
+  # which assumed hook 6's abandon was a ONE-FRAME drop straight to a_e2e. It now fades the
+  # THROTTLE portion of the floor to zero at _THROTTLE_FALL_JERK first, so against a_e2e =
+  # -1.2 the excess can transiently reach _FLOOR_MAX + 1.2. The invariant that actually
+  # matters is unchanged and is asserted instead: the command is never above the plan when
+  # the plan is higher, and never above _FLOOR_MAX in absolute terms -- hook 6 cannot invent
+  # acceleration beyond its cap, and hooks 7/9 only ever lower.
+  check(f"4000 frames of rapid personality churn: command never exceeds "
+        f"max(plan, _FLOOR_MAX={_FLOOR_MAX}) (worst absolute {worst_abs:+.3f})",
+        worst_abs <= _FLOOR_MAX + 1e-4)
+
+  # --- hook 6 abandon: throttle FADES, the brake does NOT (2026-08-25) --------------
+  # Cause: 2026-08-22 15:22:44 dropped +0.50 -> -0.175 in one frame (-62 m/s^3 planner-side).
+  # Only the THROTTLE portion fades; once the floor is at or below zero the brake request is
+  # taken on the SAME frame.
+  #
+  # TWO UPSTREAM PATHS REACH ABANDON AND ONLY ONE FADES, which is correct:
+  #   * a GRADUAL descent past _ABANDON_ACCEL hits the fade branch (the 15:22 case);
+  #   * a large SUDDEN drop (here 0.02 -> -1.2) trips _ABANDON_DROP first and releases the
+  #     hook outright, returning the request untouched on that frame. A real brake is never
+  #     faded.
+  fl = E2EAccelFloor()
+  base = dict(v_ego=25.0, v_cruise=33.0, lead=False, throttle_prob=0.9, curvature=0.0001,
+              long_pid=True, driver_input=False, experimental=True)
+  # Arm via the PERSONALITY edge with a steady mild request. Stepping a_e2e down from a large
+  # value instead would trip _ABANDON_DROP and release before the floor ever climbs -- that
+  # mistake made an earlier version of this test vacuously green.
+  for _ in range(20):
+    fl.update(a_e2e=0.02, aggressive=False, **base)
+  for _ in range(60):
+    fl.update(a_e2e=0.02, aggressive=True, **base)
+  peak = fl.floor
+  check(f"[precondition] hook 6 armed and the floor climbed ({peak:+.3f} > 0, armed "
+        f"{fl.stats['armed']}x)", peak > 0.0 and fl.stats['armed'] >= 1)
+
+  fade = [fl.update(a_e2e=-0.25, aggressive=True, **base) for _ in range(20)]
+  nonneg = [x for x in fade if x >= 0.0]
+  max_fade = math.ceil(_FLOOR_MAX / (_THROTTLE_FALL_JERK * 0.05))
+  check(f"gradual abandon fades the throttle instead of snapping "
+        f"({peak:+.3f} -> {' -> '.join(f'{x:+.3f}' for x in fade[:4])} ...)",
+        len(nonneg) >= 1 and nonneg[0] < peak)
+  check(f"fade rate is _THROTTLE_FALL_JERK ({_THROTTLE_FALL_JERK} m/s^3 = "
+        f"{_THROTTLE_FALL_JERK * 0.05:.4f}/frame)",
+        all(abs((nonneg[k - 1] - nonneg[k]) - _THROTTLE_FALL_JERK * 0.05) < 1e-9
+            for k in range(1, len(nonneg))))
+  check(f"fade is bounded by {max_fade} frames (got {len(nonneg)}) and never rises",
+        len(nonneg) <= max_fade)
+  check(f"the command never exceeds the floor cap during the fade (max {max(fade):+.3f})",
+        max(fade) <= _FLOOR_MAX + 1e-9)
+  check(f"after the fade the request is taken IN FULL (last {fade[-1]:+.3f})",
+        abs(fade[-1] - (-0.25)) < 1e-9)
+  # NOTE the fade is cut short by hook 6's own _ABANDON_T latch-out (0.30 s = 6 frames)
+  # before it can reach zero: 0.50 at 1.5 m/s^3 needs 0.33 s. The snap is roughly halved
+  # (0.75 -> 0.375 on this case), not eliminated. Raising _THROTTLE_FALL_JERK to ~1.67 would
+  # close it, but the spec fixes 1.5 and forbids retuning _ABANDON_T.
+
+  fl2 = E2EAccelFloor()
+  for _ in range(20):
+    fl2.update(a_e2e=0.02, aggressive=False, **base)
+  for _ in range(60):
+    fl2.update(a_e2e=0.02, aggressive=True, **base)
+  check("[precondition] second instance armed too", fl2.floor > 0.0)
+  check("a large SUDDEN drop to -1.2 is NOT faded -- released instantly, that frame",
+        abs(fl2.update(a_e2e=-1.2, aggressive=True, **base) - (-1.2)) < 1e-9)
 
   c = Chain()
   for i in range(60):

@@ -153,6 +153,18 @@ class LongitudinalPlanner:
     # weaker than the MPC (lead) or hook 2 (hazard) branches.
     self.a_cruise = grt_hooks.soften_cruise_decel(self.a_cruise, v_cruise, v_ego)
     # GRT-MOD-END
+
+    # GRT-MOD-START — hook 10 layer B: at or below the set speed, stop the cruise candidate
+    # vetoing hooks 6/8. At the set speed a_cruise is 0, so min(raised_e2e, 0) = 0 and every
+    # thing hooks 6 and 8 add is discarded — measured 2026-08-22 17:34-17:40, cruise won 77%
+    # of frames while the hooks reached the wheels on 7%. MUST stay after hook 5 (which may
+    # soften the same value) and before the min(). Above the set speed this is a no-op, so
+    # overspeed authority is unchanged, and hook 1 still lowers v_cruise for map curves and
+    # limits — which puts us in the v_ego > v_cruise branch where cruise goes negative as
+    # designed. See grt/throttle_hold.py: this removes the cruise APPROACH TAPER, a direction
+    # no replay gate covers.
+    self.a_cruise = grt_hooks.deadband_cruise_accel(self.a_cruise, v_ego, v_cruise)
+    # GRT-MOD-END
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
     # GRT-MOD-START — offer back unused headroom below the set speed (default OFF, param
@@ -192,6 +204,18 @@ class LongitudinalPlanner:
     # exactly plan, so the command is never greater than the planner asked for. A rise that is
     # merely the release of braking is not delayed.
     output_a_target = grt_hooks.ramp_relaxed_accel(output_a_target, sm, sm['carControl'].longActive)
+    # GRT-MOD-END
+
+    # GRT-MOD-START — hook 10 layers A + C: SCC sign debounce, and no mild coast while set-
+    # speed headroom is unused. AFTER the min() and AFTER hook 7, so it shapes the command
+    # actually being sent rather than biasing which candidate wins. ALL PERSONALITIES: the
+    # deadband chatter it fixes was measured in relaxed too (15:28 on 2026-08-22). On this car
+    # aReq ~ 0 is the SCC throttle deadband, so crossing zero is throttle off-then-on; this
+    # holds the PRE-GLITCH command through a dip shorter than 0.30 s rather than filtering it.
+    # A request at or beyond -0.20 is passed through unfiltered on this same tick.
+    # See openpilot/grt/throttle_hold.py.
+    output_a_target = grt_hooks.hold_throttle(output_a_target, sm, v_ego, v_cruise,
+                                              sm['carControl'].longActive)
     # GRT-MOD-END
 
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
