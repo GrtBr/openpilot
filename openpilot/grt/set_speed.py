@@ -120,7 +120,27 @@ _DEBUG_LOG = os.path.join(GRT_CONFIG_DIR, "set_speed.log") if platform.system() 
 # Heartbeat: how often to log WHY nothing happened. Without this a road test where the feature
 # never fires produces an empty log and no way to tell which gate rejected — and mapdOut is not
 # in rlog on a prebuilt branch, so there is no retrospective path either.
-HEARTBEAT_S = 2.0
+#
+# 2.0 -> 10.0 on 2026-08-25. At 2 s the heartbeat was 98% of the file (3906 of the last 4000
+# lines were `action: idle`) and the log had reached 17.1 MB. The heartbeat exists to explain a
+# road test where nothing fired, not to narrate ordinary driving; 10 s still catches which gate
+# is rejecting while cutting the volume 5x. Decisions are logged separately and are unaffected.
+HEARTBEAT_S = 10.0
+
+# ROTATION. Added 2026-08-25 — until then `_write` was a bare append with NO cap of any kind,
+# so this file grew without bound (measured ~0.44 MB per engaged hour).
+#
+# The sibling failure is instructive and is why rotation is preferred to a hard cap: the
+# TEMPORARY `cruise_log.py` recorder had a 50 MB cap and, on reaching it, latched itself off
+# SILENTLY. Every row it wrote afterwards was stale, and that stale data made a replay claim a
+# 110 km/h set speed on a road where the car was on 60. A cap that stops writing without saying
+# so is worse than no cap. So: roll over, keep exactly one previous file, and write a line
+# recording that it happened.
+#
+# Worst case on disk is _MAX_BYTES * 2 (the live file plus one rolled), i.e. bounded and
+# predictable, which a 90%-full /data/media needs.
+_MAX_BYTES = 8 * 1024 * 1024      # 8 MB live, 16 MB total worst case
+_ROTATED_SUFFIX = ".1"
 
 
 def _near(a, b) -> bool:
@@ -668,10 +688,30 @@ class SetSpeedLimitTracker:
 
   @staticmethod
   def _write(record: dict) -> None:
+    """Append one JSON line, rolling the file over at _MAX_BYTES.
+
+    The size check costs a stat per write, which is free here: `_write` is reached at most
+    once per HEARTBEAT_S plus once per decision, NOT once per frame — this is a 100 Hz loop
+    and writing on every frame is exactly what the throttling upstream exists to prevent.
+
+    A rollover is RECORDED as its own line rather than happening silently. See the comment on
+    _MAX_BYTES for why that matters.
+    """
     if _DEBUG_LOG is None:
       return
     try:
+      rolled = False
+      try:
+        if os.path.getsize(_DEBUG_LOG) >= _MAX_BYTES:
+          os.replace(_DEBUG_LOG, _DEBUG_LOG + _ROTATED_SUFFIX)
+          rolled = True
+      except FileNotFoundError:
+        pass                                   # first write, or someone removed it underneath
       with open(_DEBUG_LOG, "a") as f:
+        if rolled:
+          f.write(json.dumps({"t": time.monotonic(), "action": "rotated",
+                              "why": f"reached {_MAX_BYTES} bytes; previous kept as "
+                                     f"{os.path.basename(_DEBUG_LOG) + _ROTATED_SUFFIX}"}) + "\n")
         f.write(json.dumps(record) + "\n")
     except OSError:
       pass

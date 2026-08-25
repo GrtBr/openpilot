@@ -22,6 +22,7 @@ Safety-relevant properties asserted here:
   * float comparisons tolerate rounding (an == would end tracking permanently).
 """
 import pathlib
+import os
 import sys
 import types
 from types import SimpleNamespace as NS
@@ -787,6 +788,59 @@ def test_heartbeat_records_rejection_reason():
   finally:
     ss._DEBUG_LOG = old
     ss.SetSpeedLimitTracker._write = staticmethod(real_write)
+
+
+# --- debug log growth -----------------------------------------------------------------------
+
+def test_debug_log_rotates_and_says_so():
+  """The log was UNBOUNDED until 2026-08-25 (bare append, no cap) and had reached 17.1 MB.
+
+  The sibling cruise_log.py had a cap but latched off SILENTLY on reaching it, and its stale
+  rows later made a replay claim the wrong set speed. So the assertion is not merely "bounded"
+  -- it is that a rollover leaves a RECORD.
+  """
+  import json as _json
+  import tempfile
+
+  d = tempfile.mkdtemp()
+  path = os.path.join(d, "set_speed.log")
+  orig_log, orig_max = ss._DEBUG_LOG, ss._MAX_BYTES
+  try:
+    ss._DEBUG_LOG = path
+    ss._MAX_BYTES = 4096                       # small, so the test is fast
+    t = ss.SetSpeedLimitTracker()
+    for i in range(4000):
+      t._write({"action": "idle", "i": i, "pad": "x" * 40})
+      if os.path.getsize(path) > ss._MAX_BYTES * 3:
+        break                                  # bail loudly rather than loop forever
+    live = os.path.getsize(path)
+    rolled = os.path.exists(path + ss._ROTATED_SUFFIX)
+    check("debug log stays bounded", live <= ss._MAX_BYTES * 2,
+          f"live {live} B vs cap {ss._MAX_BYTES}")
+    check("previous file is kept, not discarded", rolled)
+    actions = []
+    with open(path) as f:
+      for ln in f:
+        try: actions.append(_json.loads(ln).get("action"))
+        except Exception: pass
+    check("the rollover is RECORDED, not silent", "rotated" in actions,
+          f"actions seen: {sorted(set(a for a in actions if a))}")
+    check("worst case on disk is bounded by 2x the cap",
+          live + (os.path.getsize(path + ss._ROTATED_SUFFIX) if rolled else 0)
+          <= ss._MAX_BYTES * 2 + 4096)
+  finally:
+    ss._DEBUG_LOG, ss._MAX_BYTES = orig_log, orig_max
+    for f in (path, path + ss._ROTATED_SUFFIX):
+      try: os.remove(f)
+      except OSError: pass
+    try: os.rmdir(d)
+    except OSError: pass
+
+
+def test_heartbeat_interval_is_not_chatty():
+  """98% of the 17.1 MB was `idle` heartbeat. Guard the interval that fixed it."""
+  check("heartbeat interval is >= 10 s", ss.HEARTBEAT_S >= 10.0,
+        f"HEARTBEAT_S = {ss.HEARTBEAT_S}")
 
 
 def main():
