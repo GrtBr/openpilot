@@ -19,12 +19,10 @@ Two distinct 2026-08-22 symptoms, three layers:
      m/s^2 of P-term) goes slightly NEGATIVE, beats e2e's +0.07 in the `min()`, and dumps the
      throttle. 65 zero-crossings/min, 59 source flips; worst 8 s ran at 90/min.
 
-  B  DEADBAND THE CRUISE CANDIDATE at or below the set speed. At the set speed
-     `a_cruise = 0`, so `min(e2e_raised, 0) = 0` and hooks 6 and 8 are structurally vetoed --
-     whatever they add is thrown away. Coast on a grade -> speed droops -> headroom opens ->
-     hook 8 works again -> ~5 s pump. 16:40 is the clean picture: 60.0 -> 50.9 -> 60.0 against
-     a 60 set. At 17:34-17:40 the hooks raised on only 7% of frames and cruise won 77% of the
-     `min()` -- they almost never reached the wheels.
+  B  RIPPLE CLIP on the cruise candidate: a few tenths of a km/h of overspeed must not click
+     the SCC throttle off and on. NOTE this layer used to do much more -- it released the
+     cruise branch entirely at or below the set speed. That was reverted on the same day it
+     shipped; see "WHAT LAYER B USED TO DO" below and the method docstring.
 
   C  BACKSTOP with unused headroom, mainly for RELAXED, where hooks 6/8/9 are all off. 15:28
      uphill at 62-80 vs 110, 100% e2e, `a_cmd == raw`: the model dipped through zero and the
@@ -39,28 +37,25 @@ SAFETY
 ------
 This hook can make the car LESS conservative, deliberately, in three bounded ways:
 
-  * B stops the cruise branch vetoing a positive e2e+hook candidate at or below the set speed.
-    That is the entire point of hooks 6 and 8 (operator design, 2026-08-14). Overspeed is
-    still capped -- above the set speed the branch is the ordinary P-term, hook-5 softened.
-    A lead or the MPC still wins the `min()` when lower. Map curves, speed limits and hazards
-    still work, because hook 1 LOWERS `v_cruise`, which puts us in the `v_ego > v_cruise`
-    branch where cruise goes negative as designed.
+  * B now only clips a sub-BAND negative to zero, so it can withhold at most 0.08 m/s^2 of
+    braking, and only while the car is within a few tenths of a km/h over the set speed.
   * A can hold a pre-glitch POSITIVE command through a dip shorter than T_HOLD (0.30 s).
   * C can refuse a mild coast while at least MIN_HEADROOM (5 km/h) of set-speed headroom is
     unused. It does NOT add acceleration -- unlike hook 6 it only declines to cut throttle.
 
 In all three, `a <= ABANDON` is accepted immediately and unmodified.
 
-UNTESTED DIRECTION -- READ BEFORE TUNING
-----------------------------------------
-**B removes the cruise approach taper.** Below the set speed the stock candidate is
-`clip(v_cruise - v_ego, ...)`, i.e. +0.28 m/s^2 at 1 km/h below set, and that P-term is what
-eases the car in. Returning `ACCEL_MAX` deletes it: the approach is now shaped by whatever
-e2e and hooks 6/8 ask for, right up to the set speed, and the frame `v_ego` crosses
-`v_cruise` the branch snaps back to its negative P-term. Overshoot-then-snap at the set speed
-is a plausible NEW oscillation and **no replay gate in the 2026-08-24 spec covers it** -- all
-five gates test the droop side. If the car starts hunting AT the set speed rather than below
-it, this is the first place to look.
+WHAT LAYER B USED TO DO, AND WHY IT DOES NOT ANY MORE
+-----------------------------------------------------
+Layer B originally returned `ACCEL_MAX` at or below the set speed, to stop the cruise branch
+vetoing hooks 6/8. That was shipped on 2026-08-25 with an explicit warning that it deleted the
+cruise approach taper and that overshoot-then-snap was untested. The first drive produced
+exactly that: time spent above the set speed went 23% -> 54% and reversals at a 0.10 ruler went
+18.9 -> 22.7/min, a ~1 km/h bang-bang limit cycle across the set speed. It was also unnecessary
+-- 5159 of 5182 measured veto frames were within 1 km/h of the set speed, where cruise easing
+off is correct. The release is gone; only the SCC ripple clip remains. Layers A and C are
+unchanged and are what actually fixed the chatter (zero-crossings 82 -> 25/min on the same
+drive). Full reasoning in `deadband_cruise_accel`.
 
 A second bound worth stating: while `last_sign` is positive, layer A never emits 0, it emits
 EPSILON (0.04 m/s^2). Nothing times that out. It ends when the model asks for less than zero
@@ -69,8 +64,6 @@ for T_HOLD, or when `v_ego` crosses `v_cruise` and cruise goes negative. Sustain
 A+C become the mechanism that walks the car up to the set speed. That is what C is for, but
 it is behaviour relaxed did not have before this hook.
 """
-from opendbc.car.interfaces import ACCEL_MAX
-
 from openpilot.common.realtime import DT_MDL
 
 # Stay off the SCC deadband. Never emit a positive command smaller than this while holding
@@ -118,15 +111,44 @@ class ThrottleHold:
   def deadband_cruise_accel(self, a_cruise: float, v_ego: float, v_cruise: float) -> float:
     """Run on the CRUISE candidate, after hook 5, before the `min()`.
 
-    At or below the set speed the cruise branch stops competing, so hooks 6 and 8 can
-    actually reach the SCC. Above it, the branch is untouched.
+    ONLY the SCC ripple clip. The set-speed RELEASE this used to do was reverted on
+    2026-08-25 -- see below.
+
+    WHY THE RELEASE WAS REMOVED (it caused exactly the failure it was warned about)
+    ------------------------------------------------------------------------------
+    From 2026-08-25 this returned `ACCEL_MAX` whenever `v_ego <= v_cruise`, to stop
+    `min(raised_e2e, 0) = 0` discarding hooks 6 and 8 at the set speed. The docstring
+    flagged that this deletes the cruise APPROACH TAPER and that overshoot-then-snap was
+    an untested direction. It happened, on the first drive:
+
+        near the set speed (+-2 km/h), engaged      before      with release
+          zero-crossings/min                          82.1          25.0   <- layer A, kept
+          reversals/min at a 0.10 ruler               18.9          22.7   <- WORSE
+          share of time ABOVE the set speed            23%           54%   <- WORSE
+
+    Measured mechanism, 12:33:54 at a 110 set: the command is a bang-bang limit cycle across
+    the set speed. Just BELOW it the source is e2e on 95% of frames with a mean command of
+    +0.064 (still accelerating 0.4 km/h from target, because nothing tapers any more); just
+    ABOVE it the source is cruise on 96% with a mean of -0.008. Cross, snap, cross back:
+    ~4-5 s period, ~1 km/h amplitude.
+
+    AND THE RELEASE WAS NEVER NEEDED. `a_cruise` IS the headroom in m/s, so the cruise branch
+    can only out-bid a hook candidate of ~0.3-0.8 while headroom is under ~3 km/h. Measured
+    over the four 2026-08-22 windows where cruise won: of 5182 frames, **5159 were within
+    1 km/h of the set speed and not one had more than 3 km/h of headroom**. Inside that last
+    km/h the car is already at its target and cruise easing off is correct behaviour, not a
+    veto to be defeated. The genuine droop case (16:40, 51 km/h against a 60 set) had cruise
+    saturated at ACCEL_MAX with 9 km/h of headroom -- cruise was never what held it down.
+    That one is fixed by hook 8's zero-cap seam, which is unrelated to this layer.
+
+    So: keep the ripple clip, which is about the SCC deadband and is what this hook is for.
+    Do not reintroduce the release. If hooks 6/8 ever do need authority at the set speed, the
+    answer is a TAPER, never a step at `v_ego == v_cruise` -- the step is the oscillator.
     """
     if v_cruise < MIN_V_CRUISE:
       return a_cruise                      # forceDecel demands a stop; do not touch it
-    if v_ego <= v_cruise:
-      return ACCEL_MAX                     # let e2e + hooks 6/8, or the MPC, choose
-    # Overshoot only. Keep the existing P-term (possibly hook-5 softened), but do not let a
-    # ripple of a few tenths of a km/h click the throttle off and on.
+    # A ripple of a few tenths of a km/h around the set speed must not click the SCC throttle
+    # off and on. This is the only thing this layer does now.
     if -BAND < a_cruise < 0.0:
       return 0.0
     return a_cruise

@@ -3759,3 +3759,60 @@ with sd <= 0.0405 and |err| < 0.05 on 100% of frames in seven of eight windows.
 Suite is now 130 (was 139 with cruise_log's 9). The 52.4 MB `cruise_log.csv` still sits on the
 device at `/data/media/0/grt/` — dead weight on a volume that is 90% full. NOT deleted from the
 device by this commit; nothing was deployed.
+
+### 2026-08-25 (evening) — layer B's set-speed RELEASE reverted. It failed exactly as warned.
+
+Operator drove `2fe8ee07d` and reported hunting AT the set speed — the one direction the replay
+gates could not cover, and the one flagged in `throttle_hold.py` as UNTESTED. Confirmed, root-
+caused, reverted. Data: `/home/pi5-ubuntu/drives/2026-08-25/`, 7 routes, 08:35-13:16, 106 segs.
+
+**MEASURED**, engaged frames within 2 km/h of the set speed, 08-22 route 118 (before) vs 08-25:
+
+    metric                          before   with release
+    zero-crossings/min                82.1       25.0     <- layer A, KEPT, works
+    reversals/min at a 0.10 ruler     18.9       22.7     <- WORSE
+    share of time ABOVE the set        23%        54%     <- WORSE
+
+Layer A is vindicated: the SCC chatter that started all of this is down 70%. Layer B is not.
+
+**MECHANISM** — a bang-bang limit cycle across the set speed, 12:33:54 at a 110 set:
+
+    109.6 (-0.43 below)  aTgt +0.238  src e2e     still accelerating 0.4 km/h from target
+    110.3 (+0.33 above)  aTgt +0.241  src cruise
+    110.6 (+0.57 above)  aTgt -0.157  src cruise  snaps negative, model still wants +0.245
+
+Aggregated: just BELOW set, 9003 frames, e2e wins 95%, mean command **+0.064**. Just ABOVE set,
+10519 frames, cruise wins 96%, mean **-0.008**. Accelerate, cross, brake, cross back: ~4-5 s,
+~1 km/h. The cause is that layer B was a STEP at `v_ego == v_cruise` — below it the cruise
+branch contributed nothing at all, above it the full P-term. Nothing eased the car in.
+
+**AND IT WAS NEVER NEEDED.** `a_cruise` IS the headroom in m/s, so cruise can only out-bid a
+hook candidate of ~0.3-0.8 while headroom is under ~3 km/h. Of the 5182 frames on 2026-08-22
+where cruise won the min() at or below set: **5159 were within 1 km/h of the set speed, 23 were
+1-3 km/h, and NOT ONE had more than 3 km/h of headroom.** Inside that last km/h the car is at
+its target and cruise easing off is correct behaviour, not a veto to defeat. Gate 2 (17:34) was
+measuring cruise doing its job — the car was 0.2 km/h below a 110 set, oscillating 0.2 km/h.
+
+The genuine droop, 16:40 (51 km/h against a 60 set), had **9 km/h of headroom and cruise
+saturated at ACCEL_MAX** — cruise was never what held it down. That case is fixed by hook 8's
+zero-cap seam, which is independent of this layer and is unchanged.
+
+**THE FIX.** Layer B keeps only the SCC ripple clip; the set-speed release is gone:
+
+    5 km/h below set   a_cruise +1.390 -> +1.390     taper intact
+    1 km/h below set   a_cruise +0.280 -> +0.280     taper intact
+    exactly at set     a_cruise +0.000 -> +0.000     cruise owns the set speed again
+    0.2 km/h over set  a_cruise -0.050 -> +0.000     ripple clipped, SCC not clicked
+    genuinely over set a_cruise -0.280 -> -0.280     untouched
+
+Its worst-case authority is now 0.08 m/s^2 of withheld braking, only while within a few tenths
+of a km/h over the set speed. Layers A and C, and the hook 6/8 seams, are UNCHANGED — they are
+what actually earned their place.
+
+**LESSON.** The flag was right and the gates were structurally incapable of catching it: you
+cannot measure a trajectory change by replaying logs recorded without it. When a change alters
+where the car sits relative to a control boundary, the replay can only test the side it already
+saw. Say so explicitly, and treat the first drive as the experiment.
+
+Suite 128 (30 in test_throttle_hold, down 2 with the release's assertions replaced by
+REGRESSION tests that the taper survives). NOT YET DEPLOYED.

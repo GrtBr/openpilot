@@ -10,8 +10,8 @@ The safety-relevant properties asserted here:
     on any frame -- that is the one invariant the whole hook rests on,
   * layer A holds the PRE-GLITCH command through a short sign flip, and never emits 0 while
     holding throttle on (0 is the SCC deadband -- clipping to it is the bug, not the fix),
-  * layer B stands the cruise branch down only at or below the set speed, and never when
-    `forceDecel` has driven v_cruise to ~0,
+  * layer B ONLY clips a sub-BAND ripple just over the set speed, and never touches the
+    candidate below the set speed -- the approach taper must survive (regression, 2026-08-25),
   * layer C refuses a mild coast only while real headroom is unused, and adds no acceleration.
 """
 import pathlib
@@ -24,20 +24,9 @@ _rt = types.ModuleType('openpilot.common.realtime')
 _rt.DT_MDL = 0.05
 sys.modules['openpilot.common.realtime'] = _rt
 
-# `opendbc.car.interfaces` pulls in the whole car stack; stub just the constant hook 10 needs.
-try:
-  from opendbc.car.interfaces import ACCEL_MAX  # noqa: F401
-except Exception:
-  _ifc = types.ModuleType('opendbc.car.interfaces')
-  _ifc.ACCEL_MAX = 2.0
-  _ifc.ACCEL_MIN = -3.5
-  sys.modules.setdefault('opendbc', types.ModuleType('opendbc'))
-  sys.modules.setdefault('opendbc.car', types.ModuleType('opendbc.car'))
-  sys.modules['opendbc.car.interfaces'] = _ifc
-
 from openpilot.grt.throttle_hold import (ThrottleHold, EPSILON, BAND,      # noqa: E402
                                          T_HOLD, ABANDON, MIN_HEADROOM,
-                                         MIN_V_CRUISE, ACCEL_MAX)
+                                         MIN_V_CRUISE)
 
 DT = 0.05
 HOLD_N = int(round(T_HOLD / DT))          # frames the debounce holds -- 6
@@ -52,34 +41,36 @@ def main():
     ok = ok and bool(cond)
 
   # ================= LAYER B =========================================================
+  # The set-speed RELEASE was reverted on 2026-08-25 after one drive: it removed the cruise
+  # approach taper and produced a ~1 km/h bang-bang limit cycle across the set speed (time
+  # above set 23% -> 54%, reversals at 0.10 up 18.9 -> 22.7/min). It was also unnecessary --
+  # 5159 of 5182 measured veto frames were within 1 km/h of the set speed. All that remains
+  # is the SCC ripple clip.
   th = ThrottleHold()
   B = th.deadband_cruise_accel
-  V = 30.0                                  # m/s set speed for these cases
+  V = 30.0
 
-  check(f"at set speed, a_cruise 0.0 -> ACCEL_MAX ({B(0.0, V, V):.2f})",
-        B(0.0, V, V) == ACCEL_MAX)
-  check(f"below set, a_cruise -0.02 -> ACCEL_MAX ({B(-0.02, V - 1.0, V):.2f})",
-        B(-0.02, V - 1.0, V) == ACCEL_MAX)
-  check(f"below set, a small positive P-term is also released ({B(0.28, V - 0.28, V):.2f})",
-        B(0.28, V - 0.28, V) == ACCEL_MAX)
+  check(f"REGRESSION: at the set speed the candidate is NOT released ({B(0.0, V, V):+.3f})",
+        B(0.0, V, V) == 0.0)
+  check(f"REGRESSION: below set the P-term is left ALONE, so the approach still tapers "
+        f"({B(0.28, V - 0.28, V):+.3f})", B(0.28, V - 0.28, V) == 0.28)
+  check(f"REGRESSION: a small negative below set is untouched ({B(-0.30, V - 1.0, V):+.3f})",
+        B(-0.30, V - 1.0, V) == -0.30)
 
-  over = V + 1.0 / 3.6                      # ~1 km/h over the set speed
+  over = V + 1.0 / 3.6
   check(f"over set by 1 km/h, -0.28 passes through unchanged ({B(-0.28, over, V):+.3f})",
         B(-0.28, over, V) == -0.28)
-  check(f"over set, tiny negative -0.05 clipped to 0 ({B(-0.05, over, V):+.3f})",
+  check(f"the SCC ripple clip survives: -0.05 -> 0 ({B(-0.05, over, V):+.3f})",
         B(-0.05, over, V) == 0.0)
-  check(f"over set, -{BAND + 0.01:.2f} is NOT clipped (beyond the ripple band)",
+  check(f"-{BAND + 0.01:.2f} is beyond the ripple band and is NOT clipped",
         B(-(BAND + 0.01), over, V) == -(BAND + 0.01))
+  check(f"the clip can withhold at most BAND ({BAND}) of braking, and only just over set",
+        abs(B(-BAND + 1e-9, over, V) - 0.0) < 1e-6)
 
-  # forceDecel: v_cruise driven to ~0 means STOP. Layer B must not touch it.
-  check(f"forceDecel (v_cruise ~0), v_ego>0, -1.20 stays -1.20 "
-        f"({B(-1.20, 10.0, 0.0):+.3f})", B(-1.20, 10.0, 0.0) == -1.20)
-  check("forceDecel: not replaced with ACCEL_MAX even though v_ego > v_cruise is False "
-        "only by definition", B(-1.20, 0.0, 0.0) == -1.20)
-  check(f"forceDecel: tiny-negative clip does NOT apply ({B(-0.05, 0.5, 0.0):+.3f})",
+  check(f"forceDecel (v_cruise ~0): -1.20 stays -1.20 ({B(-1.20, 10.0, 0.0):+.3f})",
+        B(-1.20, 10.0, 0.0) == -1.20)
+  check(f"forceDecel: the ripple clip does NOT apply ({B(-0.05, 0.5, 0.0):+.3f})",
         B(-0.05, 0.5, 0.0) == -0.05)
-  check("just above MIN_V_CRUISE the normal rules resume",
-        B(0.0, MIN_V_CRUISE, MIN_V_CRUISE + 0.01) == ACCEL_MAX)
 
   # ================= LAYER A =========================================================
   # no headroom in these cases, so layer C stays out of the way
@@ -179,23 +170,18 @@ def main():
   o = [th.update(a, **UP, long_active=True) for a in seq]
   check(f"15:28:39 replay: no sign change reaches the SCC (min {min(o):+.3f})", min(o) >= 0.0)
 
-  # 14:35:50 (aggressive, at set): cruise -0.03 for 5 frames vs e2e +0.07.
-  # B makes cruise ACCEL_MAX so the min() is the e2e branch; A must not emit a negative.
+  # 14:35:50 (aggressive, at set): a -0.03 cruise ripple vs e2e +0.07. The ripple is inside
+  # BAND so B clips it to 0; min() is then 0, and LAYER A is what stops the throttle clicking.
   th = ThrottleHold()
   vset = 110 / 3.6
-  cru = [th.deadband_cruise_accel(-0.03, vset, vset) for _ in range(5)]
-  check(f"14:35:50 replay: cruise released to ACCEL_MAX at set ({cru[0]:.2f})",
-        all(c == ACCEL_MAX for c in cru))
-  mins = [min(c, 0.07) for c in cru]
-  o = [th.update(m, v_ego=vset, v_cruise=vset, long_active=True) for m in mins]
-  check(f"14:35:50 replay: command stays positive (min {min(o):+.3f})", min(o) > 0.0)
-
-  # 16:40 (hill, at a 60 set): e2e+corr = +0.30, cruise raw 0 -> min must be +0.30, not 0
-  th = ThrottleHold()
-  v60 = 60 / 3.6
-  cru = th.deadband_cruise_accel(0.0, v60, v60)
-  check(f"16:40 replay: min(e2e+corr, cruise) is +0.30 not 0 "
-        f"({min(0.30, cru):+.3f})", abs(min(0.30, cru) - 0.30) < 1e-12)
+  over = vset + 0.1 / 3.6
+  cru = [th.deadband_cruise_accel(-0.03, over, vset) for _ in range(5)]
+  check(f"14:35:50 replay: the ripple is clipped to 0, not passed as negative ({cru[0]:+.3f})",
+        all(c == 0.0 for c in cru))
+  th.update(0.07, v_ego=vset, v_cruise=vset, long_active=True)       # throttle on first
+  o = [th.update(min(c, 0.07), v_ego=vset, v_cruise=vset, long_active=True) for c in cru]
+  check(f"14:35:50 replay: layer A holds the throttle through it (min {min(o):+.3f})",
+        min(o) > 0.0)
 
   print("\nALL PASS" if ok else "\nFAILURES PRESENT")
   return 0 if ok else 1
