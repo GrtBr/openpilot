@@ -3816,3 +3816,62 @@ saw. Say so explicitly, and treat the first drive as the experiment.
 
 Suite 128 (30 in test_throttle_hold, down 2 with the release's assertions replaced by
 REGRESSION tests that the taper survives). NOT YET DEPLOYED.
+
+### 2026-08-25 — 10:49:44 lead approach: why the car did not slow. Hooks are NOT the cause,
+### but the investigation found a real gap in hook 8.
+
+Operator report: at 10:49-10:50 the car did not slow coming up to a slow lead. Route
+`00000128` (10:37-11:00), locally `2026-08-25/dNNN.zst`. Device was on `2fe8ee07d` at the time
+— hook 10 WITH layer B's set-speed release, which was not reverted until 11:32.
+
+**WHAT HAPPENED** (aggressive personality throughout, 110 km/h, set 110):
+
+    10:49:44   lead appears  dRel 115 m  vRel -0.61     cmd  +0.000   src cruise
+    10:49:47                 dRel 104 m  vRel -2.39     cmd  -0.014   src e2e
+    10:49:50                 dRel  77 m  vRel -2.29     cmd  -0.073   src e2e
+    10:49:51                 dRel  62 m  vRel -1.63     cmd  -0.031   src lead0   <- MPC takes over
+    10:49:52                 dRel  50 m  vRel -3.42     cmd  -0.679   DRIVER BRAKES
+    10:49:55                 dRel  30 m  vRel -6.05     cmd  -3.278
+
+The lead branch did not become the `min()` until **62 m**, about a 2 s headway at 30.6 m/s. For
+the six seconds before that, from 115 m down to 77 m, the command was ~0. Then the lead braked
+hard — vRel went -1.6 -> -3.4 -> -4.8 -> -6.05 in four seconds — and the driver intervened one
+second after the MPC engaged. Closest approach 2.0 m; the car came to a stop behind it.
+
+**THE HOOKS DID NOT CAUSE THIS.** Over the 8.6 s approach the command was above the model's own
+request on 88/171 frames, mean **+0.022**, max +0.064 m/s^2. Integrated that is **0.097 m/s =
+0.35 km/h** of speed not shed. Against a 68 m gap closure at 110 km/h that is nothing. Hook 6
+never armed (0/171). Layer C never fired (headroom -0.3 to +1.8 km/h, its gate is 5 km/h).
+Note also that raising the e2e candidate makes the MPC win `min()` SOONER, not later, so the
+hooks cannot have delayed the takeover.
+
+The dominant factor is stock behaviour: **aggressive personality has the shortest follow
+distance**, so braking starts latest, and the lead decelerated hard.
+
+**THE REAL FINDING — HOOK 8 IS LEAD-BLIND.**
+
+    HoldSpeed.update(a_e2e, a_commanded, a_ego, v_ego, v_cruise, aggressive, long_pid,
+                     driver_input, experimental)
+    E2EAccelFloor.update(a_e2e, v_ego, v_cruise, LEAD, throttle_prob, curvature, ...)
+
+Hook 6 takes `lead` and refuses to arm when one is present. **Hook 8 has no lead input at all**
+— it cannot know. That was tolerable while its zero-cap sat at 0.0, because any negative model
+request folded the cap and the output could not exceed 0. Moving the cap to -0.20 today opened a
+band (-0.20 < a_e2e < 0) in which hook 8 may add POSITIVE correction, and a gentle lead approach
+lives exactly there.
+
+Measured over the 10:47-10:52 extract: 2062 engaged frames with a lead, 1114 of them CLOSING
+(vRel < -0.5), 264 with the model mildly braking inside the newly-opened band, and **166 frames
+where braking was withheld, up to +0.2267 m/s^2**. (That peak is un-contextualised — I have not
+checked what the gap was on that frame.)
+
+Hook 8's existing defence is that its error is measured against the ACTUAL command, so when the
+MPC brakes, u reads ~0 and it stops correcting. That holds once the MPC OWNS the plan. It does
+not hold during the approach, when cruise or e2e is still the source, the plant is tracking fine,
+and hook 8 is free to push up.
+
+**PROPOSED FIX — give hook 8 the lead gate hook 6 already has.** Thread `lead` through
+`floor_e2e_accel` (it is already read there for hook 6) and decay the correction out while a lead
+is present. Behind a lead the MPC owns the longitudinal decision and a speed-holding servo has no
+business adding throttle. Cost is small: hook 8 exists for grade droop on an open road, and
+behind a lead the MPC already commands what following requires. NOT IMPLEMENTED — reported first.
