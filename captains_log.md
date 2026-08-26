@@ -3954,9 +3954,45 @@ Tests: `openpilot/grt/tests/test_far_lead.py`, 24/24 pass (stubbed, no openpilot
 `test_hooks.py` unaffected (44/44). Full `grt/tests/` suite re-run clean, including
 `test_schema_conformance.py` (30/30, run via `.venv/bin/python3` for pycapnp).
 
-**NOT YET DEPLOYED to comma4.** This numeric design has not had a second advisor pass on the
-final tuning constants (advisor was unavailable at that point in the session) — flagged in the
-`far_lead.py` module docstring so a future reader sees the gap. Tier 2 lead-icon cluster jitter
-(2026-08-2x, deferred) shares this same root cause (`radarState.leadOne.vRel`) and is NOT fixed
-by this change — hook 11 only wins the planner's `min()` during the 115m-75m window, it does not
-touch `radarState` itself, so the dash display is unaffected.
+This numeric design has not had a second advisor pass on the final tuning constants (advisor
+was unavailable at that point in the session) — flagged in the `far_lead.py` module docstring
+so a future reader sees the gap. Tier 2 lead-icon cluster jitter (2026-08-2x, deferred) shares
+this same root cause (`radarState.leadOne.vRel`) and is NOT fixed by this change — hook 11 only
+wins the planner's `min()` during the 115m-75m window, it does not touch `radarState` itself, so
+the dash display is unaffected.
+
+## 2026-08-26 (later) — hook 11 DEPLOYED to comma4
+
+Device was on `09c5c5e`, 2 commits behind. Bundle `09c5c5e..nightly-dev` (24 KB, 2 commits) →
+scp → `pkill -f "[m]anager\.py"` → `git fetch <bundle> && git merge --ff-only` → reboot.
+Fast-forward clean, 7 files / +883 −3. No scons, no cereal SCP. Bundle deleted after.
+
+**Verified ON DEVICE, before the reboot:**
+- `test_schema_conformance.py` against the device's own `log.capnp`: 30/30.
+- `test_far_lead.py` 24/24, `test_hooks.py` 44/44.
+- Real imports (actual openpilot deps, not the test stubs): `grt.hooks`, `grt.far_lead` both
+  import; `hooks._far_lead_singleton()` constructs a real `FarLeadPreBrake`; an inert call
+  through the real `far_lead_candidates(sm, v_ego, stock_min)` with aggressive/not-longActive
+  returns `[]`. `longitudinal_planner.py` imports and its compiled `update()` source contains
+  the `far_lead_candidates` call site.
+
+Device came back in ~110s. Commit `2ff409b` confirmed running post-reboot.
+
+**Verified AFTER the reboot:**
+- manager, card, plannerd, controlsd, selfdrived, modeld, dmonitoringmodeld, radard, micd,
+  soundd all up (no repeat of the 2026-08-25 micd/soundd incident this time).
+- `managerState`: **nothing shouldBeRunning-but-not-running**.
+- **THE CRITICAL ONE — engagement is not blocked.** `onroadEvents` carries only `wrongGear` and
+  `seatbeltNotLatched`, the legitimate physical blockers for a parked car. No `commIssue`.
+- Zero swaglog entries mentioning `far_lead`/`hook 11` since boot — no exceptions from the new
+  code. Two unrelated tracebacks present (`pandad` panda-DFU SPI NACK during boot handshake,
+  `athenad` TLS cert-not-yet-valid) — neither touches any file this change modified; the athenad
+  one is consistent with the previously-documented pre-GPS clock drift at boot, not a
+  regression.
+- `longitudinalPlan` publishing cleanly, sane values while parked (`aTarget≈0.004`,
+  `source=e2e`, `vEgo=0`).
+
+**NOT YET road-tested.** hook 11 only arms in RELAXED personality — a drive to confirm it fires
+sanely (and does not fire in aggressive/standard) still needs a personality switch and a real
+approach to slow/stopped traffic to be conclusive; the replay bar above is the only evidence so
+far that it behaves as designed.
