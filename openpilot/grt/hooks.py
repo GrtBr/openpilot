@@ -117,6 +117,23 @@ WHY 6/8/9 EXIST AT ALL: `modeld` never receives the set speed (its inputs are `d
 comfortable acceleration for the scene. The planner's only speed controller is the cruise
 candidate, which `min()` discards whenever the model is more conservative. The component that
 knows the target cannot win; the component that wins does not know the target.
+
+  hook 11 `far_lead_candidates()`     — grt/far_lead.py. One more `min()` candidate, same
+                                        family as hook 2. RELAXED ONLY. Fills a hole measured
+                                        2026-08-25 10:49: on this vision-only car,
+                                        `radarState.leadOne.vRel` averaged -1.56 m/s while the
+                                        true (position-derived) closing rate averaged
+                                        -8.16 m/s over the same 8 s, so the MPC/e2e candidates
+                                        stayed near 0 until dRel had already collapsed under
+                                        65 m. Arms on a filter over `leadOne.dRel` (position),
+                                        NOT on `leadOne.vRel` -- an early cut that gated arming
+                                        on `vRel` false-armed on a single noisy sample and on
+                                        an unrelated noisy blip elsewhere in the same log. Once
+                                        armed, clamped to [-1.2, -0.40] (the floor is -0.40, not
+                                        softer, because hook 10 layer C's ABANDON=-0.20 would
+                                        eat anything weaker). See far_lead.py for the full
+                                        design, including why its call needs a `stock_min`
+                                        argument the other hooks do not take.
 """
 from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 
@@ -636,6 +653,57 @@ def _accel_ramp_singleton():
       _log_exception("accel_ramp construction; relaxed ramp disabled")
       return None
   return _accel_ramp
+
+
+_far_lead = None
+_far_lead_broken = False
+
+
+def _far_lead_singleton():
+  """Return hook 11's state, or None if it cannot be built (latched, as above)."""
+  global _far_lead, _far_lead_broken
+  if _far_lead_broken:
+    return None
+  if _far_lead is None:
+    try:
+      from openpilot.grt.far_lead import FarLeadPreBrake
+      _far_lead = FarLeadPreBrake()
+    except Exception:
+      _far_lead_broken = True
+      _log_exception("far_lead construction; hook 11 disabled")
+      return None
+  return _far_lead
+
+
+def far_lead_candidates(sm, v_ego: float, stock_min: float) -> list:
+  """Hook 11. Far-lead pre-brake, RELAXED personality only. See openpilot/grt/far_lead.py.
+
+  Fills the 115 m -> ~75 m hole measured 2026-08-25 10:49: on this vision-only car the
+  planner's own candidates trust `leadOne.vRel`, which is unreliable at range and high closing
+  speed. This appends one more `min()` candidate built from a filter on `leadOne.dRel` instead.
+
+  `stock_min` is the best (most negative) of the OTHER candidates already built this frame,
+  including hook 2's if it fired -- needed so this hook can hand off once something else has
+  genuinely caught up, rather than on a bare distance cutoff (see far_lead.py for why the
+  original distance cutoff was replaced, and why this could not just read `sm` for it).
+
+  Never raises: any failure returns [], and personality/longActive/driver-input are re-checked
+  every frame inside the state machine, so a wedged state cannot outlive one bad frame.
+  """
+  try:
+    fl = _far_lead_singleton()
+    if fl is None:
+      return []
+    relaxed = str(sm['selfdriveState'].personality) == 'relaxed'
+    long_active = bool(sm['carControl'].longActive)
+    cs = sm['carState']
+    driver_input = bool(cs.gasPressed or cs.brakePressed)
+    lead = sm['radarState'].leadOne
+    return fl.step(bool(lead.present), float(lead.dRel), float(lead.vRel), float(v_ego),
+                  relaxed, long_active, driver_input, float(stock_min))
+  except Exception:
+    _log_exception("far_lead_candidates")
+    return []
 
 
 def ramp_relaxed_accel(a_target: float, sm, long_active: bool) -> float:

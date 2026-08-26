@@ -193,6 +193,16 @@ class LongitudinalPlanner:
     candidates += grt_hooks.extra_accel_candidates(v_ego)
     # GRT-MOD-END
 
+    # GRT-MOD-START — hook 11: far-lead pre-brake (relaxed personality only). Fills the
+    # 115 m -> ~75 m hole measured 2026-08-25 10:49, where the candidates above trusted
+    # radarState.leadOne.vRel and stayed near 0 m/s^2 despite a genuine high closing rate (see
+    # grt/far_lead.py). Needs the best of the candidates already built this frame so it can
+    # hand off once one of them has genuinely caught up, rather than on a bare distance cutoff.
+    # Bounded to [-1.2, -0.40] and returns [] when inert, so it can only compete in the min()
+    # below, never make braking weaker than stock.
+    candidates += grt_hooks.far_lead_candidates(sm, v_ego, min(c[0] for c in candidates))
+    # GRT-MOD-END
+
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
 

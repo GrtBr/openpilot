@@ -3875,3 +3875,88 @@ and hook 8 is free to push up.
 is present. Behind a lead the MPC owns the longitudinal decision and a speed-holding servo has no
 business adding throttle. Cost is small: hook 8 exists for grade droop on an open road, and
 behind a lead the MPC already commands what following requires. NOT IMPLEMENTED — reported first.
+
+## 2026-08-26 — hook 11 (far-lead pre-brake) IMPLEMENTED and replay-verified. Same 10:49
+## incident, a DIFFERENT and lower-level root cause than the hook 8 finding above.
+
+Separate investigative thread from the 2026-08-25 entry above, same underlying drive
+(`00000128--201591a1fc`, `2026-08-25/d011-d014.zst`). That entry found the hooks did not cause
+the late brake and proposed a hook 8 lead-gate fix (not implemented). This thread asked a
+different question — is the MPC's OWN input trustworthy? — pulled the raw rlog data directly
+(`radarState`, `longitudinalPlan`, `carState`, `carControl`, all four segments), and found: it
+is not. Full numeric derivation is upstream of this repo's captains_log (Claude conversation,
+2026-08-26); the load-bearing measurement:
+
+    t+0.0s-8.0s (dRel 120m -> 56m): true 1s-baseline closing rate averaged -6.7 to -16.1 m/s;
+    reported radarState.leadOne.vRel averaged -1.56 m/s over the same window (measured
+    3-6x understatement). model_v_ego tracks carState.vEgo within 0.3-1.6 m/s (ruled out as the
+    source); the error is specific to the model's lead-velocity head, and specific to long range
+    + high closing speed -- at dRel<30m later in the same episode, vRel and true closing rate
+    agree well. Root cause: radard.py's KF1D only runs for radar-matched tracks; this car
+    (`radarUnavailable=True`) always takes the vision-only path, so `vLeadK`/`vRel` are a raw,
+    unfiltered copy of the model's single-frame velocity estimate, which is low-SNR for a small,
+    distant, fast-closing object.
+
+Two designs were reviewed (advisor-consulted) before implementation: an "other agent's" 4-point
+plan touching `radard.py`/`long_mpc.py` directly (Category C, the highest-risk class in
+GRT_MODS.md, since it edits core longitudinal control rather than a fork-owned add-on), and
+`FAR_LEAD_PREBRAKE_PROMPT.md` (repo root) — a bounded, fork-owned `min()` candidate, RELAXED
+PERSONALITY ONLY, that fills the gap without touching either stock file. The narrower design was
+chosen and IMPLEMENTED: `openpilot/grt/far_lead.py` (hook 11), wired into `hooks.py` and one
+`candidates +=` line in `longitudinal_planner.py`. See `GRT_MODS.md` for the file-level diff
+summary.
+
+**One correction made to the spec doc before implementation** (Claude + advisor, this repo):
+the original release condition (`dRel < 50` hard cutoff) was replaced. Checked against this log:
+at dRel=50.24 m, stock `aTarget` was still -0.298 — weaker than hook 11's own -0.40 floor — only
+crossing -0.40 at dRel~50.08 m. A hard release at 50 m would land inside that gap and could step
+the commanded accel back toward -0.30 for a frame or two at the tightest part of the approach.
+Replaced with: release once the OTHER candidates already built this frame (`stock_min`, passed
+in by the caller — this hook's call signature is `(sm, v_ego, stock_min)`, not the spec's
+`(sm, v_ego)`, because the MPC/e2e candidates are local variables in `longitudinal_planner`, not
+recoverable from `sm`) have themselves reached `<= -0.40`, still returning this hook's own
+candidate on that same frame so `min()` decides, then dropping the latch. `RELEASE_DIST = 20 m`
+is only an absolute backstop.
+
+**Two further bugs found by testing, before any replay** (see `far_lead.py` module docstring for
+full detail):
+
+1. An early cut gated ARMING on `min(lead.vRel, v_filt)` — i.e. let the model's raw, noisy
+   `vRel` help decide WHETHER to arm, not just how hard to brake once armed. Replayed, it
+   false-armed at t=0.35s on one noisy `vRel` sample, AND false-armed on an unrelated 4.8s noisy
+   pre-episode blip elsewhere in the same recording (flickering, non-closing detections at
+   111-114m, prob 0.5-0.7). Fixed: arming gates on `a_req` computed from the FILTER's own
+   velocity only, held above threshold for `HOT_PERSIST_S=0.5s` continuously; the raw-`vRel`
+   pessimistic pairing is used only for the command once already armed, where it is safely
+   bounded by the `[-1.2, -0.40]` clip.
+2. The `dRel > 100m` arm-distance gate was checked at the moment the persistence timers
+   completed (using LIVE `dRel`), not at first lock. A synthetic "fully stopped lead at 120m"
+   test — the single most dangerous case this hook exists for — never armed at all, because a
+   lead closing at the maximum possible rate (`vRel = -v_ego`) closes 20+m during the 0.8s
+   persistence/hot-gate delay, crossing under 100m before the check ever ran. Fixed: capture
+   `dRel_at_lock` once, at the first frame of the qualifying presence run, and gate on that.
+
+**Filter tuning** (`ALPHA=0.10, BETA=0.003` on an `[x, v]` position-measurement filter over
+`leadOne.dRel` — NOT a reuse of `radard.py`'s `KF1D`, which measures Doppler velocity into a
+`[SPEED, ACCEL]` state, a different measurement entirely): chosen empirically against this log
+and the pre-episode blip, not derived analytically. Faster tunings (0.15, 0.20) arm the real
+episode slightly earlier but still false-arm on the blip even with 1.0s of hot-persistence.
+
+**Replay bar (kinematic, not acados — pycapnp via `.venv`, all 4 segments, real absence/presence
+pattern):**
+
+    Aggressive: hook fires ZERO times across the entire ~160s recording (bit-identical to stock).
+    Relaxed:    hook arms at t+2.3s, dRel=115.0m, a=-0.40 (spec target was "~118m").
+                Stock (as-logged, aggressive) does not reach source=lead0 until t+7.35s,
+                aTarget=-0.023 at that point -- this hook is ~5s earlier and ~50m further out.
+
+Tests: `openpilot/grt/tests/test_far_lead.py`, 24/24 pass (stubbed, no openpilot import needed).
+`test_hooks.py` unaffected (44/44). Full `grt/tests/` suite re-run clean, including
+`test_schema_conformance.py` (30/30, run via `.venv/bin/python3` for pycapnp).
+
+**NOT YET DEPLOYED to comma4.** This numeric design has not had a second advisor pass on the
+final tuning constants (advisor was unavailable at that point in the session) — flagged in the
+`far_lead.py` module docstring so a future reader sees the gap. Tier 2 lead-icon cluster jitter
+(2026-08-2x, deferred) shares this same root cause (`radarState.leadOne.vRel`) and is NOT fixed
+by this change — hook 11 only wins the planner's `min()` during the 115m-75m window, it does not
+touch `radarState` itself, so the dash display is unaffected.
