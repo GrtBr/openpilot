@@ -37,7 +37,7 @@ This drive was aggressive. The hook is **relaxed-only**, so it would not have fi
 
 ## 3. What to build
 
-A **first-lock pre-brake**: when a lead appears for the first time more than 100 m away and range-rate says we are closing fast (traffic-light queue, slow pack, stopped cars), start decelerating immediately, while dRel is still > 100 m.
+A **hot-signal pre-brake** (originally "first-lock", amended 2026-08-27 after a real miss — see §4): when a lead has been continuously present and range-rate says we are closing fast (traffic-light queue, slow pack, stopped cars) while still far away, start decelerating immediately.
 
 Injection: **new extra `min()` candidate**, same family as hook 2. Add a second shim next to `candidates += grt_hooks.extra_accel_candidates(v_ego)` in `longitudinal_planner.py`. Do not fold this into hook 2. Do not lower `v_cruise` (hook 1): cruise saturates at `A_CRUISE_MIN = -1.2` and hook 5 may soften plain overspeed.
 
@@ -55,18 +55,36 @@ Return `[]` when inert. When armed, return one tuple `(a, source, should_stop)` 
 
 ## 4. Arming (all must hold)
 
-Latch on a **rising edge**, not “lead is currently far”.
+**AMENDED 2026-08-27, v2.** v1 shipped with a rising-edge design (absent ≥ 2.0 s, then present
+≥ 0.30 s) and a "distance at first lock" gate (> 100 m). On a real drive that day, a lead
+closing at up to ~3.0 m/s² of `a_req` — ten times the arming threshold, sustained for several
+seconds — was preceded by only a 0.20 s gap, not 2.0 s. The rising-edge requirement latched
+false for that entire presence run and the hook could never arm, no matter how hot the danger
+signal got. Root-caused, quantified at ~3.15 s of denied armed time (driver had to intervene
+manually), and fixed by removing the rising edge entirely — see `far_lead.py`'s module
+docstring, "THIRD BUG", for the full writeup and the replay evidence that the absence gate was
+never actually doing the flicker-rejection job it looked like it was doing (§4.3 below already
+covers that).
 
 1. `selfdriveState.personality == relaxed`. Any other personality → `[]`, drop latch.
 2. `carControl.longActive`. Not engaged → drop latch, `[]`.
-3. Lead was **absent ≥ 2.0 s**, then `radarState.leadOne.present` for **≥ 0.30 s** (same idea as hook 10 `T_HOLD`; kills the 10:48 flicker).
-4. On the arming frame, `leadOne.dRel > 100`.
-5. Closing from **range-rate**, not from vision `vRel`. Vision `vRel` at 10:49:43 was −0.77 m/s and would miss the event.
+3. `radarState.leadOne.present` for **≥ 0.30 s continuously** (same idea as hook 10 `T_HOLD`;
+   kills the 10:48-style flicker). No absence precondition — see amendment note above.
+4. Once continuous presence and a hot closing signal (item 6) have both held long enough,
+   capture `dRel_at_hot_start`: the dRel at the **first frame the hot signal (item 6) went
+   true**, not at first presence. This must be `> 80` (`ARM_MIN_DIST`, lowered from 100 —
+   anchoring later means the anchor distance is naturally smaller for the same encounter).
+   Captured once and frozen for the rest of this presence run; a fully-stopped lead first
+   detected already inside ~87 m will never satisfy this (known limitation, same failure class
+   v1 had at 100 m — outside this hook's declared envelope, see `far_lead.py` docstring).
+5. Closing from **range-rate**, not from vision `vRel`. Vision `vRel` at 10:49:43 was −0.77 m/s
+   and would miss the event.
 6. Hot enough: `a_req > 0.30 m/s²`, where
    `a_req = (v_ego² − v_lead_range²) / (2 · max(dRel − 6, 1))`
    with `v_lead_range = v_ego + vRel_range` and `vRel_range = min(lead.vRel, vRel_from_dRel_filter)` whenever both are closing (pessimistic). Equivalent TTC ≲ 15 s at highway speed is the same cut: 110 vs 80 at 120 m fires (`a_req ≈ 0.31`); 110 vs 100 at 150 m does not (`a_req ≈ 0.14`).
+   Must hold **continuously for 0.5 s** (`HOT_PERSIST_S`) before arming.
 
-Do not require a traffic light, OSM tag, `leadTwo`, or `hardBrakePredicted`. Optional one-of confirms are allowed later; they are not in v1.
+Do not require a traffic light, OSM tag, `leadTwo`, or `hardBrakePredicted`. Optional one-of confirms are allowed later; they are not in v1 or v2.
 
 ---
 
@@ -138,10 +156,12 @@ Add `openpilot/grt/tests/test_far_lead.py` in the same stubbed style as `test_ho
 | aggressive, 120 m, true vRel −8 m/s | `[]` |
 | relaxed, lead present 1 frame at 120 m | `[]` (no 0.30 s persistence) |
 | relaxed, flicker then gone (10:48 style) | `[]` |
-| relaxed, 120 m, vRel_model −0.8, range-rate −8, after 0.30 s + 2 s absence | one candidate, `a <= -0.40` |
+| relaxed, 120 m, vRel_model −0.8, range-rate −8, after 0.30 s continuous presence + hot | one candidate, `a <= -0.40` |
 | same, 110 vs 100 at 150 m (`a_req ≈ 0.14`) | `[]` |
-| same, 110 vs 0 at 120 m | candidate, `a` harder than the slow-pack case, ≥ −1.2 |
-| once armed, dRel falls to 90 m | still armed (edge was > 100 m) |
+| same, 110 vs 0 at 120 m | candidate, `a` harder than the slow-pack case, ≥ −1.2, `dRel_at_hot_start` clear of `ARM_MIN_DIST` (80 m) with margin |
+| KNOWN LIMIT: 110 vs 0, lead first seen already at 86 m | never arms (`dRel_at_hot_start` freezes below `ARM_MIN_DIST` on the first hot frame; same failure class v1 had at 100 m) |
+| relaxed, lead present+steady (non-closing) for several seconds, then starts closing hard | arms once the hot signal starts, `dRel_at_hot_start` anchored at that later instant — not at first presence |
+| once armed, dRel falls under `ARM_MIN_DIST` | still armed (the arm-distance check is one-time, at hot-start) |
 | armed, stock candidate reaches -0.40 while dRel still > 20 m (e.g. 50 m, per the 10:49 log) | this frame still returns the candidate, `min()` picks the harder one; latch drops after |
 | armed, stock candidate stuck near 0 (bad `vRel`) all the way to dRel = 20 m | still returns candidate down to the 20 m backstop |
 | dRel < 20 m | `[]`, latch cleared regardless of stock |
@@ -158,9 +178,11 @@ Run: `python3 openpilot/grt/tests/test_far_lead.py` and existing `openpilot/grt/
 Against `d012.zst`/`d013.zst`, 10:49:43–10:49:52, engaged frames:
 
 - **Aggressive (as logged):** `aTarget` and `longitudinalPlanSource` match pre-change through 10:49:51. A 10:49:43–51 mean `aTarget` still ~0. No new source `lead0` before ~64 m.
-- **Relaxed (synthetic personality override in the replay, or a unit-level kinematic replay of the logged `dRel`/`vEgo` series):** `aTarget <= -0.40` by the time dRel is still **> 100 m** (target: at or shortly after the 0.30 s persist, ~10:49:44.1, dRel ~118). By ~65 m, stock lead/e2e may be more negative and win `min()` — that is success, not a bug.
+- **Relaxed (synthetic personality override in the replay, or a unit-level kinematic replay of the logged `dRel`/`vEgo` series):** `aTarget <= -0.40` by the time dRel is still **> 80 m** (`ARM_MIN_DIST`, v2; target: at or shortly after the 0.30 s persist + 0.5 s hot, ~10:49:44.1, dRel ~118 — this specific log's hot streak starts essentially at first lock, so v1's and v2's arm points coincide here). By ~65 m, stock lead/e2e may be more negative and win `min()` — that is success, not a bug.
 
 If you cannot run acados, a kinematic replay of the hook on the logged series is enough for this bar. Do not claim on-car proof.
+
+**Second replay bar, added 2026-08-27** (route 00000139, ~07:55 incident, `.venv` pycapnp, kinematic replay): v1 (deployed) never arms — root cause in §4's amendment note. v2 arms at t+52.77 s, dRel=93.6 m, releases at t+56.77 s, dRel=37.0 m (stock caught up). Re-ran the original 08-25 log's relaxed-override case against v2 to confirm no regression: still arms at dRel=115.0 m, releases at dRel=50.1 m. Single arm/release cycle on both logs — no re-arm chatter.
 
 ---
 

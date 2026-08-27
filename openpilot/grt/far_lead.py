@@ -52,10 +52,58 @@ was first evaluated at the moment the 0.8 s persistence gate (0.30 s presence + 
 completed, using the LIVE `dRel` at that instant. For a lead closing at the maximum possible
 rate (fully stopped, `vRel = -v_ego`), dRel can shrink 20+ m during that 0.8 s -- a synthetic
 "110 vs 0 at 120 m" test never armed at all, because by the time the gate cleared, dRel had
-already crossed under 100. That is the single most dangerous case this hook exists for. Fixed
-by capturing `dRel_at_lock` once, at the FIRST frame of the qualifying presence run (matching
-spec section 3's actual wording, "appears for the first time more than 100 m away"), and
-gating on that captured value instead of live `dRel`.
+already crossed under 100. That is the single most dangerous case this hook exists for. v1
+fixed this by capturing `dRel_at_lock` once, at the FIRST frame of the qualifying presence run.
+
+A THIRD BUG, FOUND ON A REAL DRIVE (2026-08-27, ~07:55), NOT IN TESTING: v1 additionally
+required, before any of the above, a rising edge -- the lead had to have been ABSENT for
+`ABSENCE_S` (2.0 s) immediately before the presence run that triggers arming. On that drive, a
+lead closing at up to ~3.0 m/s^2 of `a_req` (ten times `HOT_A_REQ`) for several sustained
+seconds was preceded by only a 0.20 s gap, not 2.0 s -- so `qualifying_absence` latched `False`
+for that entire presence run and the hook could never arm, no matter how hot the danger signal
+became. Root-caused by direct instrumentation of `hot_elapsed`/`qualifying_absence`/
+`dRel_at_lock` frame-by-frame; quantified counterfactually at ~3.15 s of denied armed time and
+~3.6 m/s of speed shed not delivered. Driver had to intervene manually.
+
+The absence gate was never load-bearing for the thing it looked like it was protecting --
+flicker/noise rejection. That job is done entirely by `PRESENCE_PERSIST_S` (0.30 s continuous
+presence) and `HOT_PERSIST_S` (0.5 s continuous hot signal) below; both were already required
+before v1 would arm, independent of `qualifying_absence`. Replayed against the 2026-08-25
+10:49 log's 4.8 s pre-episode noise blip with the absence gate removed entirely: still zero
+false arms, because that blip's dRel is flat and never produces a sustained `a_req_filt` hot
+streak. So the absence gate bought nothing but the false confidence that flicker rejection
+needed it, while actively blocking exactly the kind of gap-then-danger sequence a real drive
+produced. REMOVED. Arming now requires only: `PRESENCE_PERSIST_S` continuous presence, followed
+by `HOT_PERSIST_S` of continuous `a_req_filt > HOT_A_REQ` -- no rising edge, no absence
+precondition, evaluated fresh every frame the lead is present.
+
+Removing the rising edge means the old "distance at first lock" anchor (`dRel_at_lock`) no
+longer has a well-defined trigger point -- there is no "lock" event anymore, just continuous
+presence. Replaced with `dRel_at_hot_start`: dRel captured once, at the first frame the HOT
+STREAK begins (i.e. the first frame `a_req_filt` crosses above `HOT_A_REQ`, not the first frame
+of presence). This is a different instant than v1's `dRel_at_lock` and a different semantic --
+"distance when the danger became detectable", not "distance at first sight" -- do not conflate
+the two if reading old test cases or the spec doc's earlier revisions. `ARM_MIN_DIST` dropped
+from 100 to 80 m to compensate: anchoring later (at hot-start instead of first-lock) means the
+anchor distance is naturally smaller for the same encounter, so the old 100 m threshold would
+reject cases it used to accept. Validated against both real incident logs plus the canonical
+"110 vs 0 at 120 m" stopped-lead synthetic (see `test_far_lead.py`): 2026-08-27 now arms at
+t+52.77 s, dRel=93.6 m (previously: never armed); 2026-08-25 still arms at dRel=115.0 m
+(unchanged, hot-start and first-lock coincide when the lead is genuinely fresh); the stopped-
+lead synthetic still arms, `dRel_at_hot_start`=112.35 m at the 120 m starting condition.
+
+KNOWN LIMITATION of the hot-start anchor, found while validating the above (not a regression --
+v1 fails the same class of case for a different reason, see below): if a fully-stopped lead is
+first detected already inside roughly 87 m (this car's radar/vision detection range, closing at
+`v_ego`), the hot streak can begin with `dRel_at_hot_start` already at or under `ARM_MIN_DIST`,
+and because that value is captured once and frozen, the arming check then fails FOREVER for
+that encounter -- it never re-evaluates from a later, closer anchor. v1 has an analogous
+failure mode (a lead first detected already inside 100 m never arms either, since
+`dRel_at_lock` is captured at first sight). Neither design was built or tested for "stopped
+object first visible already inside ~90 m while still doing 110 km/h" -- that is a sub-3-second
+emergency-stop scenario outside this hook's declared envelope (correcting complacency at LONG
+range); stock's own emergency-braking path, not this hook, is what should dominate there.
+Documented rather than silently shipped; the tested worst case (120 m onset) is unaffected.
 
 WHY THE RELEASE CONDITION IS NOT A BARE DISTANCE CUTOFF
 --------------------------------------------------------
@@ -95,10 +143,10 @@ from openpilot.selfdrive.controls.lib.drive_helpers import should_stop
 ALPHA = 0.10
 BETA = 0.003
 
-# ---- arming (spec section 4) ----
-ARM_MIN_DIST = 100.0        # m -- dRel must exceed this on the arming frame only
-ABSENCE_S = 2.0              # s -- lead must have been absent this long right before...
-PRESENCE_PERSIST_S = 0.30    # ...present this long, before the arming gate is even evaluated
+# ---- arming (spec section 4, amended -- see module docstring, "THIRD BUG") ----
+ARM_MIN_DIST = 80.0          # m -- dRel_at_hot_start must exceed this (anchor semantics changed,
+                             # see docstring -- this is NOT "distance at first sight" anymore)
+PRESENCE_PERSIST_S = 0.30    # s -- continuous presence required before the arming gate evaluates
 HOT_A_REQ = 0.30             # m/s^2 -- a_req(v_filt) must clear this...
 HOT_PERSIST_S = 0.5          # ...continuously for this long before arming (kills noise)
 STOP_MARGIN = 6.0            # m -- same STOP_DISTANCE long_mpc.py uses
@@ -150,12 +198,12 @@ class FarLeadPreBrake:
     self.filt = _RangeRateFilter(ALPHA, BETA)
     self.present_s = 0.0
     self.absent_s = 0.0
-    self.qualifying_absence = False
     self.hot_elapsed = 0.0
     self.armed = False
     self.last_emitted = None
-    self.last_known = None    # (dRel, vRel_range) held across a brief dropout while armed
-    self.dRel_at_lock = None  # dRel at the FIRST frame of this presence run -- see step()
+    self.last_known = None         # (dRel, vRel_range) held across a brief dropout while armed
+    self.dRel_at_hot_start = None  # dRel at the first frame a_req_filt crossed HOT_A_REQ --
+                                    # see step() and module docstring, "THIRD BUG"
 
   def step(self, present: bool, dRel: float, vRel_model: float, v_ego: float,
            relaxed: bool, long_active: bool, driver_input: bool, stock_min: float) -> list:
@@ -164,42 +212,40 @@ class FarLeadPreBrake:
       return []
 
     if present:
-      if self.present_s == 0.0:
-        self.qualifying_absence = self.absent_s >= ABSENCE_S
-        if not self.armed:
-          self.filt.reset(dRel)          # fresh lock -- stale filter state would mislead
-          # "more than 100 m away" means at FIRST LOCK (spec section 3), not wherever dRel
-          # happens to be once the 0.8 s persistence gate below completes. A near-stopped lead
-          # can close 20+ m during that gate; checking live dRel there made this hook fail to
-          # arm on the single most dangerous case it exists for. Captured once, here.
-          self.dRel_at_lock = dRel
+      if self.present_s == 0.0 and not self.armed:
+        self.filt.reset(dRel)          # fresh lock -- stale filter state would mislead
       self.present_s += DT_MDL
       self.absent_s = 0.0
       v_filt = self.filt.update(dRel)
     else:
       self.absent_s += DT_MDL
       self.present_s = 0.0
-      self.qualifying_absence = False
+      self.hot_elapsed = 0.0
+      self.dRel_at_hot_start = None
       v_filt = None
 
     if not self.armed:
-      if not present:
+      if not present or self.present_s < PRESENCE_PERSIST_S:
         self.hot_elapsed = 0.0
-        return []
-      if not (self.qualifying_absence and self.present_s >= PRESENCE_PERSIST_S):
-        self.hot_elapsed = 0.0
+        self.dRel_at_hot_start = None
         return []
 
       v_lead_filt = v_ego + v_filt
       a_req_filt = (v_ego ** 2 - v_lead_filt ** 2) / (2.0 * max(dRel - STOP_MARGIN, 1.0))
       if a_req_filt > HOT_A_REQ:
+        if self.hot_elapsed == 0.0:
+          # anchor once, at the first frame the streak goes hot -- NOT at first presence
+          # (removed with the absence gate) and not re-checked live every frame thereafter
+          # (that reintroduces the v1 stopped-lead bug -- see module docstring)
+          self.dRel_at_hot_start = dRel
         self.hot_elapsed += DT_MDL
       else:
         self.hot_elapsed = 0.0
+        self.dRel_at_hot_start = None
         return []
       if self.hot_elapsed < HOT_PERSIST_S:
         return []
-      if self.dRel_at_lock is None or self.dRel_at_lock <= ARM_MIN_DIST:
+      if self.dRel_at_hot_start is None or self.dRel_at_hot_start <= ARM_MIN_DIST:
         return []
 
       # ---- ARM. First frame emits the floor, never the full formula -- see module docstring

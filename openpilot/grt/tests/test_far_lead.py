@@ -6,9 +6,11 @@ Runs with STUBBED openpilot deps so it works on a dev box that cannot import ope
     python3 openpilot/grt/tests/test_far_lead.py
 
 See FAR_LEAD_PREBRAKE_PROMPT.md (repo root) section 9 for the case list this covers, and the
-far_lead.py module docstring for two bugs testing already caught before any on-log replay:
-gating arming on raw vRel (false-armed on noise) and checking the 100 m distance gate at
-persistence-completion instead of at first lock (stopped-lead case never armed at all).
+far_lead.py module docstring for the bugs testing/replay already caught: gating arming on raw
+vRel (false-armed on noise), checking the distance gate at persistence-completion instead of at
+first lock (stopped-lead case never armed at all, v1), and the rising-edge absence gate that
+blocked arming on a real 2026-08-27 drive regardless of how hot the danger signal got (removed
+in v2 -- see "THIRD BUG" in the module docstring).
 """
 import pathlib
 import sys
@@ -63,16 +65,8 @@ def check(name, cond):
   print(f"  {'PASS' if cond else '**FAIL**':9s} {name}")
 
 
-ABS_FRAMES = int(fl.ABSENCE_S / DT_MDL) + 1
-
-
 def new_hook():
   return fl.FarLeadPreBrake()
-
-
-def absence(hook, v_ego=30.6, frames=ABS_FRAMES):
-  for _ in range(frames):
-    hook.step(False, 0.0, 0.0, v_ego, True, True, False, 1.0)
 
 
 def close(hook, dRel0, v_ego, closing_rate, frames, relaxed=True, long_active=True,
@@ -103,19 +97,16 @@ def arm(hook, dRel0=120.0, v_ego=30.6, closing_rate=-8.0, max_frames=60):
 def main():
   # aggressive personality -> always inert regardless of everything else
   h = new_hook()
-  absence(h)
   out, _ = close(h, 120.0, 30.6, -8.0, 60, relaxed=False)
   check("aggressive, 120 m, true vRel -8 m/s -> []", out == [])
 
   # relaxed, lead present for 1 frame only -> no 0.30 s persistence -> []
   h = new_hook()
-  absence(h)
   out = h.step(True, 120.0, -8.0, 30.6, True, True, False, 1.0)
   check("relaxed, lead present 1 frame at 120 m -> [] (no persistence)", out == [])
 
   # relaxed, flicker (3 frames, < persist) then gone again -> never arms
   h = new_hook()
-  absence(h)
   for _ in range(3):
     h.step(True, 118.0, -1.0, 30.6, True, True, False, 1.0)
   out = []
@@ -123,59 +114,76 @@ def main():
     out = h.step(False, 0.0, 0.0, 30.6, True, True, False, 1.0)
   check("relaxed, flicker then gone -> [] and not armed", out == [] and not h.armed)
 
-  # relaxed, 120 m, closing hard, after absence + persistence -> one candidate, a <= -0.40
+  # relaxed, 120 m, closing hard, after persistence -> one candidate, a <= -0.40
   h = new_hook()
-  absence(h)
   out, dRel_end = arm(h, 120.0, 30.6, -8.0)
   check("relaxed, 120 m, hard closing -> arms with one candidate", len(out) == 1)
   check("candidate a <= -0.40 (floor)", len(out) == 1 and out[0][0] <= -0.40)
   check("candidate a >= -1.2 (cap)", len(out) == 1 and out[0][0] >= -1.2)
   check("candidate source is lead0", len(out) == 1 and out[0][1] == fl.LongitudinalPlanSource.lead0)
-  check("arms while dRel still > 100 m", dRel_end > 100.0)
+  check("arms while dRel still > 80 m", dRel_end > 80.0)
 
   # 110 vs 100 (a_req~0.14 at the true, instantaneous state) -> must not arm within a realistic
   # evaluation window. NOTE: because a_req grows as dRel shrinks, ANY sustained nonzero closing
   # rate eventually crosses the threshold given enough time/distance -- that is correct physics,
   # not a bug. This checks it does not hair-trigger on an ordinary overtaking-speed gap.
   h = new_hook()
-  absence(h)
   out, dRel_end = close(h, 150.0, 30.6, -2.78, 30)  # 1.5 s
   check("110 vs 100 at 150 m -> [] within 1.5 s (a_req~0.14, not hot)", out == [] and not h.armed)
 
-  # 110 vs 0 (fully stopped lead) at 120 m -- the case a naive "check dRel at gate-completion"
-  # implementation FAILED (dRel had already crossed under 100 m by the time the 0.8 s gate
-  # cleared). Fixed by capturing dRel_at_lock at first presence. Must arm, and harder than the
-  # slow-pack case.
+  # 110 vs 0 (fully stopped lead) at 120 m -- the canonical worst-case synthetic (spec section 3).
+  # A naive "check dRel at gate-completion" implementation FAILED this (dRel had already crossed
+  # under threshold by the time the 0.8 s gate cleared). v1 fixed it by anchoring at first
+  # presence; v2 anchors at hot-streak-start instead (see module docstring, "THIRD BUG") -- must
+  # still arm here, and harder than the slow-pack case, with dRel_at_hot_start comfortably clear
+  # of ARM_MIN_DIST (80 m).
   h_slow = new_hook()
-  absence(h_slow)
   out_slow, _ = arm(h_slow, 120.0, 30.6, -8.0)
   h_stop = new_hook()
-  absence(h_stop)
   out_stop, dRel_stop = arm(h_stop, 120.0, 30.6, -30.6)
-  check("110 vs 0 at 120 m arms (dRel_at_lock, not live dRel, gates this)", len(out_stop) == 1)
-  check("110 vs 0 arms even though live dRel has already fallen under 100 m",
-        len(out_stop) == 1 and dRel_stop < 100.0)
+  check("110 vs 0 at 120 m arms (dRel_at_hot_start, not live dRel, gates this)", len(out_stop) == 1)
+  check("110 vs 0 dRel_at_hot_start clears ARM_MIN_DIST with margin",
+        h_stop.dRel_at_hot_start is not None and h_stop.dRel_at_hot_start > fl.ARM_MIN_DIST + 20.0)
   check("110 vs 0 candidate at least as hard as the slow-pack case",
         len(out_stop) == 1 and len(out_slow) == 1 and out_stop[0][0] <= out_slow[0][0])
   check("110 vs 0 candidate still >= -1.2 (CAP)", len(out_stop) == 1 and out_stop[0][0] >= -1.2)
 
-  # once armed, dRel falls to 90 m -> still armed (the >100 m edge check is one-time, at lock)
+  # KNOWN LIMITATION (documented in module docstring): a fully-stopped lead first detected
+  # already inside ~87 m never arms, because dRel_at_hot_start freezes below ARM_MIN_DIST on the
+  # very first hot frame and is never re-anchored. Not a regression vs v1 (which has the
+  # analogous failure for a lead first sighted already inside 100 m) and outside this hook's
+  # declared envelope (sub-3-second emergency stop, not long-range complacency correction) --
+  # documented here so a future reader does not "fix" this file back into the v1 absence-gate
+  # bug while chasing it.
+  h_close = new_hook()
+  out_close, _ = arm(h_close, 86.0, 30.6, -30.6)
+  check("KNOWN LIMIT: stopped lead first seen at 86 m never arms (see docstring)", out_close == [])
+
+  # hot-streak anchor is distinct from first-presence: a lead present and steady (non-closing)
+  # for a while, THEN starts closing hard, must anchor dRel_at_hot_start at the moment it goes
+  # hot -- not at first sight -- and still arm if that's above ARM_MIN_DIST.
   h = new_hook()
-  absence(h)
+  for _ in range(80):  # 4 s steady presence, not closing yet
+    h.step(True, 95.0, 0.0, 30.6, True, True, False, 1.0)
+  out, dRel_end = arm(h, 95.0, 30.6, -8.0)
+  check("steady-then-closing at 95 m: hot-start anchor arms once it goes hot",
+        len(out) == 1 and h.dRel_at_hot_start is not None and h.dRel_at_hot_start > fl.ARM_MIN_DIST)
+
+  # once armed, dRel falls under ARM_MIN_DIST -> still armed (the arm-distance check is one-time)
+  h = new_hook()
   arm(h, 120.0, 30.6, -8.0)
   armed_after_first = h.armed
   out = []
-  dRel = 100.0
-  while dRel > 90.0:
+  dRel = 90.0
+  while dRel > 70.0:
     out = h.step(True, dRel, -8.0, 30.6, True, True, False, 1.0)
     dRel -= 8.0 * DT_MDL
   check("armed before continuing", armed_after_first)
-  check("still armed once dRel falls to 90 m", h.armed and len(out) == 1)
+  check("still armed once dRel falls under ARM_MIN_DIST", h.armed and len(out) == 1)
 
   # armed, stock candidate reaches -0.40 while dRel still > 20 m -> this frame still returns
   # the candidate (min() picks the harder one), latch drops after
   h = new_hook()
-  absence(h)
   arm(h, 120.0, 30.6, -8.0)
   out = h.step(True, 60.0, -8.0, 30.6, True, True, False, -0.40)
   check("stock caught up at 60 m -> still returns a candidate this frame", len(out) == 1)
@@ -184,7 +192,6 @@ def main():
 
   # armed, stock stuck near 0 all the way down to the 20 m backstop -> still supplies a candidate
   h = new_hook()
-  absence(h)
   arm(h, 120.0, 30.6, -8.0)
   out = h.step(True, 21.0, -8.0, 30.6, True, True, False, 0.0)
   check("stock stuck near 0 at 21 m -> hook still supplies a candidate", len(out) == 1)
@@ -195,7 +202,6 @@ def main():
 
   # not longActive -> [], latch cleared
   h = new_hook()
-  absence(h)
   arm(h, 120.0, 30.6, -8.0)
   check("armed before longActive drops", h.armed)
   out = h.step(True, 90.0, -8.0, 30.6, True, False, False, 1.0)
@@ -203,7 +209,6 @@ def main():
 
   # driver gas/brake -> [], latch cleared
   h = new_hook()
-  absence(h)
   arm(h, 120.0, 30.6, -8.0)
   out = h.step(True, 90.0, -8.0, 30.6, True, True, True, 1.0)
   check("driver input -> [], latch cleared", out == [] and not h.armed)
@@ -220,7 +225,6 @@ def main():
 
   # candidate a > -0.20 must never happen -- hook 10 C's ABANDON would eat it
   h = new_hook()
-  absence(h)
   out, _ = arm(h, 120.0, 30.6, -8.0)
   check("candidate a <= -0.20 always (hook 10 C floor)", all(c[0] <= -0.20 for c in out))
 

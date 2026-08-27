@@ -4066,3 +4066,83 @@ then a redesign of how "was this really a fresh appearance" is decided, then re-
 BOTH this log and the two prior validation logs before anything ships. Operator has been told
 explicitly: hook 11 did not and cannot help in this event class as deployed — drive as if it is
 not there until this is resolved.
+
+## 2026-08-27 (later) — hook 11 v2: absence gate REMOVED, arms on hot signal alone. IMPLEMENTED,
+## NOT YET DEPLOYED.
+
+Operator proposed the redesign directly: instead of gating on "is this a fresh lead appearance"
+(the rising-edge/absence design that failed above), arm on high closing speed / relative speed
+alone once the lead has been present a short while, regardless of what happened before that
+presence run began.
+
+**Validated before touching the real file.** Built a standalone prototype (`FarLeadV2`, no
+absence gate, arms on `PRESENCE_PERSIST_S` continuous presence + `HOT_PERSIST_S` continuous
+`a_req_filt > HOT_A_REQ`, arm-distance check anchored to `dRel_at_hot_start` — captured at the
+first frame the hot streak begins, not at first presence and not re-checked live every frame
+thereafter) and replayed it against both real incident logs:
+
+    v1 (deployed) on 08-27:                0 arms  (the bug documented above)
+    v1 (deployed) on 08-25, synthetic relaxed:  1 arm at 115.0m  (unchanged baseline)
+    v2, ARM_MIN_DIST=100 (gate removed only): 0 arms on 08-27 — STILL misses it. The distance
+      threshold matters independently of the gate: this approach's hot streak doesn't begin
+      until dRel~93.6m, so 100m rejects it even with a perfect arming edge.
+    v2, ARM_MIN_DIST=80: 1 arm at (52.77s, 93.6m) on 08-27 — CATCHES it
+    v2, ARM_MIN_DIST=80 on 08-25, synthetic relaxed: 1 arm at 115.0m — preserves the original catch
+    Noisy pre-episode blip (08-25, 4.8s of flicker at 111-114m): 0 false arms at either ARM_MIN_DIST
+      — PRESENCE_PERSIST_S/HOT_PERSIST_S alone reject it; the absence gate was never the thing
+      protecting against this, contrary to how it read.
+
+**Asked advisor before finalizing** (per standing rule — design changes to this hook get a
+second pass before shipping). Advisor confirmed the direction, corrected an earlier "benefit may
+be marginal" caution of its own against the measured 3.15s/~3.6 m/s counterfactual above, and
+flagged three things to check before implementing: (1) re-run the canonical stopped-lead
+synthetic (110 vs 0 at 120m) against v2 specifically — the anchor semantics changed and this is
+the case the original v1 fix was for; (2) check for re-arm chatter on the 08-27 replay past the
+release point, since `_reset()` wipes the filter and a re-arm needs ~0.9s to reconverge; (3) the
+constant name `ARM_MIN_DIST` now means "distance when danger became detectable", not "distance
+at first lock" — fix the docstring or the name, don't leave both stale.
+
+**All three checked before implementing:**
+1. Stopped-lead synthetic (120m start) still arms in v2/80, `dRel_at_hot_start`=112.35m —
+   comfortably clear. Swept the start distance down to find where it stops holding: v2/80 still
+   arms down to a 88m starting distance (`dRel_at_hot_start`=80.35m); at 86m and below it NEVER
+   arms, because `dRel_at_hot_start` freezes below `ARM_MIN_DIST` on the very first hot frame and
+   is never re-anchored. Checked whether this is a regression vs v1: it is not — v1 has the
+   analogous failure for a lead first sighted already inside 100m (its `dRel_at_lock` is captured
+   at first presence). Neither design was built or validated for "stopped object first visible
+   already inside ~90m while still doing 110 km/h" — a sub-3-second emergency-stop scenario
+   outside this hook's declared envelope (correcting long-range complacency, not last-second
+   braking, which is stock's job). Documented as a known limitation in the module docstring, the
+   spec doc, and a dedicated test case — not silently shipped.
+2. Re-arm chatter: replayed the full 08-27 log end to end, logging every arm/release transition.
+   Exactly one cycle — ARM at 52.77s/93.6m, RELEASE at 56.77s/37.0m. No chatter.
+3. Renamed the internal anchor field `dRel_at_lock` -> `dRel_at_hot_start` throughout
+   `far_lead.py`, and rewrote the constant's comment and the module docstring to state the new
+   semantics explicitly, distinct from the deleted `dRel_at_lock` concept — kept `ARM_MIN_DIST`
+   as the constant's NAME (still correctly describes what it gates) but made clear what distance
+   it's now measured at.
+
+**Also found, not asked for by advisor:** replaying a "lead present and steady (non-closing) at
+close range, then suddenly starts braking hard" synthetic — the scenario the hot-start anchor is
+specifically for — v2 arms (77.4m) where v1 does NOT (v1's `dRel_at_lock`, captured at first
+sight, was already <=100m from the steady phase, so v1 can never arm for this class of case
+either). Net: v2 is not just "no worse", it recovers a real case v1 structurally could not.
+
+**Implemented into `openpilot/grt/far_lead.py`:** removed `ABSENCE_S`/`qualifying_absence`/
+`dRel_at_lock` entirely; arming now requires only continuous presence (`PRESENCE_PERSIST_S`)
+followed by a continuous hot signal (`HOT_PERSIST_S`), with `dRel_at_hot_start` captured once at
+hot-streak-start and `ARM_MIN_DIST` lowered 100 -> 80. Module docstring rewritten with the third
+bug's full writeup (why the absence gate was never the flicker protection, why hot-start replaces
+first-lock as the anchor, the known close-onset limitation). Updated
+`openpilot/grt/tests/test_far_lead.py`: removed the absence-gate helper and all `absence()`
+calls, added a hot-streak-anchor test (steady-then-closing, confirms the anchor moves with the
+hot streak not first presence) and the known-limitation test (86m onset never arms, documented
+not silently broken). All 26 tests pass. Updated `FAR_LEAD_PREBRAKE_PROMPT.md` §4 (arming) and
+§9/§10 (test table, replay bar) to match — the doc no longer contradicts the shipped code.
+Updated `GRT_MODS.md`'s hook-11 row to describe all three bugs found, not just the first two.
+Re-ran the full replay bar against the REAL (not prototype) `far_lead.py`: identical results to
+the validated prototype on both logs.
+
+**NOT YET DEPLOYED to comma4.** Implementation and deploy are being kept as separate steps per
+this session's established pattern; deploy needs its own explicit go-ahead and the usual
+pre/post-reboot verification.
