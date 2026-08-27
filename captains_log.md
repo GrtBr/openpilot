@@ -84,7 +84,43 @@ deliberate `path.lattitude` typo, listing the real field names.
 
 `mapd_debug.log` gains `tj_turn_deg`, `tj_suppressed`, `tj_errors`.
 
-**NOT DEPLOYED.** Offline work only; no tile rebuild needed for this half.
+### DEPLOYED 2026-08-27, verified
+
+Device on `ac208f926`, offroad, tree clean, back up in ~70 s.
+
+**The device's git remote is broken** and this cost the GitHub route: `origin` is
+`git@github.com-grtbr:GrtBr/openpilot.git`, an SSH alias, and there is **no `~/.ssh/config`
+on the device** to define it — so `git fetch` dies with "Could not resolve hostname
+github.com-grtbr". The device's `origin/nightly-dev` is a stale `0089203`, which is why
+`rev-list --left-right` reports it absurdly "33 ahead". Networking itself is fine (DNS
+resolves, `curl https://github.com` returns 200). Deployed via **git bundle** instead —
+the documented fallback in PROGRESS.md — `586e0cc..nightly-dev`, 12 KB, removed after use.
+**Until that remote is fixed, every deploy needs a bundle.**
+
+Gates run ON THE DEVICE before the reboot: **59 scc_map / 44 hooks / 82 set_speed /
+34 schema / 26 far_lead** — the last confirming this did not disturb the hook 11 v2 work
+deployed earlier the same day. Plus the real-import gate the stubs cannot cover: all four
+`GRT_SUB` entries are in `SERVICE_LIST`, and plannerd's exact SubMaster — now carrying
+`mapdExtendedOut` and `gpsLocationExternal` — constructs successfully.
+
+After the reboot:
+- `onroadEvents` = `doorOpen` + `seatbeltNotLatched` + `wrongGear` only. **No `commIssue`,
+  no `processNotRunning` — engagement is not blocked.** That was the highest-risk edit here,
+  since two services joined plannerd's SubMaster.
+- `longitudinalPlan VALID=True`, 236 msgs; nothing shouldBeRunning-but-not-running (the
+  micd/soundd transient did not recur this time).
+- `mapdExtendedOut` alive at ~1 Hz (11 msgs in 12 s), matching its documented rate.
+- `tj_turn_deg` / `tj_suppressed` / `tj_errors` all present in `mapd_debug.log`;
+  `tj_errors = 0`, zero `grt:` exceptions since boot.
+
+`path` is EMPTY (0 points) while parked — mapd has no GPS fix, so no current way and no
+path. The gate therefore fails open to honouring the hazard, which is the designed
+behaviour. Nothing about the turn test can be judged until the car moves.
+
+**Road test outstanding.** The instrument is `tj_turn_deg` beside `next_hazard_str` in
+`/data/media/0/mapd_debug.log`: a `T-Junction` announcement with a small `tj_turn_deg` and
+`tj_suppressed=true` is the feature working. Watch also that `tj_errors` stays 0 — a rising
+count means the gate is silently dead rather than quiet.
 
 ## CURRENT STATE — longitudinal personality hooks (living section, update on change)
 
