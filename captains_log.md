@@ -3996,3 +3996,73 @@ Device came back in ~110s. Commit `2ff409b` confirmed running post-reboot.
 sanely (and does not fire in aggressive/standard) still needs a personality switch and a real
 approach to slow/stopped traffic to be conclusive; the replay bar above is the only evidence so
 far that it behaves as designed.
+
+## 2026-08-27 — hook 11 FAILED TO ARM on a real approach, driver intervened. Root cause found
+## (absence-gate lockout). NOT YET FIXED — diagnosis only, no code changed.
+
+Operator report: 07:55 local, closing on a lead, "hook failed, no slow down, had to intervene."
+Route `00000139--cdb525d5c8` (segments 0-6, 05:55-06:01 UTC). Personality `relaxed` 100% of the
+drive, so hook 11 was eligible the whole time.
+
+**First mistake, caught before drawing any conclusion:** my first replay script fed the device's
+OWN prior route (`00000138--...--7`) into the same merged timeline as today's route for extra
+margin. Checking `logMonoTime` across the two showed route 138's minimum was LARGER than route
+139's despite route 138 being chronologically earlier — different boot sessions, incompatible
+monotonic-clock epochs. Merging them was invalid and would have scrambled the absence/presence
+timing the whole diagnosis depends on. Re-extracted route 139 standalone once this was caught.
+
+**What happened, replayed against the real captured `radarState`/`carState`/`carControl` stream
+using the actual deployed `far_lead.py`, fed from t=0 (not mid-stream — a second harness bug,
+also caught before trusting the result: feeding the hook starting partway through a recording
+corrupts its `absent_s` accumulation, since that state only exists in the samples actually fed
+to it):**
+
+    t+47.02s  lead flickers in at 108.2m, then gone            (qualifying_absence=True — fine,
+    t+49.42s  lead flickers in at 105.6m, gone again by 50.67s   preceded by a real >2s gap)
+    t+51.12s, 51.62s   two more sub-second flicker locks         (qualifying_absence=False —
+                                                                   each followed the last by <0.5s)
+    t+51.87s  lead locks CONTINUOUSLY at 101.4m                  (qualifying_absence=False — the
+                                                                   preceding gap was only 0.20s)
+    t+51.87s -> ~t+61s   dRel falls 101 -> 12m, real, sustained, a_req_filt climbs to ~3.0 (10x
+                         the 0.30 arm threshold) -- HOOK NEVER ARMS, hot_elapsed pinned at 0.00
+                         the entire time
+    t+56.74s  driver disengages, dRel≈37m, closing at -5 to -10 m/s
+
+Confirmed by direct instrumentation of the hook's own internal state (`hot_elapsed`,
+`qualifying_absence`, `dRel_at_lock`) frame by frame — not inferred from the published plan.
+
+**Root cause:** `qualifying_absence` is captured ONCE, at the instant a presence run begins, and
+frozen for that run's entire duration (`self.present_s == 0.0` is the only place it's set). The
+lock that turned into the real, dangerous, sustained approach (51.87m) happened to follow a
+0.20s gap, not the required 2.0s — an accident of exactly when the vision model's confidence
+crossed 0.5 during acquisition, not a property of the danger itself. Once locked, presence
+never dropped again until well past the danger, so the hook got no second chance: `a_req_filt`
+reaching 3.0 could not un-gate a flag that was already false.
+
+**This is NOT the same bug as the two found in testing before deployment** (raw-vRel arming
+noise, and the dRel-at-persistence-vs-at-lock timing) — both of those were correctly fixed and
+are not implicated here. This is a third, distinct failure mode in the SAME arming gate, only
+exposed by a flicker-then-sustain acquisition pattern that did not appear in the pre-deployment
+replay log (that log had one clean rising edge).
+
+**Ruled out, so the finding doesn't overreach:** the EARLIER 49.42-50.63s run also never armed,
+but for a different and correct reason — instrumented separately, `vRel` was genuinely
+non-closing there (dRel net 105.6 -> 110.3), `hot_elapsed` climbed to 0.30s on transient noise
+in `dRel` and correctly reset when the noise reversed. That run's failure to arm is the hot-
+persistence gate working exactly as designed, not a bug.
+
+**Quantified cost, computed by patching `qualifying_absence` true at the 51.87s lock ONLY and
+re-running the same replay (counterfactual, not a proposed fix):** hook would have armed at
+t+52.77s, dRel=93.6m, released at t+55.92s, dRel=52.2m — 3.15s armed, upper-bound ~3.6 m/s of
+speed shed if it had won the `min()` throughout that window. Materially more than a rough
+manual estimate suggested; this failure mode cost real, non-trivial benefit in this event, not
+a rounding error.
+
+**Not fixed.** Loosening `ABSENCE_S` naively risks reopening the pre-deployment false-arm defect
+(the noisy blip that motivated the 2.0s gate in the first place) — this run's own near-miss at
+49.42-50.63s shows the hot-persistence gate alone is not obviously sufficient replacement
+without checking. The right fix needs the same rigor as the original design: advisor review,
+then a redesign of how "was this really a fresh appearance" is decided, then re-replay against
+BOTH this log and the two prior validation logs before anything ships. Operator has been told
+explicitly: hook 11 did not and cannot help in this event class as deployed — drive as if it is
+not there until this is resolved.
