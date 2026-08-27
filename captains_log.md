@@ -4146,3 +4146,35 @@ the validated prototype on both logs.
 **NOT YET DEPLOYED to comma4.** Implementation and deploy are being kept as separate steps per
 this session's established pattern; deploy needs its own explicit go-ahead and the usual
 pre/post-reboot verification.
+
+## 2026-08-27 (later still) — hook 11 v2 DEPLOYED to comma4
+
+Committed as `586e0cc31`. Device was on `2ff409b` (v1), reachable (=parked), 3 commits behind.
+Bundle `2ff409b..586e0cc` (15 KB, 3 commits) -> scp -> `git fetch <bundle> && git merge
+--ff-only` -> reboot. Fast-forward clean, same 5 files as the local commit, +338/-80. No scons,
+no cereal SCP, bundle deleted off-device after merge.
+
+**Verified ON DEVICE, before the reboot:**
+- `test_far_lead.py` 26/26, `test_hooks.py` 44/44, `test_schema_conformance.py` (against the
+  device's own `log.capnp`) 30/30.
+- Real imports (actual openpilot deps, not test stubs): `openpilot.grt.hooks` and
+  `openpilot.grt.far_lead` both import; `hooks._far_lead_singleton()` constructs a real
+  `FarLeadPreBrake`; an inert call through the real `far_lead_candidates(sm, v_ego, stock_min)`
+  with not-relaxed/not-longActive returns `[]`. `longitudinal_planner.py`'s compiled source
+  still contains the `far_lead_candidates` call site (unchanged by this diff, checked anyway).
+
+Device came back in ~33s. Commit `586e0cc` confirmed running post-reboot (allowed ~20s more for
+openpilot's own processes to come up before checking messaging).
+
+**Verified AFTER the reboot:**
+- `managerState`: **nothing shouldBeRunning-but-not-running**.
+- **THE CRITICAL ONE — engagement is not blocked.** `onroadEvents` carries only `wrongGear` and
+  `seatbeltNotLatched`, the legitimate physical blockers for a parked car. No `commIssue`.
+- `longitudinalPlan` publishing cleanly while parked: `aTarget=0.0136`, `source=e2e`.
+- Zero mentions of `far_lead`/"hook 11" and zero tracebacks/exceptions across the 30 most recent
+  swaglog files since boot.
+
+**NOT YET road-tested against a real approach with the v2 logic live.** The replay bar (both
+incident logs, run against this exact committed file before deploy) is the evidence so far that
+arming behaves as designed; a live drive with a genuine far/closing lead in relaxed personality
+is still needed to close the loop on the 2026-08-27 incident this change targets.
