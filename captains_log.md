@@ -11,6 +11,81 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-08-26 — T-junction validation on-device: reject a false T from mapd's own path geometry
+
+The T-Junction flag in the tiles is decided by TOPOLOGY ALONE — `_t_junction_road_key`
+groups ways by `official_ref -> ref -> name` and counts terminations. No geometry enters
+the decision anywhere. Two failures found in the SA extract, both confirmed live in the
+deployed tiles:
+
+| node | what it is | tile says | reality |
+|---|---|---|---|
+| n36316730 (-33.8306696, 20.0808104) | real T | `T-Junction` on **ref=R62, primary** | R62 + R60-primary are the straight crossbar (176.3 deg apart); R60-secondary (153.1) is the stem. **Hazard is INVERTED onto the through road** |
+| n5999476430 (-34.0309952, 20.4399907) | N2 dual-carriageway split | `T-Junction` on **ref=N2, trunk** | bidirectional N2 meeting two one-way NR2/4 carriageways **8.6 deg apart**. Not a junction. 20 km/h on a national route |
+
+n36316730 inverts because primary R60 and secondary R60 share `ref=R60`, so they group as
+one road with two terminations ("the through road"), leaving R62 as the lone terminator
+("the stem"). Self-consistent and exactly backwards. This inverts at every junction where a
+numbered route changes classification but keeps its ref — common on provincial routes.
+
+### The test
+
+`path_turn_deg()` in `scc_map.py`. `mapdExtendedOut.path` is CurrentWay nodes + NextWays
+nodes in travel order (`extended_state.go setPath`), so we can ask what the tile cannot
+answer: **does OUR path actually turn at that node?** A stem->crossbar movement turns ~90
+deg; going straight through a crossbar, or taking either leg of a carriageway split, does
+not. Honour at >= `TURN_HONOUR_DEG` (45), suppress below.
+
+Measured on the real bearings — the on-device implementation agrees with an independent
+classifier written against the raw PBF to 0.1 deg:
+
+```
+n36316730   straight through crossbar     3.7 deg -> suppress
+n36316730   stem -> crossbar            103.5 deg -> HONOUR
+n5999476430 N2 -> carriageway A           3.2 deg -> suppress
+n5999476430 N2 -> carriageway B           5.4 deg -> suppress
+```
+
+**Only `T-Junction` is gated.** Real surveyed hazards (stop, give_way, level_crossing, ...)
+are mapped features and are trusted unchanged — asserted by test.
+
+### Two bugs caught while building it
+
+**A window, not a point.** The first cut walked forward to "the first path point at or
+beyond `nextHazardDistance`". Floating-point accumulation (79.999 < 80) put it one node
+PAST the junction, so it measured a chord ACROSS the corner instead of the turn AT it and
+reported the 103.5 deg stem turn as **74.7**. `nextHazardDistance` will not land on a node
+anyway. Now it scans +/-`TURN_WINDOW_M` (20 m) and takes the sharpest corner, which is
+immune to both and answers the question we actually care about.
+
+**Retry throttling.** `path_turn_deg` scans the whole published path and this runs in
+plannerd's 20 Hz realtime loop. An unresolvable announcement would have rescanned a
+multi-hundred-point path every frame; retries are now capped to 1 Hz, which is the rate
+`mapdExtendedOut` refreshes at anyway. The decision is latched per announcement.
+
+### Fails open, everywhere
+
+No path, no GPS fix, a short/stale path, hazard beyond the path, missing service, or any
+exception -> the hazard is honoured exactly as before. Suppression requires a positive
+measurement that we go straight. Exceptions are COUNTED (`tj_errors` in mapd_debug.log) so
+a silently-dead gate looks different from "no T-junctions today" — the failure silhouette
+that cost a whole drive in July.
+
+`GRT_SUB` gains `mapdExtendedOut` and `gpsLocationExternal`. plannerd passes GRT_SUB as all
+three ignore lists, so this cannot trip the unscoped `all_checks()` that invalidated
+longitudinalPlan in the earlier bug.
+
+### Tests
+
+**59 scc_map** (16 new, fixtures built from the two nodes' real bearings), 44 hooks,
+82 set_speed, **34 schema conformance**. `resolve()` in the conformance test now descends
+through `List(T)`, so `mapdExtendedOut.path.latitude` is pinned — verified it FAILS on a
+deliberate `path.lattitude` typo, listing the real field names.
+
+`mapd_debug.log` gains `tj_turn_deg`, `tj_suppressed`, `tj_errors`.
+
+**NOT DEPLOYED.** Offline work only; no tile rebuild needed for this half.
+
 ## CURRENT STATE — longitudinal personality hooks (living section, update on change)
 
 Last verified on car: **2026-08-17**, plannerd clean, 0 grt exceptions.

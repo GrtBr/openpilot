@@ -31,6 +31,13 @@ REQUIRED = [
   ("mapdOut", "nextSpeedLimitDistance"),
   ("mapdOut", "nextHazard"),
   ("mapdOut", "nextHazardDistance"),
+  # T-junction validation from mapd path geometry (scc_map.path_turn_deg). These are
+  # the fields the stubbed tests fake, so they are exactly the ones that could drift
+  # from the real schema unnoticed — the `.status` lesson.
+  ("mapdExtendedOut", "path.latitude"),
+  ("mapdExtendedOut", "path.longitude"),
+  ("gpsLocationExternal", "latitude"),
+  ("gpsLocationExternal", "longitude"),
   ("radarState", "leadOne.present"),
   ("radarState", "leadOne.dRel"),
   ("radarState", "leadOne.vRel"),  # lead-vehicle dash icon, Tier 2 (card.py / hyundaicanfd.py)
@@ -85,6 +92,11 @@ def resolve(schema, dotted: str):
       return False, f"missing {part!r}; available: {', '.join(have[:14])}"
     if i < len(parts) - 1:          # only descend for intermediate structs
       cur = fields[part].schema
+      # Descend through List(T) so a dotted path may address the ELEMENT's fields,
+      # e.g. mapdExtendedOut "path.latitude" -> MapdPathPoint.latitude. Without this a
+      # list's element type is unreachable and the stubbed tests could fake field names
+      # that do not exist.
+      cur = getattr(cur, "elementType", cur)
   return True, "ok"
 
 

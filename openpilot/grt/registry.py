@@ -41,7 +41,12 @@ MAPD_BINARY_RELPATH = "third_party/mapd/mapd"
 # passes this same list as all three ignore lists, so appending here is safe — but note plannerd
 # DOES call all_checks() unscoped (§2.2), so it must never be added to the service list without
 # the ignores.
-GRT_SUB: list[str] = ["mapdOut", "grtSetSpeedState"]
+GRT_SUB: list[str] = ["mapdOut", "grtSetSpeedState",
+                      # T-junction validation (scc_map._path_turn_deg): mapd publishes
+                      # CurrentWay+NextWays node geometry on mapdExtendedOut.path at 1 Hz,
+                      # and we need a fix to locate ourselves on it. Both are optional —
+                      # the turn test fails OPEN to honouring the hazard without them.
+                      "mapdExtendedOut", "gpsLocationExternal"]
 
 # Services spliced into card's SubMaster, for the set-speed tracker (grt/set_speed.py).
 # Separate name from GRT_SUB so the two consumers can diverge without a silent surprise.

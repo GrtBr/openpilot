@@ -302,5 +302,124 @@ expect=(20.2-15.9)/DEC
 check(f"convergence time {t_conv:.1f}s == dv/APPROACH_DECEL ({expect:.1f}s)",
       abs(t_conv-expect)<0.1)
 
+# ---------------------------------------------------------------------------------------
+# T-junction validation from mapd path geometry (path_turn_deg / _update_t_junction_gate).
+# Fixtures are the REAL bearings of two SA nodes, read from the PBF and cross-checked
+# against the deployed tiles (both carry a T-Junction hazard today):
+#
+#   n36316730   -33.8306696, 20.0808104   crossbar R62(76.6) <-> R60-primary(260.3) = 176.3deg
+#                                         stem R60-secondary(153.1). Hazard is INVERTED onto R62.
+#   n5999476430 -34.0309952, 20.4399907   N2(235.4) + NR2/4(52.2) + NR2/4(60.8); the two
+#                                         carriageways are 8.6deg apart. Not a junction at all.
+import math as _mm
+
+def _pt(node, bearing_deg, dist_m):
+    """Point `dist_m` from `node` along `bearing_deg` (flat projection; fine under ~200 m)."""
+    b = _mm.radians(bearing_deg)
+    lat = node[0] + (dist_m * _mm.cos(b)) / 111320.0
+    lon = node[1] + (dist_m * _mm.sin(b)) / (111320.0 * _mm.cos(_mm.radians(node[0])))
+    return (lat, lon)
+
+def _path(node, arrive_leg_bearing, depart_leg_bearing, span=120.0, step=10.0):
+    """mapd-style path: CurrentWay nodes arriving along one leg, then NextWay nodes
+    departing along another. Travel order, node shared once."""
+    n = int(span // step)
+    before = [_pt(node, arrive_leg_bearing, d) for d in range(int(span), 0, -int(step))]
+    after = [_pt(node, depart_leg_bearing, d) for d in range(int(step), int(span) + 1, int(step))]
+    return before + [node] + after
+
+N_T = (-33.8306696, 20.0808104)     # n36316730
+N_Y = (-34.0309952, 20.4399907)     # n5999476430
+
+# --- pure geometry -----------------------------------------------------------------
+# straight through the crossbar: arrive along R60-primary(260.3), depart along R62(76.6)
+coords = _path(N_T, 260.3, 76.6)
+car = _pt(N_T, 260.3, 80.0)
+turn = scc_map.path_turn_deg(coords, car, 80.0)
+check(f"n36316730 straight through crossbar -> {turn:.1f}deg (expect ~3.7)",
+      turn is not None and turn < 8.0)
+
+# on the stem: arrive along R60-secondary(153.1), depart along R62(76.6)
+coords = _path(N_T, 153.1, 76.6)
+car = _pt(N_T, 153.1, 80.0)
+turn_stem = scc_map.path_turn_deg(coords, car, 80.0)
+check(f"n36316730 stem -> crossbar -> {turn_stem:.1f}deg (expect ~103.5)",
+      turn_stem is not None and turn_stem > 90.0)
+
+# the Y: arrive along N2(235.4), depart along either NR2/4 carriageway
+for leg, name in ((52.2, "636180741"), (60.8, "649706189")):
+    coords = _path(N_Y, 235.4, leg)
+    car = _pt(N_Y, 235.4, 80.0)
+    t = scc_map.path_turn_deg(coords, car, 80.0)
+    check(f"n5999476430 N2 -> carriageway {name} -> {t:.1f}deg (expect <6)",
+          t is not None and t < 8.0)
+
+check("honour threshold separates the real T from both false positives",
+      turn < scc_map.TURN_HONOUR_DEG < turn_stem)
+
+# --- fail-open paths ---------------------------------------------------------------
+check("empty path -> None (honour)", scc_map.path_turn_deg([], car, 80.0) is None)
+check("path shorter than the minimum -> None",
+      scc_map.path_turn_deg([N_T, N_T], car, 80.0) is None)
+check("car far off the published path -> None",
+      scc_map.path_turn_deg(_path(N_T, 260.3, 76.6), (-30.0, 25.0), 80.0) is None)
+check("hazard beyond the end of the path -> None",
+      scc_map.path_turn_deg(_path(N_T, 260.3, 76.6), _pt(N_T, 260.3, 80.0), 5000.0) is None)
+
+# --- end to end through the controller ---------------------------------------------
+def SMT(hazard, hzd, coords, car, curve=0.0):
+    base = SM(hz=hazard, hzd=hzd, curve=curve)
+    base['mapdExtendedOut'] = NS(path=[NS(latitude=a, longitude=b) for a, b in coords])
+    base['gpsLocationExternal'] = NS(latitude=car[0], longitude=car[1])
+    return base
+
+# straight through -> suppressed, no hazard braking
+c = scc_map.SmartCruiseControlMap()
+sm_ = SMT("T-Junction", 80.0, _path(N_T, 260.3, 76.6), _pt(N_T, 260.3, 80.0))
+for _ in range(5): c.update(sm_, True, False, 25.0, 0.0, 30.0)
+check("n36316730 driving straight through -> T-Junction SUPPRESSED",
+      c._tj_suppressed and not c.hazard_active and c.output_hazard_accel is None)
+
+# on the stem -> honoured, hazard engages
+c = scc_map.SmartCruiseControlMap()
+sm_ = SMT("T-Junction", 30.0, _path(N_T, 153.1, 76.6), _pt(N_T, 153.1, 30.0))
+for _ in range(5): c.update(sm_, True, False, 15.0, 0.0, 25.0)
+check("n36316730 approaching on the stem -> T-Junction HONOURED",
+      not c._tj_suppressed and c.hazard_active)
+
+# the Y -> suppressed
+c = scc_map.SmartCruiseControlMap()
+sm_ = SMT("T-Junction", 80.0, _path(N_Y, 235.4, 52.2), _pt(N_Y, 235.4, 80.0))
+for _ in range(5): c.update(sm_, True, False, 25.0, 0.0, 30.0)
+check("n5999476430 carriageway split -> T-Junction SUPPRESSED", c._tj_suppressed)
+
+# a REAL surveyed hazard is never gated by geometry, even going straight
+c = scc_map.SmartCruiseControlMap()
+sm_ = SMT("stop", 30.0, _path(N_T, 260.3, 76.6), _pt(N_T, 260.3, 30.0))
+for _ in range(5): c.update(sm_, True, False, 15.0, 0.0, 25.0)
+check("a 'stop' hazard is NOT gated by the turn test", c.hazard_active and not c._tj_suppressed)
+
+# no GPS fix -> fail open (honour), and the decision is not latched
+c = scc_map.SmartCruiseControlMap()
+sm_ = SMT("T-Junction", 30.0, _path(N_T, 260.3, 76.6), (0.0, 0.0))
+for _ in range(5): c.update(sm_, True, False, 15.0, 0.0, 25.0)
+check("no GPS fix -> hazard honoured (fails open)",
+      not c._tj_suppressed and c.hazard_active and c._tj_turn_deg is None)
+
+# missing mapdExtendedOut entirely -> fail open, counted, never raises
+c = scc_map.SmartCruiseControlMap()
+for _ in range(5): c.update(SM(hz="T-Junction", hzd=30.0), True, False, 15.0, 0.0, 25.0)
+check("missing mapdExtendedOut -> honoured, error counted, no raise",
+      not c._tj_suppressed and c.hazard_active and c._tj_errors > 0)
+
+# latch clears when the announcement ends, so the next junction is judged afresh
+c = scc_map.SmartCruiseControlMap()
+sm_ = SMT("T-Junction", 80.0, _path(N_T, 260.3, 76.6), _pt(N_T, 260.3, 80.0))
+for _ in range(3): c.update(sm_, True, False, 25.0, 0.0, 30.0)
+assert c._tj_suppressed
+c.update(SMT("", 0.0, _path(N_T, 260.3, 76.6), _pt(N_T, 260.3, 80.0)), True, False, 25.0, 0.0, 30.0)
+check("latch resets when the T-Junction announcement ends",
+      not c._tj_active and c._tj_turn_deg is None and not c._tj_suppressed)
+
 print(f"\n{sum(1 for _,c_ in res if c_)}/{len(res)} passed")
 sys.exit(0 if all(c_ for _,c_ in res) else 1)

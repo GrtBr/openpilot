@@ -122,6 +122,120 @@ HAZARD_ACCEL_MAX = -0.3        # m/s² — softest decel; never command less tha
 HAZARD_ACCEL_RATE = 0.05       # m/s² per 50 ms frame — rate limit (1 m/s² per second)
 LEAD_PAST_HAZARD_MARGIN_M = 10.0  # lead must be this far past the hazard to be ignored
 
+# ---------------------------------------------------------------------------------------
+# Upcoming-T-junction validation from mapd's OWN path geometry.
+#
+# The T-Junction flag in the tiles is computed by topology alone — road-name/ref grouping
+# plus termination counts, with no geometry anywhere in the decision. Two false positives
+# measured on the SA extract:
+#
+#   n36316730   (-33.8306696, 20.0808104)  R60-primary and R62 form a straight crossbar
+#               (176.3 deg apart) and R60-secondary is the real stem. The detector groups
+#               the two "R60" ways together and names R62 the stem, so the hazard is
+#               INVERTED onto the through road: driving straight through fires 20 km/h.
+#   n5999476430 (-34.0309952, 20.4399907)  the bidirectional N2 meeting its two one-way
+#               NR2/4 carriageways, which diverge by 8.6 deg. Called a T with the N2 trunk
+#               as the stem — 20 km/h on a national route.
+#
+# Both are rejected by asking what the tile cannot answer: does OUR path actually turn at
+# that node? mapdExtendedOut.path is CurrentWay nodes + NextWays nodes in travel order
+# (mapd_source/extended_state.go setPath), so the turn angle is computable on-device with
+# no tile rebuild. A genuine stem->crossbar movement turns ~90 deg; going straight through
+# a crossbar, or taking either leg of a carriageway split, does not.
+#
+# FAILS OPEN: no path, no GPS fix, a stale/short path, or any exception leaves the hazard
+# honoured exactly as before. Suppression requires positive evidence that we go straight.
+T_JUNCTION_HAZARD = "T-Junction"
+TURN_HONOUR_DEG   = 45.0   # honour only if the path turns at least this much at the node
+TURN_BASELINE_M   = 25.0   # bearing baseline either side; adjacent OSM nodes can be metres
+                           # apart and their pairwise bearings are noise
+TURN_MIN_PATH_PTS = 5
+TURN_WINDOW_M     = 20.0   # search this far either side of the announced distance for
+                           # the actual corner; nextHazardDistance does not land on a node
+TURN_MAX_OFFPATH_M = 100.0 # if the nearest path point is further than this, we are not on
+                           # the published path — do not trust the geometry
+
+
+def _wrap180(deg: float) -> float:
+  return (deg + 180.0) % 360.0 - 180.0
+
+
+def _bearing_deg(a: tuple[float, float], b: tuple[float, float]) -> float:
+  """Initial bearing a->b in degrees (0=N, 90=E)."""
+  lat1, lon1 = math.radians(a[0]), math.radians(a[1])
+  lat2, lon2 = math.radians(b[0]), math.radians(b[1])
+  dlon = lon2 - lon1
+  y = math.sin(dlon) * math.cos(lat2)
+  x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+  return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+
+
+def _flat_dist_m(a: tuple[float, float], b: tuple[float, float]) -> float:
+  """Local flat-earth distance. Exact enough over the tens of metres used here."""
+  dlat = (b[0] - a[0]) * 111320.0
+  dlon = (b[1] - a[1]) * 111320.0 * math.cos(math.radians((a[0] + b[0]) * 0.5))
+  return math.hypot(dlat, dlon)
+
+
+def path_turn_deg(coords: list[tuple[float, float]], car: tuple[float, float],
+                  distance_m: float) -> float | None:
+  """Sharpest heading change of `coords` near `distance_m` ahead of `car`.
+
+  Pure geometry so it can be unit-tested against real node bearings. Returns None
+  whenever the answer cannot be trusted — every such case means "honour the hazard".
+
+  Why a WINDOW rather than the single point at `distance_m`: nextHazardDistance is a
+  path distance that will not land exactly on a node, and floating-point accumulation
+  can put the naive "first point at or beyond d" one node PAST the junction — which
+  measures a chord ACROSS the corner instead of the turn AT it, and understates a 103.5
+  deg stem turn as 74.7. Scanning a window and taking the sharpest corner is immune to
+  both, and answers the question we actually care about: does the path turn near the
+  announced hazard?
+  """
+  n = len(coords)
+  if n < TURN_MIN_PATH_PTS or distance_m <= 0.0:
+    return None
+
+  best_i, best_d = 0, float("inf")
+  for i, c in enumerate(coords):
+    d = _flat_dist_m(car, c)
+    if d < best_d:
+      best_d, best_i = d, i
+  if best_d > TURN_MAX_OFFPATH_M:
+    return None
+
+  # cumulative path distance ahead of the car
+  cum = [0.0] * n
+  for i in range(best_i + 1, n):
+    cum[i] = cum[i - 1] + _flat_dist_m(coords[i - 1], coords[i])
+  if cum[n - 1] < distance_m - TURN_WINDOW_M:
+    return None                       # hazard lies beyond the published path
+
+  lo, hi = distance_m - TURN_WINDOW_M, distance_m + TURN_WINDOW_M
+  best_turn = None
+  for j in range(best_i + 1, n - 1):
+    if cum[j] < lo:
+      continue
+    if cum[j] > hi:
+      break
+    # step back / forward by the baseline so bearings are not node-spacing noise
+    a, back = j, 0.0
+    while a > 0 and back < TURN_BASELINE_M:
+      back += _flat_dist_m(coords[a - 1], coords[a])
+      a -= 1
+    c, fwd = j, 0.0
+    while c + 1 < n and fwd < TURN_BASELINE_M:
+      fwd += _flat_dist_m(coords[c], coords[c + 1])
+      c += 1
+    if a == j or c == j:
+      continue
+    turn = abs(_wrap180(_bearing_deg(coords[j], coords[c]) - _bearing_deg(coords[a], coords[j])))
+    if best_turn is None or turn > best_turn:
+      best_turn = turn
+
+  return best_turn
+
+
 # OSM hazard string -> target speed (m/s). 5.55 m/s = 20 km/h, 4.16 m/s = 15 km/h.
 _HAZARD_SPEED_TARGETS = {
   "stop": 5.55, "give_way": 5.55, "roundabout": 5.55,
@@ -172,6 +286,13 @@ class SmartCruiseControlMap:
 
     self._curve_ceiling = 0.0     # rate-limited map-curve ceiling (m/s); 0 = no curve
 
+    # T-junction turn test, latched per announcement (see path_turn_deg)
+    self._tj_active = False
+    self._tj_turn_deg = None
+    self._tj_suppressed = False
+    self._tj_errors = 0
+    self._tj_next_try = 0
+
     self.hazard_speed_target = 0.0
     self.hazard_hold_m = 0.0
     self.hazard_active = False
@@ -191,6 +312,61 @@ class SmartCruiseControlMap:
   def update_params(self) -> None:
     if self.frame % int(PARAMS_UPDATE_PERIOD / DT_MDL) == 0:
       self.enabled = get_bool_safe(self.params, "SmartCruiseControlMap")
+
+  def _update_t_junction_gate(self, sm, hazard_str, distance_m):
+    """Latch a suppress/honour decision for the CURRENT T-Junction announcement.
+
+    Returns the measured turn angle in degrees, or None while it is still unknown.
+
+    Decided once per announcement rather than every frame: mapdExtendedOut refreshes at
+    1 Hz, so re-deciding at 20 Hz would only add jitter, and the junction geometry does
+    not change as we approach it.
+
+    Every failure path leaves `_tj_suppressed` False, i.e. the hazard is honoured exactly
+    as before. Suppression requires a positive measurement that our path goes straight.
+    """
+    if str(hazard_str) != T_JUNCTION_HAZARD:
+      self._tj_active = False
+      self._tj_turn_deg = None
+      self._tj_suppressed = False
+      return None
+
+    if not self._tj_active:                 # rising edge of a new announcement
+      self._tj_active = True
+      self._tj_turn_deg = None
+      self._tj_suppressed = False
+      self._tj_next_try = 0                 # evaluate immediately on the rising edge
+
+    if self._tj_turn_deg is not None:
+      return self._tj_turn_deg              # already decided for this announcement
+
+    # Retry no faster than mapdExtendedOut actually refreshes (1 Hz). path_turn_deg scans
+    # the whole published path, and this runs inside plannerd's 20 Hz realtime loop — an
+    # unresolvable announcement must not rescan a multi-hundred-point path every frame.
+    if self.frame < self._tj_next_try:
+      return None
+    self._tj_next_try = self.frame + int(1.0 / DT_MDL)
+
+    try:
+      gps = sm['gpsLocationExternal']
+      car = (float(gps.latitude), float(gps.longitude))
+      if abs(car[0]) < 0.01 and abs(car[1]) < 0.01:
+        return None                         # no fix -> honour
+      coords = [(float(pt.latitude), float(pt.longitude))
+                for pt in sm['mapdExtendedOut'].path]
+      turn = path_turn_deg(coords, car, distance_m)
+    except Exception:
+      # Never let a fork geometry check take down longitudinal planning. Counted so a
+      # silently-dead gate is visible in mapd_debug.log rather than looking like "no
+      # T-junctions today" — the failure silhouette that cost a whole drive before.
+      self._tj_errors += 1
+      return None
+
+    if turn is None:
+      return None                           # not resolvable yet -> honour, retry next frame
+    self._tj_turn_deg = turn
+    self._tj_suppressed = turn < TURN_HONOUR_DEG
+    return turn
 
   def _ramp_curve_ceiling(self, map_curve_speed: float) -> float:
     """Rate-limit how fast the map-curve ceiling may DESCEND, to APPROACH_DECEL.
@@ -327,6 +503,15 @@ class SmartCruiseControlMap:
     next_hazard_str = mapd.nextHazard
     next_hazard_speed_target = _HAZARD_SPEED_TARGETS.get(next_hazard_str, 0.0)
     next_hazard_distance = float(mapd.nextHazardDistance)
+
+    # Validate an upcoming T-Junction against mapd's own path geometry before acting on it.
+    # The tile flag is topological only and is measurably inverted at n36316730 and plain
+    # wrong at the n5999476430 carriageway split. Only T-Junction is gated — real OSM
+    # hazards (stop, give_way, level_crossing, ...) are surveyed features and are trusted.
+    tj_turn_deg = self._update_t_junction_gate(sm, next_hazard_str, next_hazard_distance)
+    if self._tj_suppressed:
+      next_hazard_str = ""
+      next_hazard_speed_target = 0.0
     d_frame = self.v_ego * DT_MDL
 
     # Lead vehicle gate: when following a lead, skip hazard pre-braking — the lead-following
@@ -419,6 +604,9 @@ class SmartCruiseControlMap:
       "next_speed_limit": float(mapd.nextSpeedLimit),
       "next_speed_limit_distance": float(mapd.nextSpeedLimitDistance),
       "next_hazard_str": next_hazard_str,
+      "tj_turn_deg": tj_turn_deg,
+      "tj_suppressed": self._tj_suppressed,
+      "tj_errors": self._tj_errors,
       "next_hazard_speed_target": next_hazard_speed_target,
       "next_hazard_distance": next_hazard_distance,
       "lead1_d_rel": lead1.dRel if lead1.present else 0.0,
@@ -522,6 +710,9 @@ Third element is an UPCOMING limit pre-authorised for the approach ramp ONLY.
       "next_hazard_kmh": self._dbg.get("next_hazard_speed_target", 0.0) * 3.6,
       "next_hazard_dist_m": self._dbg.get("next_hazard_distance", 0.0),
       "next_hazard_str": self._dbg.get("next_hazard_str", ""),
+      "tj_turn_deg": self._dbg.get("tj_turn_deg"),
+      "tj_suppressed": self._dbg.get("tj_suppressed", False),
+      "tj_errors": self._dbg.get("tj_errors", 0),
       "hazard_hold_m": self.hazard_hold_m,
       "v_target_kmh": self.v_target * 3.6,
       "output_v_target_kmh": self.output_v_target * 3.6,
