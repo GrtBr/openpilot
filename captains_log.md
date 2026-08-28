@@ -4420,3 +4420,34 @@ identical numbers to the validated prototype on all three logs (08-27: 91.2m/3.7
 **NOT YET DEPLOYED to comma4.** Implementation and deploy kept as separate steps, as with every
 prior change to this hook this week; deploy needs its own explicit go-ahead and the usual
 pre/post-reboot verification.
+
+## 2026-08-28 (later still) — hook 11 HOT_CLOSING_RATE fix DEPLOYED to comma4
+
+Committed as `d0036ebea`. Device was on `ac208f9` (predates this fix; had picked up the
+T-junction gate work in between), reachable (=parked), 2 commits behind (this fix + the
+docs-only T-junction-deployed record commit). Bundle `ac208f9..d0036eb` (13.5 KB) -> scp ->
+`git fetch <bundle> && git merge --ff-only` -> reboot. Fast-forward clean, same 5 files as the
+local commit, +282/-9. No scons, no cereal SCP, bundle deleted off-device after merge.
+
+**Verified ON DEVICE, before the reboot:**
+- `test_far_lead.py` 29/29 (includes the two new FOURTH BUG regression tests), `test_hooks.py`
+  44/44, `test_schema_conformance.py` 34/34 (up from 30 — unrelated T-junction-gate fields now
+  in the real schema too).
+- Real imports: `openpilot.grt.hooks`/`far_lead` both import; confirmed `far_lead.HOT_CLOSING_RATE
+  == 2.78` is actually live in the imported module (not just in the source on disk); singleton
+  constructs; inert call through the real `far_lead_candidates(sm, v_ego, stock_min)` returns
+  `[]` for not-relaxed/not-longActive.
+
+Device came back quickly; commit `d0036eb` confirmed running post-reboot.
+
+**Verified AFTER the reboot:**
+- `managerState`: nothing shouldBeRunning-but-not-running.
+- `onroadEvents`: only `wrongGear`/`seatbeltNotLatched` (parked-car blockers) — no `commIssue`,
+  engagement not blocked.
+- `longitudinalPlan` publishing cleanly while parked (`aTarget≈0.009`, `source=e2e`).
+- Zero `far_lead`/"hook 11" mentions and zero tracebacks/exceptions across the 30 most recent
+  swaglog files since boot.
+
+**NOT YET road-tested with the fix live.** Today's problem drive is the evidence this should
+work; a real highway drive in relaxed personality is still needed to confirm the following
+distance actually settles down and both real-incident-class approaches still get braked for.
