@@ -55,6 +55,22 @@ Return `[]` when inert. When armed, return one tuple `(a, source, should_stop)` 
 
 ## 4. Arming (all must hold)
 
+**AMENDED 2026-08-28.** Operator reported real-drive highway behavior: excessive following
+distance, braking on every gentle re-approach, never settling near a lead. Measured on a real
+54-min highway drive: the hook won `min()` for 9.3% of the ENTIRE drive, 60.5 s of it at highway
+speed. Root cause was NOT filter noise — the filter correctly detects real short closing
+transients the model's own `vRel` misses — it's that (a) `a_req`'s distance-scaling means a
+TINY closing rate at long range can already clear `HOT_A_REQ` (correct for a genuine slow-pack
+approach, but also fires on ordinary highway measurement noise), and (b) release required the
+closing rate to reach fully non-negative, which on noisy data the slow-dynamics filter rarely
+does quickly — so the floor got held for many seconds after the transient that triggered it had
+resolved. Fixed by requiring a real closing rate, `HOT_CLOSING_RATE = 2.78 m/s` (~10 km/h,
+operator's proposed number, validated before adopting) on BOTH arming (item 6) and release (§6
+below) — not just the `a_req` threshold. Cut highway false-arm time 60.5 s → 19.3 s; costs
+~0.3–0.6 s less armed time on both prior validated incidents (same floor severity, released
+slightly sooner) — operator signed off on that tradeoff after seeing the numbers. Full writeup:
+`far_lead.py` module docstring, "FOURTH BUG".
+
 **AMENDED 2026-08-27, v2.** v1 shipped with a rising-edge design (absent ≥ 2.0 s, then present
 ≥ 0.30 s) and a "distance at first lock" gate (> 100 m). On a real drive that day, a lead
 closing at up to ~3.0 m/s² of `a_req` — ten times the arming threshold, sustained for several
@@ -79,7 +95,11 @@ covers that).
    v1 had at 100 m — outside this hook's declared envelope, see `far_lead.py` docstring).
 5. Closing from **range-rate**, not from vision `vRel`. Vision `vRel` at 10:49:43 was −0.77 m/s
    and would miss the event.
-6. Hot enough: `a_req > 0.30 m/s²`, where
+6. Hot enough: `a_req > 0.30 m/s²` **AND** the filtered closing rate `v_filt` itself faster than
+   `-2.78 m/s` (~10 km/h, `HOT_CLOSING_RATE` — added 2026-08-28; see amendment note above. Without
+   this second condition, `a_req` alone clears 0.30 on tiny closing rates at realistic highway
+   distances, which is correct for a genuine slow-pack approach but also fires on ordinary
+   position-measurement noise), where
    `a_req = (v_ego² − v_lead_range²) / (2 · max(dRel − 6, 1))`
    with `v_lead_range = v_ego + vRel_range` and `vRel_range = min(lead.vRel, vRel_from_dRel_filter)` whenever both are closing (pessimistic). Equivalent TTC ≲ 15 s at highway speed is the same cut: 110 vs 80 at 120 m fires (`a_req ≈ 0.31`); 110 vs 100 at 150 m does not (`a_req ≈ 0.14`).
    Must hold **continuously for 0.5 s** (`HOT_PERSIST_S`) before arming.
@@ -122,7 +142,9 @@ Two modes fall out of the same formula:
 
 Floor **−0.40**, not −0.15. After this works, speed drops while set speed stays 110, hook 10 C (`ABANDON = -0.20`, `MIN_HEADROOM = 5 km/h`) would raise a milder coast to 0. Hazard already lives in `[-1.5, -0.3]` for that reason. Do not special-case hook 10; clear `ABANDON` instead.
 
-Release the latch when any of: personality not relaxed; not `longActive`; lead lost > 1 s; range-rate no longer closing; the stock MPC/e2e candidate has itself reached `<= -0.40` (i.e. stock has caught up to this hook's own floor — return the hook's tuple on this same frame too, `min()` picks whichever is harder, then drop the latch); `dRel < 20` as an absolute backstop regardless of what stock is doing; driver gas or brake. Do not re-arm on the same appearance.
+Release the latch when any of: personality not relaxed; not `longActive`; lead lost > 1 s; **range-rate no longer closing FASTER than `-HOT_CLOSING_RATE` (-2.78 m/s / ~10 km/h) — amended 2026-08-28, NOT "fully non-negative"** (see below); the stock MPC/e2e candidate has itself reached `<= -0.40` (i.e. stock has caught up to this hook's own floor — return the hook's tuple on this same frame too, `min()` picks whichever is harder, then drop the latch); `dRel < 20` as an absolute backstop regardless of what stock is doing; driver gas or brake.
+
+**Why release uses `-HOT_CLOSING_RATE`, not `>= 0` (amended 2026-08-28):** the original design released only once the pessimistic closing rate reached fully non-negative. On real highway data, the range-rate filter's slow dynamics (needed for noise rejection) mean it can take many seconds to decay back through zero after even a brief closing transient — so the hook held its floor for far longer than the transient that triggered arming actually lasted. Measured on a real 54-min highway drive: 60.5 s of highway-speed floor-holding, some runs 9-11 s long while `dRel` was flat or oscillating the whole time. Using the SAME `HOT_CLOSING_RATE` threshold for release as for arming (§4 item 6) cut that to 19.3 s, without materially weakening the two prior validated incidents (~0.3-0.6 s less armed time each, same floor severity). See `far_lead.py` module docstring, "FOURTH BUG", for the full measurement.
 
 Do NOT release on a bare `dRel < 50` distance cutoff. Checked against the 10:49 log: at dRel=50.24 m stock `aTarget` was still −0.298 (weaker than this hook's own −0.40 floor), only crossing −0.40 at dRel≈50.08 m. A hard release at 50 m lands inside that gap and can make the commanded accel step from −0.40 back up to −0.30 for a frame or two at the tightest part of the approach — the one failure mode where this hook would make things worse, not merely unhelpful. Gating release on stock's own value avoids it: the hook keeps supplying its floor for exactly as long as stock hasn't matched it yet, and `min()` — not a distance threshold — decides the handoff.
 
@@ -168,6 +190,8 @@ Add `openpilot/grt/tests/test_far_lead.py` in the same stubbed style as `test_ho
 | not longActive | `[]`, latch cleared |
 | exception inside the module | shim returns `[]`, does not raise |
 | candidate `a > -0.20` | never (hook 10 C would eat it) |
+| FOURTH BUG regression: `a_req` hot but closing <10 km/h at 90 m | `[]`, never arms |
+| FOURTH BUG regression: armed on a fast approach, closing rate decays to -1.5 m/s (<10 km/h) without ever reaching >= 0 | released anyway, not held waiting for fully non-negative |
 
 Run: `python3 openpilot/grt/tests/test_far_lead.py` and existing `openpilot/grt/tests/test_hooks.py`.
 
@@ -183,6 +207,8 @@ Against `d012.zst`/`d013.zst`, 10:49:43–10:49:52, engaged frames:
 If you cannot run acados, a kinematic replay of the hook on the logged series is enough for this bar. Do not claim on-car proof.
 
 **Second replay bar, added 2026-08-27** (route 00000139, ~07:55 incident, `.venv` pycapnp, kinematic replay): v1 (deployed) never arms — root cause in §4's amendment note. v2 arms at t+52.77 s, dRel=93.6 m, releases at t+56.77 s, dRel=37.0 m (stock caught up). Re-ran the original 08-25 log's relaxed-override case against v2 to confirm no regression: still arms at dRel=115.0 m, releases at dRel=50.1 m. Single arm/release cycle on both logs — no re-arm chatter.
+
+**Third replay bar, added 2026-08-28** (route 00000143, real 54-min highway drive, `.venv` pycapnp, kinematic replay against the real deployed `far_lead.py`): before the `HOT_CLOSING_RATE` fix, the hook won `min()` for 300.6 s of 3233.9 s total (9.3% of the whole drive), 60.5 s of it at highway speed across 11 arm events, several holding the floor for 7-11 s while `dRel` was flat or oscillating the entire time. After the fix: 19.3 s of highway-speed floor time across 10 events (one genuinely a real hard approach, dRel 113→20 m, correctly kept armed — not a false positive). Re-ran both prior incident logs against the same fixed file: 08-27 still arms, 91.2 m / 3.75 s armed (was 93.6 m / 4.0 s); 08-25 still arms, 105.9 m / 5.69 s armed (was 115.0 m / 6.3 s). Checked for re-arm chatter from releasing sooner: 3 short re-arm clusters (<5 s apart) of 17 total events over the drive — present, not frequent enough to justify hysteresis over a single shared threshold.
 
 ---
 

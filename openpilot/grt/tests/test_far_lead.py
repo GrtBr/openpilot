@@ -8,9 +8,11 @@ Runs with STUBBED openpilot deps so it works on a dev box that cannot import ope
 See FAR_LEAD_PREBRAKE_PROMPT.md (repo root) section 9 for the case list this covers, and the
 far_lead.py module docstring for the bugs testing/replay already caught: gating arming on raw
 vRel (false-armed on noise), checking the distance gate at persistence-completion instead of at
-first lock (stopped-lead case never armed at all, v1), and the rising-edge absence gate that
-blocked arming on a real 2026-08-27 drive regardless of how hot the danger signal got (removed
-in v2 -- see "THIRD BUG" in the module docstring).
+first lock (stopped-lead case never armed at all, v1), the rising-edge absence gate that blocked
+arming on a real 2026-08-27 drive regardless of how hot the danger signal got (removed in v2 --
+see "THIRD BUG"), and a_req alone clearing HOT_A_REQ on ordinary highway noise / tiny closing
+rates at long range, which held the floor for far longer than any real closing event lasted
+(fixed by HOT_CLOSING_RATE on both arm and release -- see "FOURTH BUG").
 """
 import pathlib
 import sys
@@ -227,6 +229,33 @@ def main():
   h = new_hook()
   out, _ = arm(h, 120.0, 30.6, -8.0)
   check("candidate a <= -0.20 always (hook 10 C floor)", all(c[0] <= -0.20 for c in out))
+
+  # FOURTH BUG regression: a_req alone can clear HOT_A_REQ on a tiny closing rate at close-ish
+  # range -- must NOT arm without also clearing HOT_CLOSING_RATE. At 90 m, v_ego=30.6,
+  # closing at -1.0 m/s (3.6 km/h, well under the 10 km/h gate): a_req ~ 0.35, clears HOT_A_REQ,
+  # but must not arm.
+  h = new_hook()
+  out, _ = close(h, 90.0, 30.6, -1.0, 40)  # 2 s, well past HOT_PERSIST_S if it were going to arm
+  check("FOURTH BUG: a_req hot but closing <10km/h at 90m -> [] (not armed)",
+        out == [] and not h.armed)
+
+  # FOURTH BUG regression: armed on a real fast approach, then closing rate DECAYS to a slow
+  # trickle (-1.5 m/s, under HOT_CLOSING_RATE) without ever reaching >= 0 -- must release anyway,
+  # not hold the floor waiting for fully non-negative (the actual 2026-08-28 defect). Feed
+  # physically consistent kinematics (dRel actually decreasing at the claimed rate), same as
+  # close()/arm() -- a frozen dRel with a nonzero claimed vRel is an inconsistent input the
+  # filter correctly refuses to trust quickly, which is not what this case is testing.
+  h = new_hook()
+  _, dRel = arm(h, 120.0, 30.6, -8.0)
+  check("armed before decay", h.armed)
+  out = []
+  for _ in range(60):  # 3 s at the slow rate -- must release well before this elapses
+    out = h.step(True, dRel, -1.5, 30.6, True, True, False, 1.0)
+    dRel = max(0.0, dRel - 1.5 * DT_MDL)
+    if out == [] and not h.armed:
+      break
+  check("FOURTH BUG: closing rate decays to -1.5 m/s (<10km/h) -> released, not held",
+        out == [] and not h.armed)
 
   print(f"\n{sum(results)}/{len(results)} passed")
   return 0 if all(results) else 1

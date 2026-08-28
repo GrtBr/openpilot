@@ -105,6 +105,47 @@ emergency-stop scenario outside this hook's declared envelope (correcting compla
 range); stock's own emergency-braking path, not this hook, is what should dominate there.
 Documented rather than silently shipped; the tested worst case (120 m onset) is unaffected.
 
+A FOURTH BUG, FOUND ON A REAL DRIVE (2026-08-28), THE OPPOSITE FAILURE DIRECTION: the
+2026-08-27 fix made the hook arm when it should have; this one made it hold the floor long
+after it should have let go. Operator reported the car keeping an oversized, oscillating gap on
+the highway -- braking on approach, then braking again on every subsequent gentle re-approach,
+never settling. Measured on a real 54-minute highway drive (route 00000143): the hook won
+`min()` for 300.6 s of 3233.9 s total (9.3% of the ENTIRE drive), 60.5 s of that at highway
+speed (>22 m/s) across 11 separate arm events.
+
+Root cause is NOT filter noise producing a false average -- checked directly, frame by frame,
+against several of the offending runs. The filter is working as designed: `_RangeRateFilter`
+correctly detects real, short-lived closing transients that the model's own per-frame `vRel`
+head does not report (one instrumented example: dRel fell 111.4 -> 104.9 m in ~0.5 s while raw
+`vRel` read only -0.57 to -0.93 m/s; `v_filt` correctly integrated this into -4.1 m/s). The
+actual defect: once armed, the ONLY way to release (short of the lead being lost, `dRel < 20`,
+or stock itself reaching `<= FLOOR`) was `eff_vRel_range >= 0` -- the pessimistic pairing
+`min(vRel_model, v_filt)` reaching fully non-negative. On ordinary noisy highway data this is a
+much stricter bar than "the transient that triggered arming has resolved": `v_filt` has slow
+dynamics by design (that is what makes it noise-resistant) and can take many seconds to
+decay back through zero after even a brief closing pulse, holding the floor the entire time even
+though the real gap has been flat or oscillating for seconds already. One instrumented example:
+armed for 9.35 s while dRel oscillated 82-92 m the whole time (never trending), because `v_filt`
+lingered in a shallow -0.4 to -1.8 m/s band and never crossed back to >= 0.
+
+Fix: gate BOTH arming and continued-armed status on the same closing-rate floor,
+`HOT_CLOSING_RATE` (2.78 m/s, ~10 km/h -- operator's proposed number, validated against real
+data before adopting). Arming additionally requires `v_filt <= -HOT_CLOSING_RATE`, not just
+`a_req_filt > HOT_A_REQ` alone (a_req's distance-scaling means small closing rates at long range
+can already clear 0.30 on their own -- validated: this alone only cut highway false-arm time
+60.5 -> 47.8 s, most of the problem survived). Release additionally fires once
+`eff_vRel_range > -HOT_CLOSING_RATE`, not only once it reaches fully non-negative -- this is
+what does most of the work (60.5 -> 19.3 s of highway time, and a chunk of that remaining 19.3 s
+is a verified GENUINE hard approach, dRel 113 -> 20 m in ~8 s, correctly kept armed, not a
+defect). Checked for re-arm chatter from releasing sooner (each re-arm calls `_reset()`, wiping
+the filter to `v=0`): 3 short re-arm clusters (<5 s apart) out of 17 total events across the
+54-minute drive -- present but not frequent enough to justify asymmetric arm/release thresholds
+(hysteresis) over the single shared constant. Costs ~0.25-0.6 s of armed time on both prior
+validated incidents (2026-08-27: 4.0 -> 3.75 s; 2026-08-25: 6.3 -> 5.69 s) -- same floor
+severity while armed, released slightly sooner. Operator explicitly signed off on this tradeoff
+after seeing both numbers, since the arming-gate-only fix left ~80% of the reported problem
+unaddressed.
+
 WHY THE RELEASE CONDITION IS NOT A BARE DISTANCE CUTOFF
 --------------------------------------------------------
 The original spec released the latch on `dRel < 50`. Checked against the 10:49 log: at
@@ -148,6 +189,10 @@ ARM_MIN_DIST = 80.0          # m -- dRel_at_hot_start must exceed this (anchor s
                              # see docstring -- this is NOT "distance at first sight" anymore)
 PRESENCE_PERSIST_S = 0.30    # s -- continuous presence required before the arming gate evaluates
 HOT_A_REQ = 0.30             # m/s^2 -- a_req(v_filt) must clear this...
+HOT_CLOSING_RATE = 2.78      # m/s (~10 km/h) -- ...AND v_filt must be closing at least this fast
+                             # ("FOURTH BUG" in module docstring -- a_req alone can clear 0.30 on
+                             # tiny closing rates at long range, which is correct for a genuine
+                             # slow-pack approach but also fires on highway measurement noise)
 HOT_PERSIST_S = 0.5          # ...continuously for this long before arming (kills noise)
 STOP_MARGIN = 6.0            # m -- same STOP_DISTANCE long_mpc.py uses
 
@@ -232,7 +277,10 @@ class FarLeadPreBrake:
 
       v_lead_filt = v_ego + v_filt
       a_req_filt = (v_ego ** 2 - v_lead_filt ** 2) / (2.0 * max(dRel - STOP_MARGIN, 1.0))
-      if a_req_filt > HOT_A_REQ:
+      # a_req alone can clear HOT_A_REQ on a tiny closing rate at long range -- correct for a
+      # genuine slow-pack approach, but also fires on ordinary highway measurement noise (see
+      # module docstring, "FOURTH BUG"). Require a real closing rate too.
+      if a_req_filt > HOT_A_REQ and v_filt <= -HOT_CLOSING_RATE:
         if self.hot_elapsed == 0.0:
           # anchor once, at the first frame the streak goes hot -- NOT at first presence
           # (removed with the absence gate) and not re-checked live every frame thereafter
@@ -269,7 +317,10 @@ class FarLeadPreBrake:
     if eff_dRel < RELEASE_DIST:
       self._reset()
       return []
-    if present and eff_vRel_range >= 0:
+    # Release once no longer closing FAST, not only once fully non-negative -- see module
+    # docstring, "FOURTH BUG". v_filt's slow dynamics mean "fully >= 0" is a much stricter bar
+    # than "the transient that triggered arming has resolved" on noisy real data.
+    if present and eff_vRel_range >= -HOT_CLOSING_RATE:
       self._reset()
       return []
 

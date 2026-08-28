@@ -4289,3 +4289,134 @@ openpilot's own processes to come up before checking messaging).
 incident logs, run against this exact committed file before deploy) is the evidence so far that
 arming behaves as designed; a live drive with a genuine far/closing lead in relaxed personality
 is still needed to close the loop on the 2026-08-27 incident this change targets.
+
+## 2026-08-28 — hook 11 v2 NEW DEFECT: floor-clamp forces continuous braking on ordinary highway
+## following. Diagnosis only, NOT fixed.
+
+Operator reported, from a real drive today: "keeps excessive following distance on the highway.
+It brakes when approaching but then keeps braking whenever I come closer, even at a gentle
+speed. It keeps me >100m away at all times." Not the 2026-08-27 failure mode (that was
+under-triggering) — this is over-triggering / stuck-on, and it needed the road-test v2 hadn't
+had yet.
+
+**Pulled the real drive and checked before proposing anything.** First attempt grabbed the wrong
+route (00000144, 10:00-10:16) -- it never moved (vEgo max 0.1 m/s the whole 18 min, not a real
+drive). Found the actual drive at 00000143 (09:02, 55 segments, ~54 min, vEgo up to 33.5 m/s /
+120.5 km/h, personality 89% relaxed) and re-extracted from that.
+
+**Confirmed by direct measurement, not just code inspection:** `longitudinalPlanSource == lead0`
+(hook 11 won the `min()`) for 475 separate runs over the drive, 300.6s of 3233.9s total (9.3% of
+the ENTIRE drive). 28 of those runs were at highway speed (>22 m/s); together they account for
+~92s of forced minimum braking. The clearest example:
+
+    t+2574.0s  dur=2.66s   dRel 109.8 -> 109.9m   vRel -0.43 -> -0.01   vEgo=105 km/h
+    t+2163.8s  dur=9.20s   dRel 107.2 ->  97.5m   vRel -0.95 -> -0.48   vEgo=109 km/h
+    t+1542.2s  dur=7.60s   dRel 100.4 ->  94.7m   vRel -1.84 ->  0.59   vEgo=100 km/h
+
+The first one: dRel is essentially UNCHANGED (109.8 -> 109.9m) over 2.66s, yet the hook held
+minimum floor braking the entire time.
+
+**Root cause, in the command formula while armed:**
+
+    target = max(CAP, min(-a_req, FLOOR))    # CAP=-1.2, FLOOR=-0.40
+
+This is a correct clamp INTO `[-1.2, -0.40]`, but that range has a floor at the SOFT end too --
+once armed, the hook can never command softer than -0.40, no matter how small the actual `a_req`
+is. It only releases on: net non-closing (`vRel_range >= 0`), stock's own candidate reaching
+`<= -0.40`, `dRel < 20`, or a gate dropping. On an ordinary highway gap that oscillates by
+fractions of a m/s around a roughly steady following distance, `vRel_range` spends long stretches
+just barely negative -- enough to arm once `a_req` ticks over 0.30 for 0.5s, then enough to STAY
+armed (since release needs `>= 0`, not "close to 0") for many seconds after the actual danger
+that triggered the arm is long gone. This behaves exactly as designed for the isolated
+hard-braking incidents the design was built and tested against (a lead that's genuinely closing
+fast, where -0.40 continuous is exactly the intended minimum authority) -- it was never validated
+against sustained gentle highway following, where "still technically closing" happens constantly
+and doesn't mean "still dangerous."
+
+**Likely a regression introduced by yesterday's v2 change, though unconfirmed** (no v1-era
+highway-speed log exists to compare against directly -- v1 was only live ~1 day before this fix
+replaced it). v1's rising-edge/absence gate (2.0s absent, then present) would have imposed a
+natural cooldown between arm events; v2 removed that specifically to fix the 2026-08-27
+under-arming failure, and very likely raised the arming FREQUENCY on ordinary traffic as a side
+effect that was never checked. The floor-forcing behavior itself (the part actually responsible
+for today's complaint) exists identically in v1 -- only the RATE of arming should differ between
+the two.
+
+**Not fixed.** This needs the same rigor as the last two changes: a design for what "still
+armed" should actually track (net closing rate near zero for some duration -> release, not just
+sign-flip; or don't force the -0.40 floor once a_req has fallen well below HOT_A_REQ; or some
+combination), replayed against this drive AND both prior incident logs to confirm no regression,
+advisor review, then implementation. Operator has not yet said whether to proceed with a fix now
+or drive more first.
+
+## 2026-08-28 (later) — hook 11: HOT_CLOSING_RATE fixes the over-triggering defect. IMPLEMENTED,
+## NOT YET DEPLOYED.
+
+Operator's own proposed fix: arm only when closing faster than 10 km/h, so normal following
+traffic can't trigger it, only dangerous approaches. Validated before touching the real file, per
+the diagnosis-then-implement pattern this hook has followed all along.
+
+**Arm-gate-only, tested first (matches exactly what operator asked for):** cut highway false-arm
+time from 60.5s to 47.8s over today's drive (route 00000143, 54 min). Real but modest — most of
+the reported problem survived.
+
+**Why it wasn't enough, found by instrumenting the surviving cases frame-by-frame:** the defect
+isn't primarily an arming problem. `_RangeRateFilter` is working exactly as designed — it
+correctly detects short, real closing transients that the model's own per-frame `vRel` never
+reports (verified: dRel fell 111.4 -> 104.9m in ~0.5s while raw `vRel` read only -0.57 to
+-0.93 m/s; `v_filt` correctly integrated this into -4.1 m/s). The actual defect is the RELEASE
+condition: it required the closing rate to reach fully non-negative before letting go, and the
+filter's slow dynamics (needed for noise rejection in the first place) mean that on real,
+constantly-fluctuating highway data it can take many seconds to decay back through zero after
+even a brief transient — holding the floor the whole time. Worst instrumented case: armed for
+9.35s while dRel oscillated 82-92m the ENTIRE time (never trending in either direction), because
+`v_filt` lingered in a shallow -0.4 to -1.8 m/s band and never crossed back to >= 0.
+
+**Extended fix, not what was asked for, derived from the instrumentation:** apply the SAME
+`HOT_CLOSING_RATE` (2.78 m/s / ~10 km/h) threshold to release, not just arming — release once no
+longer closing faster than that, instead of requiring fully non-negative. This is what does most
+of the work: highway false-arm time 60.5s -> 19.3s (68% reduction vs the arm-gate-only 21%).
+Verified one of the remaining runs (7.4s at t+743.6s) frame-by-frame: it's a GENUINE hard
+approach, dRel 113 -> 20m in ~8s with real closing reaching -6 m/s, correctly kept armed — not a
+false positive, so the true remaining false-arm time is even less than 19.3s.
+
+**Asked advisor before finalizing** (per standing rule for design changes to this hook). Advisor
+confirmed the direction but flagged: (1) shipping the derived release fix alongside the
+requested arm-gate fix without disclosure would be wrong even though it's clearly the better
+fix — the user asked for one thing, found something that does more, and both numbers needed to
+go back to them explicitly before editing anything; (2) my first framing ("filter has a
+persistent negative bias from noise") was contradicted by my own trace data — the filter is
+correctly detecting real transients, the defect is release, not the filter; (3) verify the
+7.4s survivor isn't chatter hiding behind one event-count (done, see above — genuine approach);
+(4) count re-arm cycles from releasing sooner, since each re-arm wipes the filter via `_reset()`.
+
+**Re-arm chatter check:** 3 short re-arm clusters (<5s apart) out of 17 total events across the
+54-minute drive. Present but not frequent enough to justify asymmetric arm/release thresholds
+(hysteresis) over one shared constant — noted in the docstring as the reasoning, not just the
+conclusion, so a future reader can re-judge if a future drive shows worse chatter.
+
+**Presented both numbers to the operator** (arm-gate-only: 21% reduction, matches literal
+request; arm-gate + release fix: 68% reduction, not what was asked, costs ~0.3-0.6s less armed
+time on both prior validated incidents — 08-27: 4.0s->3.75s; 08-25: 6.3s->5.69s, same floor
+severity, released slightly sooner) and asked explicitly which to ship. **Operator chose both.**
+
+**Implemented into `openpilot/grt/far_lead.py`:** added `HOT_CLOSING_RATE = 2.78` (m/s), used in
+two places — the arming hot-check now requires `a_req_filt > HOT_A_REQ AND v_filt <=
+-HOT_CLOSING_RATE` (was `a_req_filt` alone), and the release check now fires at
+`eff_vRel_range >= -HOT_CLOSING_RATE` (was `>= 0`). Module docstring rewritten with the fourth
+bug's full writeup, explicitly correcting the "filter noise bias" framing advisor caught in favor
+of the real mechanism (filter correctly detects real transients; release couldn't let go of
+them). Updated `openpilot/grt/tests/test_far_lead.py`: added two regression tests (a_req hot but
+closing <10km/h at 90m never arms; armed then decaying to -1.5 m/s releases without reaching
+>=0) — the first draft of the second test fed an internally-inconsistent input (frozen dRel with
+a nonzero claimed vRel) and failed for a harness reason, not a code reason; fixed by feeding
+physically consistent kinematics matching the existing `close()`/`arm()` helpers. All 29 tests
+pass. Updated `FAR_LEAD_PREBRAKE_PROMPT.md` §4 and §6 (arming and release conditions, plus a
+third replay bar with today's numbers) and `GRT_MODS.md`'s hook-11 row to describe all four bugs.
+Re-ran the full replay bar against the REAL (not prototype) `far_lead.py` after implementing:
+identical numbers to the validated prototype on all three logs (08-27: 91.2m/3.75s; 08-25:
+105.9m/5.69s; 08-28 highway: 19.3s total across 10 events).
+
+**NOT YET DEPLOYED to comma4.** Implementation and deploy kept as separate steps, as with every
+prior change to this hook this week; deploy needs its own explicit go-ahead and the usual
+pre/post-reboot verification.
