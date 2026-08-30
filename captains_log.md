@@ -4451,3 +4451,57 @@ Device came back quickly; commit `d0036eb` confirmed running post-reboot.
 **NOT YET road-tested with the fix live.** Today's problem drive is the evidence this should
 work; a real highway drive in relaxed personality is still needed to confirm the following
 distance actually settles down and both real-incident-class approaches still get braked for.
+
+## 2026-08-30 — hook 11 fix ROAD-TESTED on an independent drive. Confirmed working. Also: a
+## methodology bug found in how "hook 11 armed" was counted -- corrects two numbers above.
+
+Operator asked for an independent check: pull today's drive, analyze, get advisor's read, no
+coding. Pulled route 0000014b (57 segments, 55.9 min, up to 120.7 km/h, 99.8% relaxed) -- the
+closest match to the 2026-08-28 problem drive.
+
+**METHODOLOGY BUG, found mid-analysis:** the very first pass counted "hook 11 armed" by checking
+`longitudinalPlan.longitudinalPlanSource == 'lead0'` in the logged data -- but `lead0` is STOCK's
+OWN label (`long_mpc.py`: `MPC_SOURCES = (LongitudinalPlanSource.lead0, LongitudinalPlanSource.lead1)`,
+assigned whenever the native MPC solves against the first tracked lead), which `far_lead.py`
+reuses for its own candidate (by design, so logs show the branch). The published source field
+CANNOT distinguish "stock's own ordinary lead-following won" from "hook 11 won" -- they look
+identical. Counting on that field alone (what the first pass did) produced 61 "arm" events, 20.9s
+total, and a false chatter signal (50 of 60 re-arm gaps under 5s that looked alarming).
+
+**Corrected by replaying the real, deployed `FarLeadPreBrake.step()` directly against the raw
+radarState/carState/carControl/selfdriveState series** (the same method `test_v3.py`'s `replay()`
+used throughout Wednesday's fix validation -- that method was never affected, since it drives a
+fresh hook instance from sensor inputs and never reads the logged source field). TRUE picture for
+today: **5 hook-11 events, 9.6s total, all at highway speed, only 1 of 4 re-arm gaps under 5s**
+(and that one pair sits inside a single genuine 118->67 km/h highway slowdown, not on a stable
+gap -- legitimate re-engagement, not chatter).
+
+**This means the 2026-08-28 diagnosis entry's headline numbers are likely overstated**: "475
+runs... 9.3%... 300.6s... 28 highway runs... ~92s" was computed with the same flawed
+source-counting method, before the correct replay-based harness existed. The DEFECT ITSELF was
+real and correctly diagnosed (verified independently via direct frame instrumentation of specific
+runs, e.g. the 9.35s hold while dRel oscillated 82-92m) -- but the headline duration/count numbers
+in that entry overstate it by conflating stock's own routine lead-following with hook 11
+specifically. **The fix decision is NOT affected**: the v2-baseline-vs-v3-vs-v4 comparison table
+used for that decision (60.5s -> 47.8s -> 19.3s highway) was computed via the correct
+`replay()` method throughout, and is internally consistent -- confirmed today by re-running the
+CURRENT `far_lead.py` against the SAVED `route143.tsv` and getting back the exact same 19.3s /
+10-event list previously validated. The chain holds; only the initial diagnosis's scale (how big
+the original problem looked) was inflated, not the fix's measured effect.
+
+**Advisor-directed verification of the 5 true events, aTarget three-frames-before/after each
+arm and release:** every single arm steps from stock at ~0.04 (essentially coasting, no braking)
+straight to -0.40 -- the hook is the SOLE initiator of braking in all 5 cases, not backfilling a
+signal stock was already producing. Two of five escalate to the -1.2 cap before releasing. This
+is the affirmative case for the feature, not just "the defect is gone": when it fires, it is doing
+exactly the job it exists for. One instrumentation caveat noted, not a behavioral finding: event 4
+(t+2618.04s) shows a ~1-frame (~50ms) alignment lag between the hook's own step()-returned arm
+frame and the corresponding published `longitudinalPlan` row still showing `e2e`/0.04 -- plausibly
+a radarState/longitudinalPlan sampling-phase skew in the nearest-timestamp join, not investigated
+further since the release side of that same event escalates properly.
+
+**Verdict: fix confirmed on an independent drive two days later.** No stable-gap floor-holding
+anywhere in this drive (the exact defect class that prompted the fix). No missed dangerous
+approaches either (checked: zero highway-speed encounters with dRel < 40m anywhere in the drive,
+so this log doesn't contain an incident-class event to separately confirm against, but nothing
+suggests a miss). Not coded -- diagnosis and verification only, per this session's standing rule.
