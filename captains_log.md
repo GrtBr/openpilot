@@ -4729,3 +4729,438 @@ Device came back after reboot; commit `a69672e` confirmed running.
 **Hook 11 is back to the FLOOR=-0.40 design validated through 2026-08-28's HOT_CLOSING_RATE
 fix**, with the fifth finding (arming on top of stock-handled approaches) still open and
 awaiting the `stock_min` arm-time gate as its own, separate, future change.
+
+## 2026-08-31 (later) — a_req formula is physically wrong for a moving lead; a corrected version was validated and FOUND TO BREAK THE HOOK. NOT IMPLEMENTED.
+
+Separate thread from the FLOOR work above, surfaced by the operator working through a
+reconciliation exercise between `v_filt` and `a_req_filt`: the deployed `a_req` formula,
+
+    a_req = (v_ego**2 - v_lead**2) / (2 * max(dRel - STOP_MARGIN, 1.0))
+
+is only exact when the lead is stationary. For a moving lead the correct relative-motion
+kinematics is `a_req = v_filt**2 / (2 * max(dRel - STOP_MARGIN, 1.0))` (equivalently `(Δv)² /
+(2·closing distance)`) -- the operator independently derived and shared this via their own
+worked calculation (120 km/h ego, 100 km/h lead, 100 m gap, 6 m margin -> ~0.309 m/s²), which
+matched my own algebraic generalization exactly. The deployed formula overshoots the correct
+value by a factor of `(v_ego + v_lead) / |v_filt|` -- ~11x in that worked example -- because it
+scales with absolute speed, not just relative closing rate.
+
+**Operator authorized fixing this, in advisor-recommended order: correct the formula first, then
+re-derive `HOT_A_REQ` against the corrected magnitudes** (0.30 was fit to the old formula's
+worked examples and would no longer mean the same thing), before touching the separately-raised
+`HOT_CLOSING_RATE` question (parked, downstream of this).
+
+**Built the corrected formula as a drop-in replacement** (`FarLeadCorrected` in
+`/tmp/.../scratchpad/test_areq_fix.py`, both arming-check and active-command sites) and swept
+`HOT_A_REQ` against all three routes with real incident/false-arm history:
+- `route128` (2026-08-25 10:49, the founding incident, pre-hook-11 -- replayed with
+  `relaxed_override=True` since personality wasn't relevant at record time): deployed formula
+  arms at dRel=115.0 m. Corrected formula at the UNCHANGED `HOT_A_REQ=0.30` arms 6+ s later, at
+  dRel=77.7 m -- a large coverage loss. Recovering a comparable ~110 m arm distance requires
+  lowering `HOT_A_REQ` to roughly 0.05-0.08.
+- `route139` (2026-08-27 07:55, the v1 "THIRD BUG" incident, genuinely relaxed/live): deployed
+  formula arms at dRel=93.6 m. Corrected formula at `HOT_A_REQ=0.30` **never arms at all** --
+  0 events. First arms (dRel=76.4 m, later and closer than before) only once `HOT_A_REQ` is
+  lowered to ≤0.15.
+- `route143` (2026-08-28, the 54-minute highway false-arm drive used to validate the
+  `HOT_CLOSING_RATE` fix): at `HOT_A_REQ=0.30`, 1 arm event -- confirmed (by checking the raw
+  dRel trend, min dRel 20.1 m over the window) to be the same single verified-genuine hard
+  approach documented in the module docstring, not a false arm. Lowering `HOT_A_REQ` to recover
+  route128/139 coverage reopens false arms here: 3 events at 0.15, 6 at 0.08, 8 at 0.05, 10
+  (saturating) at ≤0.03 -- several of which show flat/oscillating dRel with no real closing
+  trend (the same signature as the FOURTH BUG false-arms `HOT_CLOSING_RATE` was built to kill).
+
+**No single `HOT_A_REQ` value recovers the deployed envelope.** Advisor's read, which the numbers
+confirm: the old and new formulas aren't the same function at different scale -- old is
+approximately linear in closing rate and scales with absolute ego/lead speed
+(`|v_filt|·v_ego/d`), corrected is quadratic in closing rate and speed-independent
+(`v_filt²/(2d)`). Changing the exponent changes the *ranking* between events, not just the
+magnitude, so there is no monotone threshold that separates route128/139's genuine approaches
+from route143's highway noise the way the old formula's speed-scaling did. That speed-scaling is
+physically wrong but was doing real work: it supplies extra lead-time margin at high ego speed
+(more stopping distance needed, more sensor/reaction uncertainty) that the textbook-correct
+kinematic formula doesn't contain by itself.
+
+**Conclusion: fixing `a_req` to the physically correct formula, in isolation, is a net safety
+regression on exactly the incidents this hook exists for.** NOT IMPLEMENTED. `far_lead.py` left
+untouched; comma4 stays on the already-verified `a69672e67` (FLOOR=-0.40 revert). The formula is
+still documented here as wrong for a moving lead -- that fact doesn't change -- but replacing it
+needs a different shape than a straight swap: correct kinematics for the braking *command*
+magnitude, plus a separate, explicit speed-dependent margin term for *arming* lead time, so the
+two roles the old formula was accidentally serving at once (correct-ish braking math, and
+speed-scaled early-warning distance) get their own knobs instead of one one formula doing both
+badly. That is a design task, not something to fold into this thread; not scoped or started.
+
+The `HOT_CLOSING_RATE` 10->20 km/h question raised alongside this is still parked -- it was
+explicitly downstream of the `a_req` fix, which turned out not to be a clean fix at all.
+
+## 2026-08-31 (later still) — verified the FLOOR revert against the actual 10:13 incident (counterfactual replay)
+
+comma4 unreachable (mid-drive) when asked to pull fresh data, so this reuses the already-pulled
+`route14f.tsv` (this morning's FLOOR=0.00 drive) and replays it through the CURRENT source
+(`far_lead.py` as committed at `a69672e67`, FLOOR=-0.40) instead of the real recorded (buggy)
+output -- a counterfactual "what would today's deployed code have done here" check, not new
+telemetry.
+
+Full-route replay finds the same event as before at t+889.5s, dRel=75.2 m, vEgo=119.0 km/h --
+this is the 10:13 incident. Frame-by-frame trace against the real published `aTarget`/`source`:
+
+- Arms at t+889.50s, dRel=75.2 m, ramps via `JERK_ARM` through all 12 steps to `CAP` (-1.2 m/s^2)
+  by t+890.05s, and HOLDS at -1.2 through t+890.80s (~0.75 s at the hardest command) while dRel
+  oscillates 71-99 m and vEgo bleeds 118.6 -> 116.4 km/h.
+- Real published `source` reads `lead0` (this hook winning `min()`) continuously from t+889.50
+  through t+891.75 -- 2.25 s -- confirming the hook actually drove the output the whole time,
+  not just computed a candidate that lost arbitration.
+- Real published `source` switches back to `e2e` at t+891.20s, with `aTarget` already near zero
+  and dRel/vEgo showing the gap re-opening -- stock had already caught up and taken over before
+  the hook's own `armed` flag drops.
+- Hook's own `_reset()` (armed -> False) fires at t+891.80s, 0.6 s AFTER stock had already
+  regained control -- the release condition (`stock_min <= FLOOR`) working as designed, not the
+  near-immediate self-release seen under the FLOOR=0.00 bug (which released after ~0.2 s while
+  the approach was still developing).
+
+**This is the fix working correctly on the actual incident that exposed the sixth bug.** Total
+armed duration 2.3 s, full ramp to CAP, held through the tightest part of the approach, released
+only once stock had genuinely resolved it -- the intended design, confirmed against real data
+rather than synthetic tests alone.
+
+Not independently confirmed against fresh, post-deploy telemetry -- comma4 was unreachable for
+this check. Should re-verify against a live drive once the device is back online, as a final
+close on this thread.
+
+## 2026-08-31 (later still) — the severity-only split fix was ALSO wrong. Reverted. Three dead ends now logged on the a_req formula.
+
+Follow-on to the a_req finding above. Operator pointed out the corrected formula would have
+worked on today's drive; checked it directly against route14f -- it does not (0 arm events at
+the unchanged `HOT_A_REQ=0.30`, same regression pattern as the other three routes). Operator then
+proposed a narrower fix: leave the arming gate on the old formula entirely (untouched,
+`HOT_A_REQ=0.30` still valid, zero risk to arming timing) and correct ONLY the active-command
+severity formula once already armed. Built this (`FarLeadSplit` in scratchpad), and the initial
+numbers looked like a clean win: arm timing bit-for-bit identical to deployed on all four routes,
+CAP-hit frequency dropped sharply everywhere (route14f 65.9%->2.4%, route128 90.4%->19.3%,
+route139 85.3%->10.7%, route143 29.1%->13.6%), every genuine incident still reached CAP.
+IMPLEMENTED as commit `f994d6258`, with matching writeups in this file, `GRT_MODS.md`, and
+`FAR_LEAD_PREBRAKE_PROMPT.md`.
+
+**Operator then asked to check this split fix against a full recalibration, via advisor. Advisor
+flagged the real test hadn't been run: does the corrected (slower) ramp to CAP still close to a
+safe gap on the two founding incidents, or does it trade away margin for the reduced
+over-braking?** Built a counterfactual integration (start at the real arm state, integrate a
+simulated ego trajectory forward under each formula's actual per-frame command, using the
+`v_filt`-based filter output -- driven only by real measurements, identical under both formulas
+-- to estimate the lead's absolute speed) and compared the resulting minimum gap.
+
+First attempt at this check gave a false "no difference" result -- traced to a real methodology
+bug: `far_lead.py` had already been edited in place with the split fix, so `fl.FarLeadPreBrake`
+loaded via the scratch harness was no longer "deployed", it WAS the fix, so the check was
+comparing the fix against itself. Caught because the "no difference" result was implausible given
+a large, separately-measured time-to-CAP gap on the same routes. Fixed by extracting the true
+pre-fix `far_lead.py` from git (`git show 407a3177c:...`) and pinning the baseline to that file
+content directly, never to the working tree.
+
+**Re-run with the correct baseline: the split fix IS a real margin regression on the two founding
+incidents.** CORRECTION (caught during the follow-on attempt 3 below): the metric below is
+`gap_at_release`, not a genuine closest-approach minimum -- the counterfactual `dRel_sim` is still
+monotonically decreasing at the moment each run's loop stops (release), so this measures "how
+much speed had been bled by handoff time," not "how close it actually got." Still a real,
+legitimate concern (it means stock inherits a worse state at handoff), just a different claim
+than originally stated.
+- route128 (2026-08-25, the founding incident): gap_at_release 79.23 m (true
+  deployed formula) vs **68.41 m (split fix) -- 10.8 m less speed bled by handoff**.
+- route139 (2026-08-27): 63.69 m vs **61.16 m -- 2.5 m less**.
+- route14f (today's 10:13 event): 52.81 m vs 52.22 m -- 0.6 m, negligible.
+
+Mechanism, confirmed by direct frame-by-frame diff on route128: both formulas sit at the exact
+same `FLOOR` (-0.40) for the first 3.6 s after arming. The OLD formula's inflated `a_req` crosses
+above `FLOOR` and starts hardening sooner than the physically-correct formula does, because its
+speed-scaling functions as an accidental early-escalation trigger -- the true closing rate simply
+hasn't built up enough yet to justify more than `FLOOR` under the correct physics at that point.
+That earlier start is worth ~11 m of gap on this incident. None of the three cases get anywhere
+near `STOP_MARGIN` (6 m), but the margin cost is real, quantified, and lands on exactly the two
+incidents this hook exists for -- not just removing gratuitous over-braking on ordinary approaches
+as the (wrong) initial analysis concluded.
+
+**REVERTED.** Commit `f2003ae5a` reverts `f994d6258` cleanly (`far_lead.py` now byte-identical to
+the pre-fix state at `407a3177c`, 29/29 tests pass). The uncommitted `GRT_MODS.md` and
+`FAR_LEAD_PREBRAKE_PROMPT.md` edits describing the (incorrect) fix were discarded and both files
+restored to their last-committed content exactly (diffed byte-for-byte against `git show HEAD:...`
+to confirm). Nothing reached comma4 -- it was unreachable (mid-drive) for this entire thread, so
+this is pure local cleanup, no on-device exposure at any point.
+
+**Net state of the `a_req` formula investigation: three dead ends, all logged, none implemented.**
+1. Full swap (both arming gate and severity) -- fails on arming: no `HOT_A_REQ` recovers the
+   deployed envelope across four real routes.
+2. Severity-only split (arming gate untouched) -- fails on margin: trades away 2.5-10.8 m of gap
+   on the two founding incidents in exchange for removing gratuitous CAP-pinning elsewhere.
+3. (Implicit) leaving the formula as-is -- known to be physically wrong for a moving lead, but is
+   the only variant validated not to regress either arming timing or approach margin, because its
+   over-braking is, on the evidence above, functioning as an unintentional early-escalation
+   margin buffer, not pure waste.
+
+`far_lead.py` is unchanged from `a69672e67` (FLOOR=-0.40, old a_req formula, both sites). Any
+future attempt at this formula should be treated as a genuinely new design (e.g. correct
+kinematics plus an explicit, separately-tuned early-escalation term) validated against all three
+prior dead ends, not a variant of either failed attempt -- and per advisor's explicit guidance,
+that design choice belongs to the operator, not something to improvise inline.
+
+## 2026-08-31 (later still) — attempt 3 on the a_req formula: explicit speed-scaled margin, ALSO fails. Recommendation: stop, formula stays as-is.
+
+Third and (per advisor's recommendation) final attempt this session on the `a_req` formula,
+planned via `/plan` in consultation with advisor: keep correct relative-motion kinematics for the
+severity magnitude, but add back a deliberately-named, explicitly-tunable speed-scaled margin term
+instead of the accidental one the old formula supplied. Plan-mode research first extracted, at the
+frame each of the three genuine incidents' real deployed formula starts hardening past `FLOOR`,
+the ratio `a_req_old / a_req_correct`: 10.94 (route128, v_ego=110 km/h), 8.89 (route139, 74.5
+km/h), 3.78 (route14f, 118.6 km/h) -- not constant, and route14f has the HIGHEST speed but the
+LOWEST ratio. Algebraically the ratio equals `2*v_ego/|v_filt| - 1`: it depends jointly on speed
+AND closing rate, ruling out a flat multiplicative gain and motivating a distance-scaled margin
+form instead: `a_req = v_filt**2 / (2*max(dRel - STOP_MARGIN - MARGIN_PER_SPEED*v_ego, 1))`, one
+new named constant in seconds (an added following-time gap), `MARGIN_PER_SPEED=0` reducing exactly
+to attempt 2's pure-corrected-kinematics case.
+
+Swept `MARGIN_PER_SPEED` from 0 to 4.0 s against the true git-blob-pinned deployed baseline (never
+the working tree). CORRECTED METRIC NOTE: what was tracked is `gap_at_release` (the counterfactual
+simulated gap at the moment the real armed state drops), not a genuine closest-approach minimum --
+`dRel_sim` is still monotonically closing at that point in every run checked. The claim is "how
+much speed had been bled by handoff time," not "how close to collision" -- still a legitimate
+concern (stock inherits a worse state), just relabeled for accuracy; this also corrects the wording
+in the attempt-2 entry above.
+
+| MARGIN_PER_SPEED | route128 gap_at_release (baseline 79.23m) | route139 (baseline 63.69m) | route143 CAP-time fraction (of 888 armed frames) |
+|---|---|---|---|
+| 0.0 s (= attempt 2) | 68.41 m (-10.82) | 61.16 m (-2.53) | 13.6% |
+| 1.0 s | 68.97 m (-10.26) | 62.46 m (-1.23) | 14.6% |
+| 2.0 s | 71.58 m (-7.65) | 62.72 m (-0.97) | 21.5% |
+| 2.5 s | 75.64 m (-3.59) | 62.89 m (-0.80) | 30.5% |
+| 3.0 s | 79.13 m (-0.10) | 63.15 m (-0.54) | 43.2% |
+| 4.0 s (full route128 parity) | 79.23 m (-0.00) | 63.69 m (-0.00) | **65.0%** |
+| TRUE DEPLOYED (old formula, reference) | 79.23 m | 63.69 m | 29.1% |
+
+**Disqualifying comparison: the `MARGIN_PER_SPEED` needed to fully restore route128's
+gap-at-release parity (4.0 s) produces a route143 CAP-time fraction of 65.0% -- more than DOUBLE
+the old formula's own 29.1% on the same drive.** The knob is monotone in both directions and the
+crossover lands on the wrong side: there is no value that both recovers the founding incident's
+margin and improves on (or even matches) the formula it would replace on ordinary highway
+following.
+
+Root cause: `MARGIN_PER_SPEED * v_ego` is a function of ego speed alone, and route128's genuine
+~110 km/h approach and route143's ordinary ~110 km/h highway following look identical to a term
+that only reads speed. Nothing in this form references how the danger is actually developing
+(closing rate, its trend, dRel's trend), so it cannot separate the two cases -- structurally the
+same limitation as the old formula it was meant to replace, just relocated to a new constant.
+
+Also identified: the acceptance criteria written into the `/plan` for this attempt had a real gap
+-- "route143 event count <= 17" is invariant under this term by construction (arming is
+untouched, so event count can never move), and was never going to catch this failure. The
+criterion that actually discriminates is CAP-TIME FRACTION, not event count. Any future attempt
+should write that bound down FIRST (e.g. "route143 CAP-time fraction <= 13.6%, the attempt-2
+figure, while recovering route128's gap-at-release") rather than discovering it after a sweep.
+
+**NOT IMPLEMENTED. No code touched -- `far_lead.py` stays at `f2003ae5a` / `a69672e67`'s content
+throughout this attempt; only scratchpad files were created.**
+
+**Recommendation (advisor's, endorsed): stop here.** Three attempts now:
+1. Full swap (arming + severity corrected) -- fails on arming, no `HOT_A_REQ` recovers the
+   deployed envelope.
+2. Severity-only split (arming untouched, severity corrected) -- fails on margin, 2.5-10.8 m less
+   speed bled by handoff on the two founding incidents.
+3. Correct kinematics + explicit speed-scaled margin -- fails on the tradeoff itself: any margin
+   strong enough to close the route128 gap reintroduces MORE gratuitous CAP-braking on ordinary
+   highway following than the original (allegedly-wrong) formula ever had.
+
+The `a_req` formula's speed-scaling is wrong physics, but it is empirically load-bearing across
+three independent, differently-shaped attempts to remove or replace it. `far_lead.py` stays as
+deployed (`a69672e67`). If a fourth attempt is ever made, it needs a term that reads something
+about how the danger is DEVELOPING (rate of closure, trend), not just absolute speed -- and should
+be measured against the CAP-time-fraction bound above from the start, not discovered again after
+the fact.
+
+## 2026-08-31 (later still) — attempt 4: full redesign per operator spec (correct kinematics everywhere, HOT_A_REQ=0.10, minimum-not-cap severity). Split verdict: arming half is promising and NEW; severity half fails and conflicts with a written safety rule.
+
+Operator specified a from-scratch redesign combining four elements and asked it be validated,
+discussed with advisor, and reported back: (a) `a_req_correct = v_filt**2/(2d)` for BOTH the
+arming gate and the active-command severity (previous attempts 1-3 only ever corrected one site
+or added a margin term -- this is the first attempt to correct the arming formula while ALSO
+changing the severity clamp shape); (b) replace `[CAP, FLOOR]` with a single `MIN_SEVERITY=1.2`
+floor and NO upper bound; (c) `HOT_A_REQ=0.10` (down from 0.30); (d) validated via genuine
+closed-loop simulation (real `v_ego` integration under the actual commanded value each frame),
+correcting the operator's own earlier, correct objection that holding `v_ego` constant during a
+deceleration scenario is not a valid test.
+
+**Arming half (a + c): genuinely promising, a new result this session hasn't seen before.**
+Swept against all four real routes with the corrected arming formula at `HOT_A_REQ=0.10`:
+arms route128 at t+136.8s (deployed: t+136.6s), route139 at t+53.7s (deployed: t+53.0s), and
+today's 10:13 event -- all within ~1s of deployed timing. On route143 (the highway false-arm
+drive), **total armed frames dropped from 888 (deployed) to 489 -- a genuine 45% reduction in
+total time spent armed**, a stronger and more robust discrimination measure than event count
+(11 vs 17 events -- flagged during advisor review as a weaker, potentially-confounded metric,
+since a harder-to-satisfy release condition can fuse adjacent short events into fewer longer
+ones without actually improving rejection; the frame-count reduction doesn't have that
+confound). This is the first attempt across all four this session where lowering `HOT_A_REQ`
+alongside a corrected arming formula does NOT reopen the highway false-arm problem -- directly
+qualifying attempt 1's conclusion that "no `HOT_A_REQ` recovers the envelope": attempt 1 never
+swept 0.10, and used the old, tighter release condition throughout.
+
+**Severity half (b): fails, and conflicts with the fork's own written safety invariant.**
+Removing the upper cap in favor of a floor-only clamp means the hook can no longer be
+proportionate -- every armed event, however mild, now floors at -1.2 m/s^2 for its ENTIRE
+duration (3x the old FLOOR=-0.40), and when the corrected physics genuinely calls for more than
+1.2, there is nothing to stop it: route128 peaks at -1.80, route139 at -1.57, today's 10:13 event
+at -1.80, and **route143's t+743.6s event -- documented in the module docstring as "correctly
+kept armed, not a defect" and already adequately handled at the old CAP of -1.2 -- peaks at
+-3.15 m/s^2, more than 2.6x harder than the ceiling that was previously judged sufficient for
+that exact real event.** This directly contradicts `far_lead.py`'s own SAFETY section: "Clip to
+`[-1.2, -0.40]` while armed. Emergency stopping stays with MPC / the driver." A floor-only
+design turns a comfort/pre-brake hook into something that can autonomously command
+emergency-adjacent deceleration on a drive that specifically motivated the HOT_CLOSING_RATE fix
+for "excessive following distance, braking on every gentle re-approach."
+
+Closed-loop scenario walkthroughs (with `v_ego` genuinely decreasing, per the operator's
+correction) confirmed the mechanism directly rather than by inference: for a mild encounter
+(120 vs 100 km/h, 20 km/h closing) the corrected physics never exceeds 1.2, so `MIN_SEVERITY`
+behaves identically to the old CAP there -- the only difference is a ~1.75s later arm. For a
+severe encounter (80 km/h into stationary traffic), the corrected physics legitimately calls for
+more than 1.2 for most of the approach, and with no ceiling the command escalates smoothly but to
+a peak (~1.7-2.2 m/s^2 sustained, briefly over 3 in the route143 case) well past what the
+documented design reserves for MPC/driver.
+
+**Recommendation (advisor's, endorsed): the two halves have opposite verdicts and should not be
+evaluated as one package.** The severity change (b) should be dropped outright -- not tuned,
+not softened, dropped -- it structurally cannot be proportionate with a floor and no ceiling.
+The arming change (a + c) is worth a genuine follow-up attempt on its own, keeping the EXISTING
+`[CAP, FLOOR]` = `[-1.2, -0.40]` severity band completely untouched, since nothing in this
+session has tested "corrected arming formula + HOT_A_REQ=0.10 + unchanged severity clamp" as its
+own variant -- that combination is not yet validated and is NOT what this attempt tested (this
+attempt changed severity too), so it is a fifth attempt, not something already covered here.
+
+**NOT IMPLEMENTED. No code touched -- `far_lead.py` unchanged throughout this attempt, only
+scratchpad files (`scratchpad/redesign/`) were created.**
+
+## 2026-08-31 (later still) — attempt 5: drop (b), widen CAP to -2.0 instead of removing it. Fails the same margin test as attempt 2, worse on one route, plus a real coverage loss on arming.
+
+Operator's follow-up instruction, given attempt 4's split verdict: keep attempt 4's arming half
+(a + c) -- corrected `a_req_correct = v_filt**2/(2d)` at the arming gate, `HOT_A_REQ=0.10` -- but
+drop (b) (the floor-only `MIN_SEVERITY=1.2`, no ceiling) and restore a two-sided clamp instead,
+widening `CAP` from -1.2 to -2.0 (`FLOOR` unchanged at -0.40) rather than removing the ceiling
+outright. Severity formula also corrected (`v_filt**2/(2d)`) at this wider bound. Built as
+`FarLeadV5` in `scratchpad/redesign/hook11_v5.py`. `-2.0` was checked against the real downstream
+vehicle limit (`ACCEL_MIN = -3.5` in `opendbc/car/interfaces.py`) and against existing fork
+precedent (`HAZARD_ACCEL_MIN = -1.5` in `grt/scc_map.py`, already harder than the old CAP) --
+both confirm -2.0 is a plausible, bounded choice in isolation.
+
+**First pass (peak severity across 4 routes) looked clean and was wrong to trust on its own.**
+route128 peaked -1.80, route139 -1.57, today's 10:13 event -1.37, and route143's t+743.6s event
+-- the one that broke attempt 4 at an uncapped -3.15 -- now clips exactly at the new ceiling,
+-2.00, not beyond it. route143's CAP-time-fraction was 10.8%, comfortably inside the docstring's
+existing "<=13.6%" bound from attempt 2. On these numbers alone this looked like the first
+variant all session to resolve attempt 4's safety-rule violation while keeping its arming
+improvement.
+
+**It doesn't survive `gap_at_release` against the git-blob-pinned deployed baseline (the metric
+that killed attempt 2).** Re-running the same counterfactual gap-integration check used for
+attempt 2, against real deployed replay (never the working tree):
+
+| route | deployed | attempt 5 | delta |
+|---|---|---|---|
+| route128 | 79.23 m | 72.62 m | -6.61 m |
+| route139 | 63.69 m | 47.04 m | **-16.65 m** |
+| route14f (10:13) | 52.81 m | 51.02 m | -1.79 m |
+
+route139's -16.65 m is **6.7x** attempt 2's -2.5 m on the same route -- this is not a milder
+version of attempt 2's problem, it is strictly worse on the route where attempt 2 was already
+weakest. The mechanism, per the plan file's own frame-by-frame diff from earlier this session,
+explains why widening CAP couldn't have fixed this: both formulas sit at the same FLOOR for the
+first ~3.6s after arming, then the OLD formula's speed-inflated `a_req` crosses below FLOOR and
+starts hardening earlier than the corrected one does. That crossing point is set by the formula's
+sensitivity near FLOOR, not by where the ceiling sits -- CAP only bounds the peak, and the peak
+was never where the margin was being lost. Widening -1.2 to -2.0 was consequently orthogonal to
+the actual failure the whole time.
+
+**A second, independent problem: the corrected arming half is not clean either, contrary to
+attempt 4's report.** Attempt 4 credited "no timing regression on genuine incidents" to
+(a)+(c) based on event-level arm timestamps matching deployed within ~1s on route128/139/14f.
+A finer look this time found a real miss: deployed genuinely arms on route14f at t+127.39s
+(dRel=83.6m, 77.5 km/h) -- a short, 6-frame (0.3s) event -- but under (a)+(c),
+`a_req_correct` only reaches 0.0869 in that window against `HOT_A_REQ_NEW=0.10`, so
+`dRel_at_hot_start` never gets set at all (not an `ARM_MIN_DIST` rejection -- the anchor is
+`None` throughout). `HOT_A_REQ_NEW=0.10` is simultaneously too loose (489 armed frames of
+false-arm exposure on route143, down from 888 but still substantial) and too tight (misses a
+real arm on route14f) -- the corrected formula's dynamic range does not cleanly separate the two
+cases at any single threshold, which is the same conclusion attempt 1 reached from the opposite
+direction (no `HOT_A_REQ` recovered the envelope there either).
+
+**Recommendation (advisor's, endorsed): stop. Do not implement.** The operator's instruction
+("drop (b), widen CAP to -2.0, amend the safety-rule text") specified a change to a design the
+validation has now falsified before that text was ever written -- amending the docstring to
+`[-2.0, -0.40]` would document a bound for a variant that isn't going in. `far_lead.py`,
+`test_far_lead.py`, `GRT_MODS.md`, and `FAR_LEAD_PREBRAKE_PROMPT.md` all remain at `2d4473136`.
+
+One separate, optional docstring correction was flagged but NOT applied without asking first:
+the existing warning tells a future attempt to measure against "a route143 CAP-time-fraction
+bound (<=13.6%)." Attempt 5 passed that bound (10.8%) and still failed on `gap_at_release` --
+so as written, the guidance would pass a broken design. If a docstring edit happens, it should
+name `gap_at_release` against the git-blob deployed replay as the binding test, not CAP-time
+fraction.
+
+**NOT IMPLEMENTED. No code touched -- `far_lead.py` unchanged throughout this attempt
+(`2d4473136`), only scratchpad files (`scratchpad/redesign/hook11_v5.py`) were created.**
+
+## 2026-08-31 (later still) — attempt 5 DEPLOYED to the real file despite failing validation. Operator override, for a real-world test drive.
+
+Operator's instruction after reading the attempt 5 failure report above: "design and code it
+anyway. We will deploy and do a practical test drive tomorrow. Keep track of changes so we can
+revert if necessary." This is an explicit, informed decision to ship a variant that:
+
+- Regresses `gap_at_release` against the true git-blob-pinned deployed baseline by 6.61 m
+  (route128), 16.65 m (route139), and 1.79 m (route14f's 10:13 event) -- the metric that got the
+  2026-08-31 severity-only-split attempt reverted earlier the same day, and WORSE here (6.7x
+  route139's regression on that earlier attempt, same route).
+- Misses a real arm: the original formula genuinely arms route14f's t+127.39s event
+  (dRel=83.6 m, 77.5 km/h, 0.3 s duration); the corrected formula + `HOT_A_REQ=0.10` never sets
+  `dRel_at_hot_start` there at all (`a_req_correct` peaks at 0.087, short of 0.10).
+- Was recommended against by advisor on both consultations this session.
+
+**Implemented in `openpilot/grt/far_lead.py`:**
+1. Arming-gate `a_req_filt`: `(v_ego**2 - v_lead_filt**2)/(2d)` -> `v_filt**2/(2d)`.
+2. Active-command severity `a_req`: same formula change, same site attempts 2 and 4 touched.
+3. `HOT_A_REQ`: 0.30 -> 0.10.
+4. `CAP`: -1.2 -> -2.0 (`FLOOR` unchanged, -0.40 -- still well inside the real vehicle-level
+   clamp `ACCEL_MIN=-3.5` in `opendbc/car/interfaces.py`; hook 2's own `HAZARD_ACCEL_MIN=-1.5` in
+   `grt/scc_map.py` is existing fork precedent for a harder-than-old-CAP bound).
+5. SAFETY section text updated to `[CAP, FLOOR] = [-2.0, -0.40]`.
+6. New module docstring section, "ATTEMPT 5, DEPLOYED DESPITE FAILING VALIDATION -- OPERATOR
+   OVERRIDE, 2026-08-31," stating plainly that this is a deliberate field experiment overriding
+   a failed validation, not a fix -- so a future reader (or session) does not mistake "this is
+   what's running" for "this was found correct." Also corrected the older "a_req IS WRONG"
+   section's stale guidance (route143 CAP-time-fraction <=13.6% alone is NOT sufficient --
+   attempt 5 passed it, 10.8%, and still failed `gap_at_release`; any future attempt must clear
+   both).
+7. `GRT_MODS.md` (hook 11 row) and `FAR_LEAD_PREBRAKE_PROMPT.md` (new `## 13. DEVIATION` section,
+   appended, original spec text left untouched) both updated with the same disclosure.
+8. `test_far_lead.py`: two hardcoded `-1.2` CAP-bound assertions changed to reference `fl.CAP`
+   dynamically (would otherwise silently fail-safe-in-the-wrong-direction, i.e. falsely pass a
+   value that violates the NEW, wider CAP by comparing against the old number); two comments
+   citing stale `a_req` magnitudes under the old formula corrected to note the new formula's
+   actual values at those test states (one test's discriminating premise -- that `a_req` alone
+   used to clear `HOT_A_REQ` at the FOURTH BUG regression's test state -- no longer holds under
+   the corrected formula; noted inline, the invariant itself still holds and still passes).
+
+**Verification before commit:** `test_far_lead.py` 29/29, `test_hooks.py` 44/44 (unaffected --
+does not exercise hook 11). `test_schema_conformance.py` requires `pycapnp`, unavailable on the
+Pi5 (per established convention, run on comma4 post-deploy instead).
+
+**REVERT PATH:** single, self-contained commit -- the two formula sites, `HOT_A_REQ`, `CAP`, and
+docstring/doc text only; no other file's runtime behavior changed. `git revert <this commit>`
+restores `2d4473136`'s formula and constants (old `a_req`, `HOT_A_REQ=0.30`, `CAP=-1.2`) -- the
+state all four prior attempts' validation converged on as the one that actually held up.
+
+**DEPLOY STATUS:** comma4 unreachable at commit time (connection timed out -- presumed mid-drive
+or off). Deploy deferred until reachable; operator's stated plan is a real-world test drive the
+day after logging. Full pre/post-reboot verification suite required before considering the
+on-device state trustworthy: `test_far_lead.py` + `test_hooks.py` + `test_schema_conformance.py`
+on-device (comma4 has `pycapnp`), real-import confirmation `HOT_A_REQ`/`CAP` read as 0.10/-2.0
+live (not a stale cached module), `managerState`/`onroadEvents`/`longitudinalPlan` health checks,
+swaglog exception scan. If the test drive reproduces the predicted handoff-margin regression
+(braking resolves with less speed/distance shed to the lead than the prior formula would have on
+a comparable encounter) or any other novel bad behavior, revert immediately using the path above
+rather than attempting a live patch.
