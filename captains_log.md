@@ -4626,3 +4626,76 @@ FLOOR=0.00 is an experiment, not a decision -- see the "FLOOR EXPERIMENT" sectio
 `far_lead.py`'s module docstring for the exact, disclosed, predicted failure mode (0.15s of
 erased braking at the start of every arm, in cruise-headroom conditions) before treating any
 test-drive observation as a surprise.
+
+## 2026-08-31 (later) — FLOOR=0.00 experiment: a SIXTH bug found, worse than the disclosed one.
+## REVERTED to -0.40 same day.
+
+Operator drove with the experiment live and reported something at ~10:13 local time. Pulled and
+analyzed that drive (route 0000014f, started 07:59 UTC) using the correct direct-replay method
+established earlier this week.
+
+**The event, at t+889.5s (~10:13 local), ~119 km/h:** a genuine, serious closing event -- dRel
+collapsed from ~110m to ~73m in under a second, filtered closing rate escalating to -13 to
+-16 m/s (~50-58 km/h). Hook 11 armed correctly. Real measured `aEgo` never got harder than about
+-0.86, and didn't reach even that until t+890.65s -- over a second after the danger went hot.
+
+**Own methodology mistake caught mid-investigation, disclosed rather than smoothed over:** an
+early comparison of the real published `aTarget` against my simulated replay appeared to show
+two contradictory pictures (a smooth stock-only ramp vs. a hook-11 ramp that self-released) --
+traced to using two different time-zero references (`lp[0][0]` in one script, `radar[0][0]` in
+another) between two of my own instrumentation passes, making the same data look like different
+curves. Caught by cross-checking a specific value against both printouts, fixed, re-verified.
+
+**With both instrumentation passes aligned to the same clock, the real sequence is unambiguous**
+(side-by-side, real published `aTarget` vs. my simulated hook's own computed candidate, at their
+true respective timestamps): four CONSECUTIVE EXACT MATCHES (-0.225, -0.300, -0.375, -0.450, real
+and simulated agreeing to the millivolt) confirm hook 11 really did arm and win `min()` for
+~0.2s, tracking its predicted `JERK_ARM` ramp exactly. Then a hard divergence: real published
+value drops to -0.062 while the simulated (stock-blind) hook keeps climbing toward -1.2. From
+there, what actually controlled the car for the next ~0.9s was stock's own, independently-
+arrived-at response, climbing on its own to a peak of -0.684 about a second after the hook had
+already gone inert.
+
+**Root cause, this time in the RELEASE condition, not the arm-frame erasure disclosed before
+shipping:** `if stock_min <= FLOOR: release`. At `FLOOR=-0.40` this meant "stock is genuinely
+braking" -- a real, meaningful bar. At `FLOOR=0.00` the identical check degenerates to "stock
+isn't accelerating" -- true almost constantly in ordinary driving (any coast, any mild lead
+response). The hook self-releases almost immediately after every arm, regardless of whether the
+danger has actually resolved. Confirmed directly: the published value at the frame after the
+real self-release, -0.062, clears the OLD threshold (`<= 0.00`, releases) but would NOT clear a
+`-0.40` threshold (stays armed) -- consistent with, and explaining, exactly what was observed.
+
+**Operator asked the sharp, correct question**: why compare `stock_min` against the fixed
+`FLOOR` constant at all, rather than against hook 11's own currently-computed (and escalating)
+value? Answered and documented in the far_lead.py docstring: a live-value comparison would turn
+release into a chase against a number that is itself still climbing, making the hook stickier
+than intended in exactly the fast-developing approaches where handoff should be easiest to earn,
+and would tie release to hook 11's own noisy internal filter state rather than a stable
+reference. The fixed-threshold design is sound; the bug is specifically that `FLOOR` carries TWO
+meanings (arm-frame severity, and "stock genuinely woke up") and changing it for one purpose
+silently broke the other.
+
+**Operator considered a targeted patch** (`stock_min <= (FLOOR - 0.4)`, reconstructing the
+validated -0.40 release bar while keeping the softer 0.00 arm severity) and asked for validation
+only, no implementation. Validated against the real 10:13 event using the best available
+approximation of live `stock_min` (the published `aTarget` in frames where hook 11 clearly
+wasn't contributing, since the true internal `stock_min` isn't logged anywhere): the proposed
+threshold would have kept the hook armed through the self-release moment instead of handing off
+early. Caveat stated plainly to the operator: this is an approximation from one event, not a
+logged ground truth, and not a full-drive replay.
+
+**Operator then asked to conclude the experiment: revert FLOOR to -0.40.** Done. `far_lead.py`
+module docstring rewritten: the original "FLOOR EXPERIMENT" section now documents the full
+outcome (the disclosed ABANDON-erasure risk was real but was the SMALLER problem; the release-
+threshold collapse was the actual, more serious failure), plus a new section explaining the
+fixed-vs-live-value release design rationale the operator's question surfaced. Restored the
+original `test_far_lead.py` invariant ("candidate a <= -0.20 always (hook 10 C floor)") that the
+experiment had relaxed. All 29 tests pass. Updated `FAR_LEAD_PREBRAKE_PROMPT.md` and
+`GRT_MODS.md` to mark the experiment concluded and reverted, not open.
+
+**The fifth finding (hook 11 arming on top of an approach stock already had under control)
+remains OPEN.** The `stock_min` arm-time gate, decoupled from `FLOOR`'s value entirely (not an
+offset relationship, an independent threshold), is still the intended next fix -- not yet
+designed in detail, not yet validated, not yet implemented. Two real, disjoint bugs have now
+been found by touching `FLOOR` for unrelated reasons; the next attempt at the fifth finding
+should not reuse `FLOOR` for anything it wasn't already reserved for.

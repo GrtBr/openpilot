@@ -142,15 +142,19 @@ Two modes fall out of the same formula:
 
 Floor **−0.40**, not −0.15. After this works, speed drops while set speed stays 110, hook 10 C (`ABANDON = -0.20`, `MIN_HEADROOM = 5 km/h`) would raise a milder coast to 0. Hazard already lives in `[-1.5, -0.3]` for that reason. Do not special-case hook 10; clear `ABANDON` instead.
 
-**EXPERIMENTAL AMENDMENT, 2026-08-31 (one test drive, not a spec revision):** `FLOOR` temporarily
-set to `0.00` in `far_lead.py`, at the operator's explicit request, to observe the effect of a
-softer floor on a real drive before committing to a fix for a fifth finding (hook 11 arming on
-top of an approach stock was already handling correctly — see the `far_lead.py` module
-docstring, "FLOOR EXPERIMENT", for the full reasoning and the measured hook-10-C interaction
-this reopens: 3 frames / 0.15 s of every arm now land above `ABANDON` and will be erased by hook
-10 C in cruise-headroom conditions). This section's `−0.40` value above is the validated design,
-not superseded — revert `FLOOR` to `-0.40` (or implement the `stock_min` arm-time gate discussed
-in the far_lead.py docstring instead) once the operator reports back from the test drive.
+**EXPERIMENTAL AMENDMENT, 2026-08-31, CONCLUDED AND REVERTED SAME DAY.** `FLOOR` was temporarily
+set to `0.00` in `far_lead.py`, at the operator's request, to test a softer floor as a possible
+fix for a fifth finding (hook 11 arming on top of an approach stock was already handling
+correctly). The disclosed risk (hook 10 C's `ABANDON` erasing the first 3 frames / 0.15 s of
+every arm) was real but turned out to be the smaller problem: on the test drive, `FLOOR=0.00`
+also collapsed the release condition's meaning — `stock_min <= FLOOR` went from "stock is
+genuinely braking" (at -0.40) to "stock isn't accelerating" (at 0.00), a trivially-true
+condition in ordinary driving. Confirmed on a real ~119 km/h approach: the hook armed correctly,
+tracked its own predicted ramp for 4 frames, then self-released and stayed inert for another
+full second while a genuinely serious closing event continued to develop. `FLOOR` reverted to
+`-0.40` the same day. See `far_lead.py`'s "FLOOR EXPERIMENT" docstring section for the full
+frame-by-frame evidence. The fifth finding remains open; the `stock_min` arm-time gate discussed
+there (decoupled from `FLOOR`'s value entirely) is still the intended next fix.
 
 Release the latch when any of: personality not relaxed; not `longActive`; lead lost > 1 s; **range-rate no longer closing FASTER than `-HOT_CLOSING_RATE` (-2.78 m/s / ~10 km/h) — amended 2026-08-28, NOT "fully non-negative"** (see below); the stock MPC/e2e candidate has itself reached `<= -0.40` (i.e. stock has caught up to this hook's own floor — return the hook's tuple on this same frame too, `min()` picks whichever is harder, then drop the latch); `dRel < 20` as an absolute backstop regardless of what stock is doing; driver gas or brake.
 

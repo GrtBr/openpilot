@@ -169,48 +169,71 @@ one frame after arming.
 
 SAFETY
 ------
-Returns `[]` (inert) unless armed. Once armed, the candidate is clamped to `[CAP, FLOOR]` and
-only ever competes inside the planner's `min()`, so it can never make braking weaker than stock.
-Every gate (personality, `longActive`, driver input) is re-checked every frame and any exception
-drops straight to `[]`, so a wedged state cannot outlive one bad frame's inputs.
+Returns `[]` (inert) unless armed. Once armed, the candidate is clamped to `[CAP, FLOOR]` =
+`[-1.2, -0.40]` and only ever competes inside the planner's `min()`, so it can never make
+braking weaker than stock. `FLOOR` is -0.40, not something softer, because hook 10 layer C
+(`ABANDON = -0.20` in `grt/throttle_hold.py`) would otherwise eat a milder request. Every gate
+(personality, `longActive`, driver input) is re-checked every frame and any exception drops
+straight to `[]`, so a wedged state cannot outlive one bad frame's inputs.
 
-FLOOR EXPERIMENT, 2026-08-31: -0.40 -> 0.00, FOR ONE OPERATOR-DRIVEN TEST DRIVE
---------------------------------------------------------------------------------
+FLOOR EXPERIMENT, 2026-08-31: TRIED 0.00, REVERTED TO -0.40 -- A SIXTH BUG, FOUND ON A REAL DRIVE
+---------------------------------------------------------------------------------------------------
 Motivated by a fifth finding, distinct from the four bugs above: a real 4-pulse cluster
 (2026-08-28 drive, ~18 s, vEgo 54->39 km/h) where hook 11 armed on top of a lead-following
 approach STOCK WAS ALREADY HANDLING -- stock's own candidate was at -0.31 to -0.70 in the frames
 immediately before each arm, nowhere near the ~0.04 coasting baseline seen in the genuinely-
-needed events (e.g. the 2026-08-30 dRel 120->65 m collapse, stock at 0.04 throughout). Hook 11
-exists to cover stock being ASLEEP at long range with an understated `vRel` -- here stock wasn't
-asleep, and the operator's own description ("coasting would have done fine") matches: the
-correct answer in that cluster is closer to what stock's own e2e naturally does than what
-hook 11's floor forces.
+needed events. Hook 11 exists to cover stock being ASLEEP at long range with an understated
+`vRel` -- here stock wasn't asleep. The precise, targeted fix this points to is an ARM-TIME gate
+on `stock_min` (already passed into `step()`, currently used only for release) -- don't arm at
+all if stock is already braking meaningfully. STILL NOT IMPLEMENTED (see below for why the
+priority order changed). At the operator's request, `FLOOR` alone was lowered to 0.00 first, for
+one real test drive, to observe the effect directly before committing to a gate design.
 
-The precise, targeted fix this points to is an ARM-TIME gate on `stock_min` (already passed
-into `step()`, currently used only for release) -- don't arm at all if stock is already braking
-meaningfully. NOT YET IMPLEMENTED. Instead, at the operator's explicit request, `FLOOR` alone
-was lowered to 0.00 for one real test drive, to observe the effect directly before committing to
-a specific gate design.
+The disclosed, PREDICTED consequence (hook 10 layer C's `ABANDON = -0.20` erasing the first 3
+frames / 0.15 s of every arm in cruise-headroom conditions) was real but turned out to be the
+SMALLER problem. The actual failure, found on the test drive (2026-08-31, ~10:13, a genuine
+~119 km/h approach with dRel collapsing toward 70 m and closing rate reaching -13 to -16 m/s):
+hook 11 armed correctly and tracked its own predicted ramp exactly for 4 frames (confirmed via
+side-by-side replay against the real published `aTarget`: -0.225, -0.300, -0.375, -0.450, both
+sequences matching to the millivolt), then SELF-RELEASED and stayed inert while the real,
+serious approach continued to develop for another full second, handled from then on by stock's
+own (slower, independently-arrived-at) response.
 
-CONSEQUENCE, DISCLOSED BEFORE THIS SHIPPED: `FLOOR` is not just the lower clamp bound -- it is
-also the LITERAL VALUE emitted on the arm frame, and the floor of every frame while armed. Every
-prior revision of this file kept FLOOR at -0.40 specifically because hook 10 layer C's
-`ABANDON = -0.20` (`grt/throttle_hold.py`) erases any FINAL (post-`min()`) command milder than
--0.20 whenever there is unused cruise-speed headroom (>=5 km/h). With FLOOR=0.00, the ramp from
-the arm frame through -0.20 at `JERK_ARM` (1.5 m/s^3) spends exactly 3 frames (0.15 s, measured
-by replay against the 2026-08-27 incident log) inside that erasure band. In headroom conditions,
-those 3 frames of intended braking will be silently zeroed by hook 10 C before the operator
-(or the car) ever sees them -- INCLUDING on a genuine, serious approach, not just the marginal
-cluster this experiment targets. Below headroom (car at or above set speed), `ABANDON` does not
-trigger and the ramp is unaffected. Measured effect on arm/release TIMING: none -- FLOOR does
-not influence when the hook arms or releases, only how hard it commands once armed, confirmed by
-replay against both prior incident logs (identical event count/timing/duration to FLOOR=-0.40).
+Root cause: the release condition below, `stock_min <= FLOOR`, is a fixed-threshold check by
+design (see "WHY A FIXED THRESHOLD, NOT HOOK 11's OWN LIVE VALUE" below) -- and that threshold
+is `FLOOR` itself. At `FLOOR = -0.40`, "stock caught up" meant stock was genuinely braking
+meaningfully before handoff was considered safe. At `FLOOR = 0.00`, the exact same check became
+`stock_min <= 0.00` -- true almost constantly in ordinary driving (any coast, any mild lead
+response, anything not actively accelerating) -- so the hook released almost immediately after
+every arm, regardless of whether the danger had actually resolved. Confirmed directly: the
+published value the frame after the real self-release was -0.062, which clears the OLD
+threshold (`<= 0.00`, releases) but would NOT clear a `-0.40` threshold (stays armed) --
+consistent with the fix described below.
 
-This is a deliberate, disclosed, single-drive experiment, not a validated fix. If the test drive
-looks worse in the genuinely-serious case (slow onset on a real fast-closing approach) rather
-than better in the marginal case, that is this exact, predicted, 0.15 s erasure window -- expect
-it, don't rediscover it. Revert to -0.40 (or implement the `stock_min` arm-gate instead) once the
-operator reports back.
+Lowering `FLOOR` softened the arm-frame severity as intended, but silently broke a SECOND,
+unrelated meaning the same constant carried: the bar for "stock has genuinely woken up and it's
+safe to hand back." That coupling is not a coincidence to patch around quietly -- it is why this
+file no longer overloads `FLOOR` for both purposes going forward (see the arm-time `stock_min`
+gate still pending above, which was always the more targeted fix for the original fifth
+finding, once the sixth finding made clear that touching `FLOOR` reopens more than the one
+interaction that was disclosed up front).
+
+REVERTED. `FLOOR` restored to -0.40. The fifth finding (arming on top of a stock-handled
+approach) remains open and still points to the `stock_min` arm-time gate, decoupled from
+`FLOOR`'s value, as the next real fix to design and validate.
+
+WHY A FIXED THRESHOLD, NOT HOOK 11's OWN LIVE VALUE
+----------------------------------------------------
+The release check compares `stock_min` against the constant `FLOOR`, not against whatever hook
+11 itself is currently computing (`self.last_emitted` / `target`, which climbs toward `CAP` as
+the approach develops). Comparing against the live value was considered and rejected: it turns
+release into a chase where stock must out-escalate a number that is itself still climbing,
+making the hook stickier than intended in exactly the fast-developing approaches where handoff
+should be easiest to earn. It also ties the release decision to hook 11's own filtered internal
+state (`v_filt`, `eff_dRel`), which is noisier than a fixed reference. `FLOOR` as a fixed
+threshold means "has stock met the MINIMUM guarantee hook 11 promised on arming" -- a stable
+trust bar, not a moving target -- which is the right design as long as `FLOOR` itself still
+means "stock is genuinely braking," per the bug above.
 """
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalPlanSource
@@ -233,9 +256,10 @@ HOT_PERSIST_S = 0.5          # ...continuously for this long before arming (kill
 STOP_MARGIN = 6.0            # m -- same STOP_DISTANCE long_mpc.py uses
 
 # ---- command while latched (spec section 6) ----
-FLOOR = 0.00                 # m/s^2 -- EXPERIMENTAL, 2026-08-31, was -0.40 -- see module
-                             # docstring "FLOOR EXPERIMENT" for the hook-10-C interaction this
-                             # reopens before treating this value as settled
+FLOOR = -0.40                # m/s^2 -- softest command once armed; see hook 10 C (ABANDON).
+                             # Reverted here 2026-08-31 after a 0.00 experiment caused a real
+                             # self-release failure on a live drive -- see module docstring
+                             # "FLOOR EXPERIMENT" for the full story before changing this again
 CAP = -1.2                   # m/s^2 -- hardest command this hook may ever issue (A_CRUISE_MIN)
 JERK_ARM = 1.5               # m/s^3 -- rate limit on the FALLING edge only, first armed frames
 
