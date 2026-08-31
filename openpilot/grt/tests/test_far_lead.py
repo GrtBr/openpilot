@@ -116,11 +116,11 @@ def main():
     out = h.step(False, 0.0, 0.0, 30.6, True, True, False, 1.0)
   check("relaxed, flicker then gone -> [] and not armed", out == [] and not h.armed)
 
-  # relaxed, 120 m, closing hard, after persistence -> one candidate, a <= -0.40
+  # relaxed, 120 m, closing hard, after persistence -> one candidate, a <= FLOOR
   h = new_hook()
   out, dRel_end = arm(h, 120.0, 30.6, -8.0)
   check("relaxed, 120 m, hard closing -> arms with one candidate", len(out) == 1)
-  check("candidate a <= -0.40 (floor)", len(out) == 1 and out[0][0] <= -0.40)
+  check("candidate a <= FLOOR", len(out) == 1 and out[0][0] <= fl.FLOOR)
   check("candidate a >= -1.2 (cap)", len(out) == 1 and out[0][0] >= -1.2)
   check("candidate source is lead0", len(out) == 1 and out[0][1] == fl.LongitudinalPlanSource.lead0)
   check("arms while dRel still > 80 m", dRel_end > 80.0)
@@ -225,10 +225,18 @@ def main():
     ok = False
   check("step() does not raise on NaN dRel input", ok)
 
-  # candidate a > -0.20 must never happen -- hook 10 C's ABANDON would eat it
+  # FLOOR EXPERIMENT (2026-08-31, see module docstring): with FLOOR=0.00, the arm frame and the
+  # next couple of ramp frames land ABOVE -0.20 -- hook 10 C's ABANDON will erase these in
+  # headroom conditions. This is a disclosed, accepted tradeoff for this experiment, not an
+  # invariant to enforce -- documented here as a measured fact instead, so a future reader who
+  # restores FLOOR=-0.40 knows to also restore the old assertion this replaced
+  # ("candidate a <= -0.20 always").
   h = new_hook()
   out, _ = arm(h, 120.0, 30.6, -8.0)
-  check("candidate a <= -0.20 always (hook 10 C floor)", all(c[0] <= -0.20 for c in out))
+  check("FLOOR EXPERIMENT: arm-frame candidate equals FLOOR", len(out) == 1 and out[0][0] == fl.FLOOR)
+  if fl.FLOOR > -0.20:
+    print(f"  NOTE       FLOOR={fl.FLOOR} is above hook 10 C's ABANDON (-0.20) -- the arm frame "
+          f"WILL be erased by that hook in headroom conditions (see module docstring)")
 
   # FOURTH BUG regression: a_req alone can clear HOT_A_REQ on a tiny closing rate at close-ish
   # range -- must NOT arm without also clearing HOT_CLOSING_RATE. At 90 m, v_ego=30.6,

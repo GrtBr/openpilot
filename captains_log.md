@@ -4505,3 +4505,88 @@ anywhere in this drive (the exact defect class that prompted the fix). No missed
 approaches either (checked: zero highway-speed encounters with dRel < 40m anywhere in the drive,
 so this log doesn't contain an incident-class event to separately confirm against, but nothing
 suggests a miss). Not coded -- diagnosis and verification only, per this session's standing rule.
+
+## 2026-08-31 — hook 11: a FIFTH finding (arming on top of an approach stock already had), and
+## an EXPERIMENTAL, operator-requested FLOOR change (-0.40 -> 0.00) for one test drive. DEPLOYED.
+
+Operator reported a felt sensation on a real drive: deceleration "momentarily too hard, then
+eased off." Investigated with real telemetry (device unreachable for `aEgo`, so commanded
+`aTarget` only, disclosed as a limitation throughout).
+
+**Two CAP-hitting events found and instrumented (2026-08-30 drive, 0000014b).** Both showed the
+same shape: `JERK_ARM`-limited ramp from FLOOR to CAP (~0.55s, exactly -0.075 m/s^2/frame,
+matching 1.5 m/s^3), a SUSTAINED hold at -1.2 (3.66s for one event, 0.6s for the other), then an
+UNCAPPED, abrupt release (-1.2 -> -0.25 in ~100ms, ~9.5 m/s^3 -- over 6x the entry ramp rate).
+Verified via direct instrumentation that hook 11 itself (not stock) owned the 3.66s hold, and
+that `dRel` genuinely collapsed 120m->65.7m in 4.5s (~44 km/h average closing) during it -- a
+real, serious approach, correctly handled, where the raw a_req formula wanted -1.95, even harder
+than the -1.2 cap delivered. The "momentarily too hard" part of that event was correct, arguably
+under-applied. The uncapped release IS a real, disclosed comfort gap (safety-motivated by
+original design, comfort never evaluated) -- not fixed this session, noted for later.
+
+**Operator then described a different, recurring pattern**: approaching a slower vehicle at a
+relatively slow closing rate, just barely arming hook 11; -0.40 kicks in where coasting would
+have sufficed since the target is still far and the gap is closing slowly; this changes the
+approach, the arm/disarm/re-arm cycle repeats. Operator's own diagnosis: "the arm, disarm,
+re-arm is not the problem, the rate of [deceleration] is."
+
+**Investigated against real data before agreeing or implementing anything:**
+1. Checked whether releases happen because the lead exits sensor range (the operator's specific
+   mechanism): NO -- across 22 real arm/release events (5 today + 17 from the 2026-08-28 drive,
+   found via the correct direct-replay method), only 1 released with `present=False`. Ruled out.
+2. Checked for reacceleration after release (brake-hard-then-floor-it-again): NO -- vEgo
+   continued DECREASING for 3s after release in 20 of 22 cases; only 2 showed mild
+   reacceleration, neither a sharp "sprint back toward the lead."
+3. Found the real cluster matching the operator's FELT description instead: an 18s window
+   (2026-08-28 drive, t+517-536s) with 4 separate arm/release cycles while vEgo smoothly and
+   continuously decreased 54->39 km/h (a genuine, gentle ~0.24 m/s^2 average slowdown -- exactly
+   what coasting should handle). Checked whether FLOOR was forcing extra braking here: NO --
+   ~148 of ~150 armed frames in the cluster had the raw a_req formula ALREADY at -0.40 or
+   harder; the physics agreed with what got commanded almost throughout, because dRel was
+   genuinely down in the 65-112m band with real (if noisy) closing.
+4. **The actual finding, confirmed via advisor-directed check**: at all 4 arm frames in that
+   cluster, STOCK's own candidate was ALREADY at -0.31 to -0.70 in the frames immediately
+   before hook 11 armed -- nowhere near the ~0.04 coasting baseline seen in the genuinely-needed
+   cases (e.g. the 120->65m collapse above). Hook 11 exists to cover stock being ASLEEP with an
+   understated `vRel` at long range; here stock wasn't asleep, it was already correctly
+   decelerating. Hook 11 armed on top of an approach stock already had handled, adding its own
+   floor-braking (and, via the uncapped release, its own abrupt on/off snap) to a situation that
+   didn't need the extra intervention. Operator's intuition ("coasting would have done fine") is
+   validated -- stock's own response WAS close to coast-appropriate; hook 11 piled onto it.
+
+**This points to a precise, targeted fix, NOT YET IMPLEMENTED**: gate ARMING on `stock_min`
+(already passed into `step()`, currently used only for release) -- don't arm if stock is already
+braking meaningfully. This is a one-line-scale addition, not an architecture change (a
+continuous-tracking redesign was considered and explicitly rejected by advisor as
+disproportionate to one cluster where, per point 3, the individual releases were each locally
+justified -- the real defect is arming at all when stock already has it, not how the hook
+behaves once armed).
+
+**Operator instead asked for a specific, different, immediate experiment**: lower `FLOOR` from
+-0.40 to 0.00 for one real test drive, to observe the effect directly, before committing to the
+`stock_min` arm-gate design. Flagged the known consequence BEFORE implementing: `FLOOR` is also
+the literal value emitted on the arm frame and the floor of the whole armed range, and hook 10
+layer C's `ABANDON` (`throttle_hold.py`, -0.20) erases any final command milder than -0.20 in
+cruise-headroom conditions -- exactly the interaction the original -0.40 choice was designed to
+avoid. Measured precisely by replay before implementing: the ramp from 0.00 through -0.20 at
+`JERK_ARM` spends exactly 3 frames (0.15s) inside that erasure band, on EVERY arm, including
+genuinely serious ones. Confirmed via replay that FLOOR does not affect arm/release TIMING at
+all (identical event count/duration to FLOOR=-0.40 on both incident logs) -- only the SEVERITY
+of the command changes.
+
+**Implemented**: `far_lead.py`'s `FLOOR` constant changed 0.00, module docstring rewritten with
+a "FLOOR EXPERIMENT" section carrying the full reasoning, the measured 3-frame/0.15s erasure
+window, and an explicit instruction to revert or replace once the operator reports back. Updated
+`test_far_lead.py`: two tests hardcoded `-0.40`/`-0.20` as invariants that are no longer
+guaranteed by design -- replaced the floor check with `fl.FLOOR` (structural, not a hardcoded
+number) and replaced the hook-10-C invariant check with a measurement + an explicit NOTE printed
+at test time when FLOOR is above ABANDON, so a future reader restoring FLOOR=-0.40 knows to
+restore the old assertion too. All 29 tests pass. Updated `FAR_LEAD_PREBRAKE_PROMPT.md` §6 and
+`GRT_MODS.md`'s hook-11 row with the same experimental-amendment framing -- the spec's own
+-0.40 design is NOT superseded, only temporarily overridden for this test.
+
+**This is a disclosed, single-drive experiment, not a validated fix.** If the test drive shows
+slow onset on a genuinely serious approach, that is the predicted, measured 0.15s erasure
+window, not a new bug. Operator is test-driving and will report back; next step depends on that
+report -- likely either revert `FLOOR` to -0.40 and implement the `stock_min` arm-gate instead,
+or some combination, decided after real-world feedback rather than more replay analysis alone.

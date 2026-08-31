@@ -142,6 +142,16 @@ Two modes fall out of the same formula:
 
 Floor **−0.40**, not −0.15. After this works, speed drops while set speed stays 110, hook 10 C (`ABANDON = -0.20`, `MIN_HEADROOM = 5 km/h`) would raise a milder coast to 0. Hazard already lives in `[-1.5, -0.3]` for that reason. Do not special-case hook 10; clear `ABANDON` instead.
 
+**EXPERIMENTAL AMENDMENT, 2026-08-31 (one test drive, not a spec revision):** `FLOOR` temporarily
+set to `0.00` in `far_lead.py`, at the operator's explicit request, to observe the effect of a
+softer floor on a real drive before committing to a fix for a fifth finding (hook 11 arming on
+top of an approach stock was already handling correctly — see the `far_lead.py` module
+docstring, "FLOOR EXPERIMENT", for the full reasoning and the measured hook-10-C interaction
+this reopens: 3 frames / 0.15 s of every arm now land above `ABANDON` and will be erased by hook
+10 C in cruise-headroom conditions). This section's `−0.40` value above is the validated design,
+not superseded — revert `FLOOR` to `-0.40` (or implement the `stock_min` arm-time gate discussed
+in the far_lead.py docstring instead) once the operator reports back from the test drive.
+
 Release the latch when any of: personality not relaxed; not `longActive`; lead lost > 1 s; **range-rate no longer closing FASTER than `-HOT_CLOSING_RATE` (-2.78 m/s / ~10 km/h) — amended 2026-08-28, NOT "fully non-negative"** (see below); the stock MPC/e2e candidate has itself reached `<= -0.40` (i.e. stock has caught up to this hook's own floor — return the hook's tuple on this same frame too, `min()` picks whichever is harder, then drop the latch); `dRel < 20` as an absolute backstop regardless of what stock is doing; driver gas or brake.
 
 **Why release uses `-HOT_CLOSING_RATE`, not `>= 0` (amended 2026-08-28):** the original design released only once the pessimistic closing rate reached fully non-negative. On real highway data, the range-rate filter's slow dynamics (needed for noise rejection) mean it can take many seconds to decay back through zero after even a brief closing transient — so the hook held its floor for far longer than the transient that triggered arming actually lasted. Measured on a real 54-min highway drive: 60.5 s of highway-speed floor-holding, some runs 9-11 s long while `dRel` was flat or oscillating the whole time. Using the SAME `HOT_CLOSING_RATE` threshold for release as for arming (§4 item 6) cut that to 19.3 s, without materially weakening the two prior validated incidents (~0.3-0.6 s less armed time each, same floor severity). See `far_lead.py` module docstring, "FOURTH BUG", for the full measurement.

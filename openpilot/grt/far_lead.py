@@ -169,12 +169,48 @@ one frame after arming.
 
 SAFETY
 ------
-Returns `[]` (inert) unless armed. Once armed, the candidate is clamped to `[CAP, FLOOR]` =
-`[-1.2, -0.40]` and only ever competes inside the planner's `min()`, so it can never make
-braking weaker than stock. `FLOOR` is -0.40, not something softer, because hook 10 layer C
-(`ABANDON = -0.20` in `grt/throttle_hold.py`) would otherwise eat a milder request. Every gate
-(personality, `longActive`, driver input) is re-checked every frame and any exception drops
-straight to `[]`, so a wedged state cannot outlive one bad frame's inputs.
+Returns `[]` (inert) unless armed. Once armed, the candidate is clamped to `[CAP, FLOOR]` and
+only ever competes inside the planner's `min()`, so it can never make braking weaker than stock.
+Every gate (personality, `longActive`, driver input) is re-checked every frame and any exception
+drops straight to `[]`, so a wedged state cannot outlive one bad frame's inputs.
+
+FLOOR EXPERIMENT, 2026-08-31: -0.40 -> 0.00, FOR ONE OPERATOR-DRIVEN TEST DRIVE
+--------------------------------------------------------------------------------
+Motivated by a fifth finding, distinct from the four bugs above: a real 4-pulse cluster
+(2026-08-28 drive, ~18 s, vEgo 54->39 km/h) where hook 11 armed on top of a lead-following
+approach STOCK WAS ALREADY HANDLING -- stock's own candidate was at -0.31 to -0.70 in the frames
+immediately before each arm, nowhere near the ~0.04 coasting baseline seen in the genuinely-
+needed events (e.g. the 2026-08-30 dRel 120->65 m collapse, stock at 0.04 throughout). Hook 11
+exists to cover stock being ASLEEP at long range with an understated `vRel` -- here stock wasn't
+asleep, and the operator's own description ("coasting would have done fine") matches: the
+correct answer in that cluster is closer to what stock's own e2e naturally does than what
+hook 11's floor forces.
+
+The precise, targeted fix this points to is an ARM-TIME gate on `stock_min` (already passed
+into `step()`, currently used only for release) -- don't arm at all if stock is already braking
+meaningfully. NOT YET IMPLEMENTED. Instead, at the operator's explicit request, `FLOOR` alone
+was lowered to 0.00 for one real test drive, to observe the effect directly before committing to
+a specific gate design.
+
+CONSEQUENCE, DISCLOSED BEFORE THIS SHIPPED: `FLOOR` is not just the lower clamp bound -- it is
+also the LITERAL VALUE emitted on the arm frame, and the floor of every frame while armed. Every
+prior revision of this file kept FLOOR at -0.40 specifically because hook 10 layer C's
+`ABANDON = -0.20` (`grt/throttle_hold.py`) erases any FINAL (post-`min()`) command milder than
+-0.20 whenever there is unused cruise-speed headroom (>=5 km/h). With FLOOR=0.00, the ramp from
+the arm frame through -0.20 at `JERK_ARM` (1.5 m/s^3) spends exactly 3 frames (0.15 s, measured
+by replay against the 2026-08-27 incident log) inside that erasure band. In headroom conditions,
+those 3 frames of intended braking will be silently zeroed by hook 10 C before the operator
+(or the car) ever sees them -- INCLUDING on a genuine, serious approach, not just the marginal
+cluster this experiment targets. Below headroom (car at or above set speed), `ABANDON` does not
+trigger and the ramp is unaffected. Measured effect on arm/release TIMING: none -- FLOOR does
+not influence when the hook arms or releases, only how hard it commands once armed, confirmed by
+replay against both prior incident logs (identical event count/timing/duration to FLOOR=-0.40).
+
+This is a deliberate, disclosed, single-drive experiment, not a validated fix. If the test drive
+looks worse in the genuinely-serious case (slow onset on a real fast-closing approach) rather
+than better in the marginal case, that is this exact, predicted, 0.15 s erasure window -- expect
+it, don't rediscover it. Revert to -0.40 (or implement the `stock_min` arm-gate instead) once the
+operator reports back.
 """
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalPlanSource
@@ -197,7 +233,9 @@ HOT_PERSIST_S = 0.5          # ...continuously for this long before arming (kill
 STOP_MARGIN = 6.0            # m -- same STOP_DISTANCE long_mpc.py uses
 
 # ---- command while latched (spec section 6) ----
-FLOOR = -0.40                # m/s^2 -- softest command once armed; see hook 10 C (ABANDON)
+FLOOR = 0.00                 # m/s^2 -- EXPERIMENTAL, 2026-08-31, was -0.40 -- see module
+                             # docstring "FLOOR EXPERIMENT" for the hook-10-C interaction this
+                             # reopens before treating this value as settled
 CAP = -1.2                   # m/s^2 -- hardest command this hook may ever issue (A_CRUISE_MIN)
 JERK_ARM = 1.5               # m/s^3 -- rate limit on the FALLING edge only, first armed frames
 
