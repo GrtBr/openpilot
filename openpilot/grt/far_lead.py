@@ -234,6 +234,25 @@ state (`v_filt`, `eff_dRel`), which is noisier than a fixed reference. `FLOOR` a
 threshold means "has stock met the MINIMUM guarantee hook 11 promised on arming" -- a stable
 trust bar, not a moving target -- which is the right design as long as `FLOOR` itself still
 means "stock is genuinely braking," per the bug above.
+
+`a_req` IS WRONG FOR A MOVING LEAD -- DO NOT "FIX" IT WITHOUT READING captains_log.md 2026-08-31
+--------------------------------------------------------------------------------------------------
+`a_req = (v_ego**2 - v_lead**2) / (2*d)` below is only exact when the lead is stationary; the
+physically correct relative-motion form for a moving lead is `v_filt**2 / (2*d)`. This is a real,
+confirmed bug, not a matter of opinion. THREE independent, differently-shaped attempts to fix it
+were tried and reverted the same day (2026-08-31, `captains_log.md` has the full numbers for all
+three): (1) correcting the formula everywhere, including the arming gate -- fails because no
+`HOT_A_REQ` recovers the deployed arming envelope; (2) correcting only the post-arm severity
+formula, leaving arming untouched -- fails because it closes 2.5-10.8 m tighter (less speed bled
+by handoff) on the two founding incidents than the deployed formula; (3) correct kinematics plus
+an explicit, separately-tuned speed-scaled margin term -- fails because any margin strong enough
+to recover incident (1)'s lost handoff distance produces MORE gratuitous full-CAP braking on
+ordinary highway following (65% of armed time) than the "wrong" formula it would replace (29%).
+The old formula's speed-scaling is bad physics that is, on all evidence gathered so far,
+load-bearing. Do not swap it back to "correct" kinematics without a term that reads how the
+danger is DEVELOPING (closing-rate trend), not just absolute speed -- and measure any attempt
+against a route143 CAP-time-fraction bound (<=13.6%, attempt 2's figure) from the start, not
+after the fact.
 """
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalPlanSource
