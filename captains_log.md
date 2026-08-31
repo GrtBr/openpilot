@@ -4590,3 +4590,39 @@ slow onset on a genuinely serious approach, that is the predicted, measured 0.15
 window, not a new bug. Operator is test-driving and will report back; next step depends on that
 report -- likely either revert `FLOOR` to -0.40 and implement the `stock_min` arm-gate instead,
 or some combination, decided after real-world feedback rather than more replay analysis alone.
+
+## 2026-08-31 (later) — FLOOR=0.00 experiment DEPLOYED to comma4
+
+Committed as `5f4bb85f7`. Device was on `d0036eb` (the HOT_CLOSING_RATE fix), briefly
+unreachable earlier in the session (likely mid-drive), reachable (=parked) once operator
+confirmed. 3 commits behind. Bundle `d0036eb..5f4bb85` (238 insertions across 5 files) -> scp ->
+`git fetch <bundle> && git merge --ff-only` -> reboot. Fast-forward clean, no scons, no cereal
+SCP, bundle deleted off-device after merge.
+
+**Verified ON DEVICE, before the reboot:**
+- `test_far_lead.py` 29/29 (including the two updated FLOOR-experiment tests), `test_hooks.py`
+  44/44, `test_schema_conformance.py` 34/34.
+- Real imports: confirmed `far_lead.FLOOR == 0.0` actually live in the imported module (not just
+  in the source on disk) -- this is the critical check for an experiment that changes a single
+  numeric constant. `HOT_CLOSING_RATE` and `CAP` also spot-checked, unchanged as expected.
+  Singleton constructs; inert call returns `[]`.
+
+Device came back after reboot; commit `5f4bb85` confirmed running, `managerState` publishing
+within ~2s.
+
+**Verified AFTER the reboot:**
+- `managerState`: nothing shouldBeRunning-but-not-running.
+- `onroadEvents`: only `wrongGear`/`seatbeltNotLatched` -- no `commIssue`, engagement not
+  blocked.
+- `longitudinalPlan` publishing cleanly while parked (`aTarget≈-0.005`, `source=e2e`).
+- Zero `far_lead`/"hook 11" mentions in the 30 most recent swaglog files since boot. Two
+  tracebacks present, both `uploader.py` SSL failures ("certificate is not yet valid") from the
+  device's clock not yet having synced post-boot -- the same pre-GPS clock drift artifact
+  documented in prior deploys, unrelated to this change (checked the full traceback in both
+  before dismissing them, not just the filenames).
+
+**Awaiting operator's real-world test drive report.** Reminder for whoever reads this next:
+FLOOR=0.00 is an experiment, not a decision -- see the "FLOOR EXPERIMENT" section of
+`far_lead.py`'s module docstring for the exact, disclosed, predicted failure mode (0.15s of
+erased braking at the start of every arm, in cruise-headroom conditions) before treating any
+test-drive observation as a surprise.
