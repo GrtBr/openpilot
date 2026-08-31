@@ -234,6 +234,54 @@ state (`v_filt`, `eff_dRel`), which is noisier than a fixed reference. `FLOOR` a
 threshold means "has stock met the MINIMUM guarantee hook 11 promised on arming" -- a stable
 trust bar, not a moving target -- which is the right design as long as `FLOOR` itself still
 means "stock is genuinely braking," per the bug above.
+
+A SEVENTH BUG: `a_req` USED (v_ego**2 - v_lead**2), WHICH IS ONLY EXACT FOR A STATIONARY LEAD
+---------------------------------------------------------------------------------------------
+Found by the operator working a math reconciliation between `v_filt` and `a_req_filt`, not on a
+live drive. `a_req = (v_ego**2 - v_lead**2) / (2*d)` solves "what constant deceleration closes
+distance `d` while bringing MY speed to zero" -- correct when the lead is parked, wrong the
+moment it is moving, where the physically correct question is "what constant deceleration closes
+`d` while bringing the CLOSING RATE to zero," i.e. `a_req = v_filt**2 / (2*d)`. The deployed
+formula overshoots the correct value by `(v_ego+v_lead)/|v_filt|` -- ~11x in the operator's own
+worked example (120 km/h ego, 100 km/h lead, 100 m gap, 6 m margin: 1.81 vs the correct 0.16
+m/s^2) -- because it scales with absolute speed, not just relative closing rate.
+
+Operator asked to fix it outright. Built the corrected formula and swept `HOT_A_REQ` against all
+four real routes with known incident/false-arm history (route128 2026-08-25, route139 2026-08-27,
+route143 2026-08-28 highway, plus today's route14f 10:13 event): NO SINGLE `HOT_A_REQ` VALUE
+RECOVERS THE DEPLOYED ENVELOPE if the corrected formula is used for the ARMING GATE too. At the
+unchanged 0.30, route139 and today's 10:13 event never arm at all; route128 arms 6+ s later and
+40 m closer. Lowering `HOT_A_REQ` to recover that coverage reopens route143's highway false-arms
+(1 event at 0.30 growing to 10, saturating, by 0.03). Root cause: the old and new formulas are
+different functions of closing rate (old ~linear and speed-scaled, new quadratic and
+speed-independent), not the same function at a different scale, so no monotone threshold
+separates genuine approaches from highway noise the way the old formula's speed-scaling
+accidentally did. NOT IMPLEMENTED for the arming gate -- logged in `captains_log.md` instead.
+`a_req_filt` in the arming check below is UNCHANGED and deliberately still uses the old,
+technically-wrong formula, because `HOT_A_REQ=0.30` is calibrated against it and it is what every
+prior incident validation in this file was measured against.
+
+The SEVERITY formula (below, in the "already armed" branch) is a different story: it only
+affects HOW HARD to brake once arming has already been decided by the untouched gate above, so
+swapping it does not touch arming timing at all. Verified by replaying the corrected severity
+formula against the same four routes with arming left on the old formula: `armed_frames` per
+route were bit-for-bit identical to deployed (334/114/75/888) in every case -- confirming the gate
+truly was untouched -- while CAP-hit frequency dropped sharply (route14f 65.9%->2.4%, route128
+90.4%->19.3%, route139 85.3%->10.7%, route143 29.1%->13.6%). Frame-by-frame diff against deployed
+on today's 10:13 event shows the corrected severity is IDENTICAL through the entire `JERK_ARM`
+ramp and the first ~0.9 s of the CAP hold, diverging only once dRel is measurably increasing
+again (the gap genuinely re-opening) -- the response on the event that matters is preserved, not
+softened. Every genuine incident across all four routes still reaches `CAP`, just via a
+physically-computed ramp (0.55-4.75 s, tracking how the true danger actually develops) instead of
+the old formula's near-instant, inflated saturation; the events that stop reaching `CAP` are the
+mild/oscillating ones this hook was never trying to panic-brake for. `min(vRel_model, v_filt)`
+(the pessimistic pairing already used for severity, unchanged by this fix) does sometimes pick
+the raw, understated `vRel_model` during armed frames (up to 28% of armed+present frames on
+route14f) -- checked whether the corrected formula's quadratic form makes this worse: it does not
+-- the corrected formula's sensitivity to that pairing is proportional to the closing rate itself,
+so it is LOWER at the low closing rates where most of those picks occur, and comparable at the
+high closing rates of genuine danger. IMPLEMENTED. `HOT_A_REQ` was NOT recalibrated and does not
+need to be -- it still gates the same, unchanged arming formula it was always validated against.
 """
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalPlanSource
@@ -386,8 +434,10 @@ class FarLeadPreBrake:
       self._reset()
       return []
 
-    v_lead_range = v_ego + eff_vRel_range
-    a_req = (v_ego ** 2 - v_lead_range ** 2) / (2.0 * max(eff_dRel - STOP_MARGIN, 1.0))
+    # Relative-motion kinematics, not (v_ego**2 - v_lead**2) -- see module docstring, "SEVENTH
+    # BUG". The arming gate above is intentionally UNCHANGED (still v_ego**2 - v_lead_filt**2);
+    # only this severity computation was corrected.
+    a_req = (eff_vRel_range ** 2) / (2.0 * max(eff_dRel - STOP_MARGIN, 1.0))
     target = max(CAP, min(-a_req, FLOOR))
     if target >= self.last_emitted:
       out = target                                          # rising (softer) -- immediate
