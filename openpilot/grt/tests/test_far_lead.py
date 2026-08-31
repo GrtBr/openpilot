@@ -121,17 +121,18 @@ def main():
   out, dRel_end = arm(h, 120.0, 30.6, -8.0)
   check("relaxed, 120 m, hard closing -> arms with one candidate", len(out) == 1)
   check("candidate a <= FLOOR", len(out) == 1 and out[0][0] <= fl.FLOOR)
-  check("candidate a >= -1.2 (cap)", len(out) == 1 and out[0][0] >= -1.2)
+  check("candidate a >= CAP", len(out) == 1 and out[0][0] >= fl.CAP)
   check("candidate source is lead0", len(out) == 1 and out[0][1] == fl.LongitudinalPlanSource.lead0)
   check("arms while dRel still > 80 m", dRel_end > 80.0)
 
-  # 110 vs 100 (a_req~0.14 at the true, instantaneous state) -> must not arm within a realistic
+  # 110 vs 100 (a_req_correct~0.03 at the true, instantaneous state, post-attempt-5 formula --
+  # was ~0.14 under the old (v_ego**2-v_lead**2)/(2d) form) -> must not arm within a realistic
   # evaluation window. NOTE: because a_req grows as dRel shrinks, ANY sustained nonzero closing
   # rate eventually crosses the threshold given enough time/distance -- that is correct physics,
   # not a bug. This checks it does not hair-trigger on an ordinary overtaking-speed gap.
   h = new_hook()
   out, dRel_end = close(h, 150.0, 30.6, -2.78, 30)  # 1.5 s
-  check("110 vs 100 at 150 m -> [] within 1.5 s (a_req~0.14, not hot)", out == [] and not h.armed)
+  check("110 vs 100 at 150 m -> [] within 1.5 s (not hot)", out == [] and not h.armed)
 
   # 110 vs 0 (fully stopped lead) at 120 m -- the canonical worst-case synthetic (spec section 3).
   # A naive "check dRel at gate-completion" implementation FAILED this (dRel had already crossed
@@ -148,7 +149,7 @@ def main():
         h_stop.dRel_at_hot_start is not None and h_stop.dRel_at_hot_start > fl.ARM_MIN_DIST + 20.0)
   check("110 vs 0 candidate at least as hard as the slow-pack case",
         len(out_stop) == 1 and len(out_slow) == 1 and out_stop[0][0] <= out_slow[0][0])
-  check("110 vs 0 candidate still >= -1.2 (CAP)", len(out_stop) == 1 and out_stop[0][0] >= -1.2)
+  check("110 vs 0 candidate still >= CAP", len(out_stop) == 1 and out_stop[0][0] >= fl.CAP)
 
   # KNOWN LIMITATION (documented in module docstring): a fully-stopped lead first detected
   # already inside ~87 m never arms, because dRel_at_hot_start freezes below ARM_MIN_DIST on the
@@ -233,9 +234,12 @@ def main():
   check("candidate a <= -0.20 always (hook 10 C floor)", all(c[0] <= -0.20 for c in out))
 
   # FOURTH BUG regression: a_req alone can clear HOT_A_REQ on a tiny closing rate at close-ish
-  # range -- must NOT arm without also clearing HOT_CLOSING_RATE. At 90 m, v_ego=30.6,
-  # closing at -1.0 m/s (3.6 km/h, well under the 10 km/h gate): a_req ~ 0.35, clears HOT_A_REQ,
-  # but must not arm.
+  # range -- must NOT arm without also clearing HOT_CLOSING_RATE. At 90 m, v_ego=30.6, closing at
+  # -1.0 m/s (3.6 km/h, well under the 10 km/h gate): under the OLD formula, a_req ~ 0.35, clears
+  # HOT_A_REQ on its own, and only HOT_CLOSING_RATE stopped it from arming. Post-attempt-5,
+  # a_req_correct ~ 0.006 at this state and no longer clears HOT_A_REQ=0.10 by itself either --
+  # this case is now doubly rejected, so it no longer isolates HOT_CLOSING_RATE specifically, but
+  # the invariant it checks ("must not arm here") still must hold.
   h = new_hook()
   out, _ = close(h, 90.0, 30.6, -1.0, 40)  # 2 s, well past HOT_PERSIST_S if it were going to arm
   check("FOURTH BUG: a_req hot but closing <10km/h at 90m -> [] (not armed)",

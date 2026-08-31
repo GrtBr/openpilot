@@ -170,8 +170,11 @@ one frame after arming.
 SAFETY
 ------
 Returns `[]` (inert) unless armed. Once armed, the candidate is clamped to `[CAP, FLOOR]` =
-`[-1.2, -0.40]` and only ever competes inside the planner's `min()`, so it can never make
-braking weaker than stock. `FLOOR` is -0.40, not something softer, because hook 10 layer C
+`[-2.0, -0.40]` (widened from `-1.2` 2026-08-31, attempt 5 -- see that section above; `-2.0` is
+still well inside the real vehicle-level clamp `ACCEL_MIN=-3.5` in `opendbc/car/interfaces.py`,
+and hook 2's own `HAZARD_ACCEL_MIN=-1.5` in `grt/scc_map.py` is existing fork precedent for a
+harder-than-old-CAP bound) and only ever competes inside the planner's `min()`, so it can never
+make braking weaker than stock. `FLOOR` is -0.40, not something softer, because hook 10 layer C
 (`ABANDON = -0.20` in `grt/throttle_hold.py`) would otherwise eat a milder request. Every gate
 (personality, `longActive`, driver input) is re-checked every frame and any exception drops
 straight to `[]`, so a wedged state cannot outlive one bad frame's inputs.
@@ -237,22 +240,52 @@ means "stock is genuinely braking," per the bug above.
 
 `a_req` IS WRONG FOR A MOVING LEAD -- DO NOT "FIX" IT WITHOUT READING captains_log.md 2026-08-31
 --------------------------------------------------------------------------------------------------
-`a_req = (v_ego**2 - v_lead**2) / (2*d)` below is only exact when the lead is stationary; the
-physically correct relative-motion form for a moving lead is `v_filt**2 / (2*d)`. This is a real,
-confirmed bug, not a matter of opinion. THREE independent, differently-shaped attempts to fix it
-were tried and reverted the same day (2026-08-31, `captains_log.md` has the full numbers for all
-three): (1) correcting the formula everywhere, including the arming gate -- fails because no
-`HOT_A_REQ` recovers the deployed arming envelope; (2) correcting only the post-arm severity
-formula, leaving arming untouched -- fails because it closes 2.5-10.8 m tighter (less speed bled
-by handoff) on the two founding incidents than the deployed formula; (3) correct kinematics plus
-an explicit, separately-tuned speed-scaled margin term -- fails because any margin strong enough
-to recover incident (1)'s lost handoff distance produces MORE gratuitous full-CAP braking on
-ordinary highway following (65% of armed time) than the "wrong" formula it would replace (29%).
-The old formula's speed-scaling is bad physics that is, on all evidence gathered so far,
-load-bearing. Do not swap it back to "correct" kinematics without a term that reads how the
-danger is DEVELOPING (closing-rate trend), not just absolute speed -- and measure any attempt
-against a route143 CAP-time-fraction bound (<=13.6%, attempt 2's figure) from the start, not
-after the fact.
+`a_req = (v_ego**2 - v_lead**2) / (2*d)` was, until attempt 5 below, used at both the arming gate
+and the severity formula; it is only exact when the lead is stationary, and the physically correct
+relative-motion form for a moving lead is `v_filt**2 / (2*d)`. This is a real, confirmed bug, not a
+matter of opinion. FOUR independent, differently-shaped attempts to fix it were made the same day
+(2026-08-31, `captains_log.md` has the full numbers for all four); the first three were reverted:
+(1) correcting the formula everywhere, including the arming gate -- fails because no `HOT_A_REQ`
+recovers the deployed arming envelope; (2) correcting only the post-arm severity formula, leaving
+arming untouched -- fails because it closes 2.5-10.8 m tighter (less speed bled by handoff) on the
+two founding incidents than the deployed formula; (3) correct kinematics plus an explicit,
+separately-tuned speed-scaled margin term -- fails because any margin strong enough to recover
+incident (1)'s lost handoff distance produces MORE gratuitous full-CAP braking on ordinary highway
+following (65% of armed time) than the "wrong" formula it would replace (29%).
+
+CORRECTION, attempt 5 (below): the guidance this paragraph used to end on -- "measure any attempt
+against a route143 CAP-time-fraction bound (<=13.6%) from the start" -- is NOT a sufficient test on
+its own. Attempt 5 passed that bound (10.8%) and still failed the `gap_at_release` test that sank
+attempt 2, worse than attempt 2 did. Any future attempt on this formula must clear BOTH the
+CAP-time-fraction bound AND `gap_at_release` against the git-blob-pinned deployed baseline
+(methodology in captains_log.md 2026-08-31) before being considered validated -- not just deployed,
+which is a lower bar (see next section).
+
+ATTEMPT 5, DEPLOYED DESPITE FAILING VALIDATION -- OPERATOR OVERRIDE, 2026-08-31
+--------------------------------------------------------------------------------
+The formula and constants below (`a_req` now `v_filt**2/(2d)` at BOTH the arming gate and the
+active-command severity, `HOT_A_REQ=0.10`, `CAP=-2.0`) are attempt 5 from the section above --
+`captains_log.md` 2026-08-31 has the full sweep. Validated BEFORE deployment and found to FAIL:
+`gap_at_release` regresses 6.61-16.65 m vs the true deployed baseline on all three genuine founding
+incidents (route139's -16.65 m is 6.7x attempt 2's -2.5 m on the SAME route -- strictly worse, not
+a milder version of the same problem), and a real arm the pre-attempt-5 formula caught (route14f
+t+127.39s, dRel=83.6 m) is missed entirely under the corrected formula + `HOT_A_REQ=0.10` (a_req
+there peaks at 0.087, never crosses 0.10). Both advisor consultations this session recommended
+against deploying this. The operator reviewed those numbers and explicitly chose to deploy anyway,
+for a real-world test drive (day after logging), overriding that recommendation.
+
+This is documented here, not silently, so a future reader (including a future session) does not
+mistake "this is what's running" for "this was found to be correct" -- it was found to be WORSE
+than what it replaced on the exact test that matters, and shipped anyway as a deliberate,
+informed field experiment, not a validated fix. If the test drive reproduces a handoff-margin
+problem -- braking that resolves with LESS distance/speed shed to the lead than the prior
+(`a69672e67`/`2d4473136`) formula would have on a comparable encounter -- that is the PREDICTED
+failure mode from the simulation above, not a surprise requiring fresh diagnosis.
+
+REVERT PATH: this is one self-contained commit (the two formula sites, `HOT_A_REQ`, `CAP`, and
+this docstring/the SAFETY section's bound text -- no other file's runtime behavior changed).
+`git revert` it to restore the `2d4473136` state (old formula, `HOT_A_REQ=0.30`, `CAP=-1.2`)
+that all four prior attempts' validation converged on as the one that actually held up.
 """
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalPlanSource
@@ -266,7 +299,9 @@ BETA = 0.003
 ARM_MIN_DIST = 80.0          # m -- dRel_at_hot_start must exceed this (anchor semantics changed,
                              # see docstring -- this is NOT "distance at first sight" anymore)
 PRESENCE_PERSIST_S = 0.30    # s -- continuous presence required before the arming gate evaluates
-HOT_A_REQ = 0.30             # m/s^2 -- a_req(v_filt) must clear this...
+HOT_A_REQ = 0.10             # m/s^2 -- a_req(v_filt) must clear this... LOWERED from 0.30,
+                             # 2026-08-31, attempt 5 (deployed despite failing validation -- see
+                             # module docstring "ATTEMPT 5, DEPLOYED DESPITE FAILING VALIDATION")
 HOT_CLOSING_RATE = 2.78      # m/s (~10 km/h) -- ...AND v_filt must be closing at least this fast
                              # ("FOURTH BUG" in module docstring -- a_req alone can clear 0.30 on
                              # tiny closing rates at long range, which is correct for a genuine
@@ -279,7 +314,11 @@ FLOOR = -0.40                # m/s^2 -- softest command once armed; see hook 10 
                              # Reverted here 2026-08-31 after a 0.00 experiment caused a real
                              # self-release failure on a live drive -- see module docstring
                              # "FLOOR EXPERIMENT" for the full story before changing this again
-CAP = -1.2                   # m/s^2 -- hardest command this hook may ever issue (A_CRUISE_MIN)
+CAP = -2.0                   # m/s^2 -- hardest command this hook may ever issue. WIDENED from
+                             # -1.2, 2026-08-31, attempt 5 (deployed despite failing validation --
+                             # see module docstring). Bounded well inside the real vehicle-level
+                             # clamp ACCEL_MIN=-3.5 (opendbc/car/interfaces.py); hook 2's own
+                             # HAZARD_ACCEL_MIN=-1.5 (grt/scc_map.py) already exceeds the old -1.2.
 JERK_ARM = 1.5               # m/s^3 -- rate limit on the FALLING edge only, first armed frames
 
 # ---- release (spec section 6, amended -- see module docstring) ----
@@ -356,8 +395,11 @@ class FarLeadPreBrake:
         self.dRel_at_hot_start = None
         return []
 
-      v_lead_filt = v_ego + v_filt
-      a_req_filt = (v_ego ** 2 - v_lead_filt ** 2) / (2.0 * max(dRel - STOP_MARGIN, 1.0))
+      # CORRECTED relative-motion kinematics, 2026-08-31, attempt 5 (deployed despite failing
+      # validation -- see module docstring "ATTEMPT 5, DEPLOYED DESPITE FAILING VALIDATION").
+      # `v_filt` IS the closing rate; the old `(v_ego**2 - v_lead**2)/(2d)` form (exact only for
+      # a stationary lead) is gone from this site.
+      a_req_filt = (v_filt ** 2) / (2.0 * max(dRel - STOP_MARGIN, 1.0))
       # a_req alone can clear HOT_A_REQ on a tiny closing rate at long range -- correct for a
       # genuine slow-pack approach, but also fires on ordinary highway measurement noise (see
       # module docstring, "FOURTH BUG"). Require a real closing rate too.
@@ -405,8 +447,9 @@ class FarLeadPreBrake:
       self._reset()
       return []
 
-    v_lead_range = v_ego + eff_vRel_range
-    a_req = (v_ego ** 2 - v_lead_range ** 2) / (2.0 * max(eff_dRel - STOP_MARGIN, 1.0))
+    # CORRECTED relative-motion kinematics -- see arming-gate comment above and module docstring
+    # "ATTEMPT 5, DEPLOYED DESPITE FAILING VALIDATION".
+    a_req = (eff_vRel_range ** 2) / (2.0 * max(eff_dRel - STOP_MARGIN, 1.0))
     target = max(CAP, min(-a_req, FLOOR))
     if target >= self.last_emitted:
       out = target                                          # rising (softer) -- immediate

@@ -244,3 +244,25 @@ If you cannot run acados, a kinematic replay of the hook on the logged series is
 6. `long_mpc.py` cost weights untouched. `radard.py` / `process_lead` untouched.
 
 Out of scope for this change: feeding range-rate into MPC, raising `LEAD_DANGER_FACTOR`, stopping mapd from yielding to far leads (a later one-line experiment), a Params UI toggle unless you need default-off.
+
+---
+
+## 13. DEVIATION FROM THIS SPEC, 2026-08-31 — `a_req` formula, `HOT_A_REQ`, `CAP` changed, deployed despite failing validation (operator override)
+
+This spec's §4 and §6 formulas (`a_req = (v_ego² − v_lead_range²) / (2·max(dRel−6,1))`) and §8's
+`[-1.2, -0.40]` clip are the ORIGINAL design and no longer match the deployed code as of
+2026-08-31. `a_req` is only exact for a stationary lead; the correct relative-motion form is
+`v_filt²/(2d)`. Four attempts to fix this were made the same day (captains_log.md has the full
+numbers); the first three were reverted after failing validation. The fourth ("attempt 5":
+corrected formula at both the arming gate and the active-command severity, `HOT_A_REQ` 0.30→0.10,
+`CAP` -1.2→-2.0, `FLOOR` unchanged at -0.40) ALSO failed validation — it regresses
+`gap_at_release` 6.61-16.65 m against the true deployed baseline on all three genuine founding
+incidents (worse than the second, already-reverted attempt), and misses a real arm the original
+formula caught (route14f t+127.39s). Both advisor consultations recommended against deploying it.
+
+The operator reviewed those numbers and chose to deploy attempt 5 anyway, for a real-world test
+drive, as a deliberate field experiment rather than a validated fix. It is a single,
+self-contained commit; `git revert` restores this spec's original formula and constants. See
+`far_lead.py`'s module docstring, "ATTEMPT 5, DEPLOYED DESPITE FAILING VALIDATION," and
+`captains_log.md` 2026-08-31 for the full record. Do not treat §4/§6/§8 above as describing the
+currently-running code until this section says otherwise.
