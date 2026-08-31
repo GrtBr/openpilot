@@ -4699,3 +4699,33 @@ offset relationship, an independent threshold), is still the intended next fix -
 designed in detail, not yet validated, not yet implemented. Two real, disjoint bugs have now
 been found by touching `FLOOR` for unrelated reasons; the next attempt at the fifth finding
 should not reuse `FLOOR` for anything it wasn't already reserved for.
+
+## 2026-08-31 (later still) — FLOOR revert DEPLOYED to comma4
+
+Committed as `a69672e67`. Device was on `5f4bb85` (the FLOOR=0.00 experiment), reachable
+(=parked), 2 commits behind. Bundle `5f4bb85..a69672e` (192 insertions across 5 files) -> scp ->
+`git fetch <bundle> && git merge --ff-only` -> reboot. Fast-forward clean, no scons, no cereal
+SCP, bundle deleted off-device after merge.
+
+**Verified ON DEVICE, before the reboot:**
+- `test_far_lead.py` 29/29 (original "candidate a <= -0.20 always" invariant restored and
+  passing), `test_hooks.py` 44/44, `test_schema_conformance.py` 34/34.
+- Real imports: confirmed `far_lead.FLOOR == -0.4` actually live in the imported module (the
+  critical check, same as for the original experiment deploy). `CAP` and `HOT_CLOSING_RATE`
+  spot-checked, unchanged. Singleton constructs; inert call returns `[]`.
+
+Device came back after reboot; commit `a69672e` confirmed running.
+
+**Verified AFTER the reboot:**
+- `managerState`: nothing shouldBeRunning-but-not-running.
+- `onroadEvents`: only `wrongGear`/`seatbeltNotLatched` -- no `commIssue`, engagement not
+  blocked.
+- `longitudinalPlan` publishing cleanly while parked (`aTarget≈0.014`, `source=e2e`).
+- Zero `far_lead`/"hook 11" mentions in the 30 most recent swaglog files since boot. One
+  traceback present, `athenad` TLS "certificate is not yet valid" -- the same pre-GPS
+  clock-drift artifact seen in every prior deploy this week, unrelated to this change (checked
+  the daemon name and error text before dismissing it, not just the filename).
+
+**Hook 11 is back to the FLOOR=-0.40 design validated through 2026-08-28's HOT_CLOSING_RATE
+fix**, with the fifth finding (arming on top of stock-handled approaches) still open and
+awaiting the `stock_min` arm-time gate as its own, separate, future change.
