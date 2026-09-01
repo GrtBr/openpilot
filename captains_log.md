@@ -5286,3 +5286,49 @@ losing margin, a different shape of encounter than either event examined here (o
 fast-developing emergency dominated by stock's own MPC, the other released before any real
 handoff contest arose). Continued driving and re-running this same replay-based analysis after
 more data is the way to actually test that specific concern.
+
+## 2026-09-01 (later still) — second drive, two non-arm incidents at 14:56 and 14:57 diagnosed. Two different, both-by-design reasons; neither is a bug.
+
+Operator flagged two approaches on trip `0000015e` (seg `--27`/`--28`) where hook 11 never armed
+and asked why. Replayed the real installed `far_lead.py` against full-rate `radarState` for both,
+with internal state (`armed`, `hot_elapsed`, `dRel_at_hot_start`, `v_filt`) exposed per frame --
+same replay method as the prior entry.
+
+**14:56:11-13.7 (the more severe one, dRel 85->46m, real closing rate to -12 m/s, stock's own
+`e2e`/`lead1` reaching -2.7 to -3.2 m/s^2): hook 11 was locked out by the driver-input gate, not
+a detection failure.** Hook 11 actually DID arm briefly just before this, at 14:56:10.287-10.538,
+on an earlier, milder blip (`dRel_at_hot_start`=91.9m) -- then released legitimately at 10.584
+when the closing rate momentarily eased above `HOT_CLOSING_RATE`. The real escalation started
+essentially the same instant, but `carState.brakePressed` went `True` at 14:56:10.552 and stayed
+`True` through 13.562 -- covering the entire hard-braking portion. `step()`'s very first line,
+`if not relaxed or not long_active or driver_input: self._reset(); return []`, unconditionally
+resets and returns `[]` every frame the driver has pedal input, by design (see module docstring
+SAFETY section). Confirmed directly: `v_filt`/`hot_elapsed` are wiped to `None`/`0` for the
+entire braked interval, not just `armed=False` -- the full reset fires every single frame.
+Stock's own MPC handled the actual braking throughout; hook 11 correctly deferred to the driver.
+
+**14:57:01.4-02.0 (milder, dRel bottoms near 65-70m, stock handles it at a gentle -0.97 m/s^2,
+vEgo eases 83.5->79.4 km/h, no alarm): hook 11's `ARM_MIN_DIST` anchor-freeze limitation fired --
+the exact, already-documented "KNOWN LIMITATION" in the module docstring, seen live for the first
+time.** The closing rate genuinely built into a real hot streak and persisted the full required
+`HOT_PERSIST_S` (0.5 s) this time -- `hot_elapsed` reached exactly `0.50` at 14:57:01.978,
+confirmed frame by frame. But `dRel_at_hot_start`, captured once at the first frame the streak
+went hot (14:57:01.537), was `69.82 m` -- already under `ARM_MIN_DIST` (80 m) by the time the
+formula's closing-rate read crossed `HOT_A_REQ` continuously. (A first, single-frame attempt at
+61.437 anchored at 72.93 m and was interrupted one frame later when `a_req_filt` dipped to 0.0968,
+just under the 0.10 threshold -- but 72.93 m is also under 80 m, so that flicker isn't the actual
+cause; the anchor was always going to be too close by the time this particular approach's danger
+became detectable.) `dRel`/`vRel` were noisy and non-monotonic throughout both incidents' lead-in
+(bouncing 65-118m and +/-2 to -12 m/s frame to frame) -- consistent with a genuinely
+uncertain/borderline vision lock, the same character as several incidents logged earlier this
+session, not obviously two different real objects. No pedal input during this second incident
+(`brakePressed`/`gasPressed` both `False` throughout) -- confirms `ARM_MIN_DIST`, not driver
+override, is the sole reason here.
+
+**Neither is a defect.** Both are existing, documented, deliberate design behaviors (driver-input
+override; the hot-start-anchor's known blind spot for danger that only becomes detectable already
+inside `ARM_MIN_DIST`) firing correctly on real data, not new bugs introduced by attempt 5 --
+the arming FORMULA and threshold changes are not implicated in either case (the 14:56 lockout is
+gate-order-independent; the 14:57 anchor-freeze would fire identically under the old formula too,
+since `ARM_MIN_DIST` and the anchor-capture mechanism are unchanged by attempt 5). No code
+changes from this entry.
