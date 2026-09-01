@@ -5210,3 +5210,79 @@ reproduces the predicted `gap_at_release` regression or anything else novel and 
 `git reset --hard a69672e67` on comma4 (local commit, `git revert` also works) and reboot again;
 the Pi5-side revert path (`git revert 8b60b8e24`) is separate and only affects the Pi5/GitHub
 history, not this device directly, given the two histories are no longer hash-linked.
+
+## 2026-09-01 (later) — first real test drive on attempt 5, ~70 min, HYUNDAI_STARIA. One FCW, agreed understandable; hook 11 armed 10 genuine times, one real CAP=-2.0 hit, behaved correctly.
+
+Deploy happened between trip `00000155` (08:42 SAST, still on `a69672e67`) and trip `00000156`
+(08:58 SAST onward, on `8e824865`/attempt 5) -- confirmed via `errorLogMessage`'s embedded
+`ctx.commit`. Everything from 08:58 SAST to end of drive (~10:20+) ran attempt 5. Pulled the
+whole day's qlogs (coarse, 2-4 Hz) plus full rlogs for two flagged windows, decoded and analyzed
+on the Pi5 per the established convention (comma4 not used for analysis, only extraction).
+
+**Methodology note, worth keeping:** `longitudinalPlan.longitudinalPlanSource == lead0` is a
+STOCK enum value (`MPC_SOURCES = (lead0, lead1)` in `long_mpc.py`), shared between hook 11's own
+candidate and stock's ordinary radar-lead-follow branch -- it does NOT mean "hook 11 armed." A
+naive scan on that tag alone found 91 "episodes" today, almost all spurious (many had positive
+`aTarget`, impossible for an armed hook 11). Re-did it properly: replayed the actual installed
+`far_lead.py` module against real `radarState`/`carState`/`carControl`/`selfdriveState` frames
+from every segment's full rlog (not qlog) for trips 156 onward, watching `hook.armed` directly.
+This is the only reliable way to identify true hook 11 activity from a log and should be the
+method for any future "how did hook 11 do today" pass -- the source-tag shortcut is wrong.
+
+**The FCW event (operator's question: "9:57, coming in too fast on a downhill bend, lead only
+came onto radar late -- do you agree?"): yes, agreed, with full frame-by-frame support.**
+Trip `00000158`, seg `--15`/`--16`, ~09:57:14-22 SAST. Sequence: lead first flickers into
+`radarState` at 09:57:14.26 (dRel=102.6m, `modelProb` 0.5-0.85, present/absent toggling for over
+a second -- classic late/uncertain vision lock, consistent with a bend/downhill occlusion) while
+vEgo holds ~88-90 km/h. Hook 11 (attempt 5, corrected formula + `HOT_A_REQ=0.10`) arms cleanly at
+09:57:15.61 (dRel=75.2m) and wins `min()` with a JERK_ARM-limited ramp from -0.40 to -0.925 over
+0.45s. At 09:57:16.06, stock's own `e2e`/`lead1` MPC has independently escalated past hook 11's
+candidate and takes over `min()`, continuing on its own all the way to `ACCEL_MIN=-3.5` by
+~09:57:17.5 -- closing rate at that point is -13 to -15 m/s (~50 km/h relative). FCW fires at
+09:57:18.21, ~0.7s into that max-braking state, with the gap still closing hard (49m, -13.4 m/s)
+-- textbook FCW: even full automated braking authority may not resolve the geometry, so it
+escalates to the driver. Driver brakes manually ~1.1s later (`pedalPressed` 09:57:19.28,
+`longActive` False by 19.31), reaching a real, measured `aEgo` of -11.2 m/s^2 (well beyond
+`ACCEL_MIN`, i.e. genuine hard manual braking, not MPC-commanded), bringing the car to a near-
+stop with `dRel` bottoming at ~3.1-3.9 m -- tight, no contact. Hook 11's own contribution here was
+a small, appropriately early nudge (~1 km/h shed in 0.45s) well before the crisis fully developed;
+it did not cause or worsen this event, and released cleanly once stock caught up, per design.
+Confirmed via a whole-drive scan: this was the ONLY `fcw` (or any alarm-type event) that fired
+all day.
+
+**Hook 11 real-world activity, whole drive (attempt 5, via the proper replay method): 10 genuine
+arm episodes**, dRel_at_arm ranging 75-113m, v_ego_at_arm 55-121 km/h, durations 0.35-13.3s.
+Three reached the new `CAP=-2.0` in the replay's own internal computation; only ONE of those
+three actually WON `min()` and became the real commanded output at -2.0 (09:51:49-51 SAST, seg
+`00000158--10`) -- the other two (09:57:15 event above, and a 09:30:15 event) were academic:
+hook 11's internal severity reached -2.0 but stock's own independent escalation was always
+harder and dominated the real `min()` output, so the wider CAP never actually manifested in the
+vehicle's real behavior for those two.
+
+**The one real CAP=-2.0 hit, examined in full** (09:51:49.655-51.65, seg `00000158--10`): lead
+flickers in at ~68 km/h closing barely, hook 11 arms at dRel=75.7m on a borderline
+`HOT_CLOSING_RATE` crossing, and the RAW computed severity is already beyond -2.0 the instant it
+arms -- the observed ramp from -0.40 to -2.00 over ~1.1s is pure `JERK_ARM` rate-limiting, not a
+slow-building danger. Holds near -2.00 for ~0.3s (vEgo 64.9->63.1 km/h), then softens
+immediately and smoothly (the "rising -- immediate" branch, no rate limit on release) as the
+closing rate eases and the lead's radar lock degrades, releasing cleanly by 51.65s once
+`eff_vRel_range` clears `-HOT_CLOSING_RATE`. No alarm fired for this event. A driver brake
+intervention (`pedalPressed`) follows about 0.5s AFTER hook 11 had already released and the lead
+had already dropped off radar entirely -- likely a separate decision/hazard not visible in
+`radarState.leadOne` (single-lead only), not attributable to hook 11's prior action from this
+data alone.
+
+**No exceptions.** Scanned every `errorLogMessage` in today's logs: zero tracebacks or exceptions
+from `far_lead.py`/`grt`/`hook` (only routine `ublox` almanac-NACK and unrelated `athenad`
+websocket noise, pre-existing and unrelated to this change).
+
+**Net read on attempt 5 after one real drive:** the arming-half behavior (corrected formula,
+`HOT_A_REQ=0.10`) looks sound in practice -- reasonable arm distances, no spurious over-arming
+observed, clean releases. The one real manifestation of the widened CAP was well-behaved
+(smooth ramp, appropriate brief hold, clean release, no alarm). This is one day of anecdotal
+evidence, not a refutation of the pre-deployment `gap_at_release` regression risk that was
+simulated and flagged before shipping -- that risk is about SLOWER, gradual highway handoffs
+losing margin, a different shape of encounter than either event examined here (one was a
+fast-developing emergency dominated by stock's own MPC, the other released before any real
+handoff contest arose). Continued driving and re-running this same replay-based analysis after
+more data is the way to actually test that specific concern.
