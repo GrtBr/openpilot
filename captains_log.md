@@ -5164,3 +5164,49 @@ swaglog exception scan. If the test drive reproduces the predicted handoff-margi
 (braking resolves with less speed/distance shed to the lead than the prior formula would have on
 a comparable encounter) or any other novel bad behavior, revert immediately using the path above
 rather than attempting a live patch.
+
+## 2026-09-01 — attempt 5 deployed to comma4, on-device verification recorded
+
+comma4 came back online. Discovered before deploying that a normal `git pull` on-device is not
+currently possible: `/data/openpilot`'s `origin` remote (`git@github.com-grtbr`) has no working
+SSH credential on the box (`~/.ssh/config` and `~/.ssh/` don't exist for the `comma` user; the
+persistent device key at `/persist/comma/id_ecdsa` was tested against `git@github.com` and
+rejected -- not a registered deploy key for this fork). Operator explicitly chose to deploy by
+syncing the changed files directly over the already-authenticated SSH channel instead of fixing
+the git credential.
+
+**Deploy method:** generated a patch scoped to exactly the four files this change touches
+(`openpilot/grt/far_lead.py`, `openpilot/grt/tests/test_far_lead.py`, `GRT_MODS.md`,
+`FAR_LEAD_PREBRAKE_PROMPT.md` -- `captains_log.md` deliberately excluded, doc-only) from
+`a69672e67` (comma4's commit at the time) to Pi5's `8b60b8e24`, confirmed it applied cleanly
+against comma4's clean working tree, applied it, then byte-diffed all four resulting files on
+comma4 against the Pi5 `HEAD` blobs -- exact match on all four before proceeding. Committed
+locally on comma4 (hash `8e82486`, will not match Pi5's `8b60b8e24` since no objects were
+imported -- content is verified identical, history is parallel, not shared).
+
+**Pre-reboot:** `test_far_lead.py` 29/29, `test_hooks.py` 44/44 (comma4's system Python lacks
+`pycapnp`; both ran fine without it). `test_schema_conformance.py` needs `pycapnp` --
+ran via `/usr/local/venv/bin/python3`, 34/34 fields pass.
+
+**Rebooted, came back after ~50s.** Post-reboot:
+- `git log`/`git status` on-device: clean, at `8e82486`.
+- Real-import check (`/usr/local/venv/bin/python3`, actual `openpilot.grt.far_lead` module, not
+  a stub): `HOT_A_REQ = 0.1`, `CAP = -2.0`, `FLOOR = -0.4` -- confirms the running process would
+  see the new values, not a stale cached `.pyc`.
+- `manager.py`, `selfdrived`, `plannerd` all present in the process list.
+- Live `managerState` via `SubMaster`: valid, 45 processes, zero flagged
+  `shouldBeRunning and not running`.
+- `onroadEvents`/`longitudinalPlan` both invalid at check time -- expected, device is parked
+  (not onroad), so those topics simply aren't being published; cannot be verified until the
+  actual test drive.
+- `journalctl -u comma` since boot: zero lines matching `traceback|exception|error` (case
+  insensitive) or `far_lead|grt|hook` -- clean boot, no exceptions raised yet (hook 11 only logs
+  on exception, and hasn't run onroad yet either way).
+
+**Status: deployed, on-device state verified clean, awaiting the actual test drive** (operator's
+stated plan, today). `longitudinalPlan`/onroad behavior itself is UNVERIFIED until then -- this
+entry confirms the code is running without crashing, not that it drives correctly. If the drive
+reproduces the predicted `gap_at_release` regression or anything else novel and bad: revert via
+`git reset --hard a69672e67` on comma4 (local commit, `git revert` also works) and reboot again;
+the Pi5-side revert path (`git revert 8b60b8e24`) is separate and only affects the Pi5/GitHub
+history, not this device directly, given the two histories are no longer hash-linked.
