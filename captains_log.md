@@ -5377,3 +5377,33 @@ and in the UI's `model_renderer.py` via a one-line hook so the HUD shows the sam
 marker -- radard and the stock MPC untouched. "Register far leads quicker" beyond ~0.15 s is an
 arming-gate question (14:57's anchor-freeze), not a filter question. Before any deploy: count
 false arms per hour of CURRENT-model driving (June data is a different model) -- needs comma4.
+
+## 2026-09-02 (later) — far-lead filter: false-arm tally on 2.8 h of CURRENT-model driving.
+## Median-3 + (0.15, 0.005) recommended: +0.10 s on real arms, fewer wobble arms than stock.
+
+comma4 came back at 17:56; pulled whole drives 158 (17.5 min), 15e (43.5), 15f (58.6), 161
+(49.8) at full rate (`analysis/lead_filter/data/drive_*.tsv`, ~200 MB). 15f and 161 carried
+almost no far leads (0 arms for every tuning), so the arm statistics rest on 158 + 15e: 7 real
+arm events. Method (`analysis/lead_filter/false_arms.py`): run hook 11's ArmGate (constants
+verbatim) over each drive per tuning, eligibility = present, longActive, no pedal; 5 s dead time
+per arm; classify each arm by hindsight -- REAL if the reference distance falls >= 15 m within
+3 s (or lead lost < 40 m within 1 s), else WOBBLE.
+
+  tuning (median n, alpha, beta)   real/h  wobble/h   arm-time vs stock on shared real arms
+  stock  (1, .10, .003)             2.48     1.06        0.00 s
+  med3   (3, .10, .003)             2.48     1.06       -0.05 s
+  med3   (3, .15, .005)             2.83     0.71       +0.10 s   <-- recommended
+  med3   (3, .20, .008)             2.83     1.06       +0.19 s   (ceiling; false-armed on June)
+  med3   (3, .25, .012)             2.83     2.12       -0.17 s   REJECTED: wobble arms double
+  med5   (5, .10, .003)             2.83     0.71       -0.09 s   (safest, slightly slower)
+  med5   (5, .25, .012)             2.83     2.12       -0.03 s   REJECTED
+
+FCW 09:57 (genuine fast closure) arm times: stock 23.70 s, med3 (.15,.005) ~23.6 s, med5 stock
+gains 23.80 s -- no median variant delays a real hazard by more than 0.1 s. Innovation clamp
+24.45 s and never converges: rejected for good.
+
+Sample-size caveat: ~8 arm events. Five more drives (15a, 150, 143, 144, 14b, ~5 h) are queued
+in `wait_then_pull.sh` for when comma4 is next reachable (it dropped at 18:12 mid-pull).
+
+NOT IMPLEMENTED. Proposed placement unchanged: fork class in openpilot/grt/, instantiated in
+hook 11 (plannerd) and in mici `model_renderer.py` via one-line hooks; active above 50 m.
