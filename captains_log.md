@@ -5537,3 +5537,54 @@ for the published/displayed distance, stock's existing `_RangeRateFilter` untouc
 conservative one and needs no hook 11 change at all.
 
 STILL NOT IMPLEMENTED.
+
+## 2026-09-03 (later still) — operator question "does a far lead ever move >5 m in one second?"
+## overturned the median-9 recommendation. Answer: yes, 31.5% of the time. Revised to median-5.
+
+Measured over 8725 far-lead (>50 m) one-second windows, using the non-causal reference as truth
+and decomposing by physics (a same-direction lead cannot close faster than v_ego, which would
+mean a stationary lead):
+
+  moved <= 5 m in 1 s                                        68.0%
+  moved > 5 m, physically possible for one object -- REAL     31.5%  (18.5% closing, 13.0% opening)
+  moved > 5 m, impossible for one object -- LEAD SWAP          0.5%  (43 windows)
+  genuine rates above 5 m/s: median 7.3, p99 28.4, max 35.3 m/s
+
+Two design decisions are retro-validated by this, and one is overturned:
+
+VALIDATED. The 3 m-per-frame "physically impossible" threshold used throughout: the fastest
+genuine single-object motion observed is 35.3 m/s = 1.77 m/frame, so the threshold sits at ~1.7x
+above anything real. It is not clipping true motion.
+
+VALIDATED. Why the innovation clamp failed so badly (2026-09-02). Applied before the gain it
+capped tracking at alpha * clamp = 0.10 * 3 m = 0.3 m/frame = 6 m/s. Since 31.5% of far-lead
+seconds move faster than 5 m/s, that clamp would have degraded roughly a third of all genuine
+far-lead tracking. The earlier verdict was right for a reason that is only now quantified.
+
+OVERTURNED. Because real leads move fast this often, filter LAG is a safety cost, not just an
+accuracy cost -- during a closure, lag makes the filter read the lead FARTHER away than it is.
+New metric: uncompensated error (lag included) over the 1614 genuinely-fast-closing far-lead
+frames. Positive = reads too far = unsafe direction.
+
+  signal                  flicker leaked   rms m | fast-close error: mean    p95   worst
+  raw (what the HUD draws)          2112    2.21 |                  -0.22   4.07   12.40
+  stock RR (.10,.003)                  3    1.36 |                   1.97   5.75   11.32
+  med5 + a.30 + slope-v               41    0.60 |                   1.74   5.22   11.55  <-- REC
+  med7 + a.30 + slope-v               25    0.43 |                   2.27   6.25   13.84
+  med9 + a.30 + slope-v               17    0.32 |                   2.80   7.22   15.73
+
+Median-9 wins flicker and RMS but is the WORST on the safety axis: it reads a fast-closing lead
+2.80 m too far on average and 15.7 m too far at worst, against stock's 1.97 / 11.32. The lag that
+makes it smooth is the lag that hides an approach. Recommendation therefore moves from median-9
+(2026-09-03 earlier entry) to MEDIAN-5.
+
+**REVISED RECOMMENDATION: median-5 -> alpha 0.30 position -> velocity from a 15-frame
+least-squares slope** (`MedSlope(median=5, alpha=0.30, win=15)`). Versus stock's filter it is
+2.3x more accurate (RMS 0.60 vs 1.36) AND slightly safer during fast closes (mean 1.74 vs 1.97,
+p95 5.22 vs 5.75, worst 11.55 vs 11.32 -- a tie). Versus the raw signal the HUD draws today it
+removes 51x the flicker (41 vs 2112 impossible jumps over 604 s of dirty episodes). It is the
+only candidate that beats stock on accuracy and safety simultaneously.
+
+Unchanged caveat: slope velocity still adds false hook 11 arms, so the conservative deployment
+remains two instances -- this filter for the published/displayed distance, stock's
+`_RangeRateFilter` left untouched inside hook 11. STILL NOT IMPLEMENTED.
