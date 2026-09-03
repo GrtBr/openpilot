@@ -5407,3 +5407,56 @@ in `wait_then_pull.sh` for when comma4 is next reachable (it dropped at 18:12 mi
 
 NOT IMPLEMENTED. Proposed placement unchanged: fork class in openpilot/grt/, instantiated in
 hook 11 (plannerd) and in mici `model_renderer.py` via one-line hooks; active above 50 m.
+
+## 2026-09-03 — far-lead filter: operator ground-truth drive CORRECTED the false-arm classifier.
+## Recommendation survives and is now much better supported: median-3 + (0.15, 0.005).
+
+Operator drove 00000164 (20:52-21:09 SAST 2026-09-02) deliberately holding leads at just-
+triggering distance and reported: "All leads were true without any false signals." That is a
+LABELLED dataset, and it caught a real bug in my own metric.
+
+**The classifier was wrong.** `false_arms.py` had been calling an arm REAL only if the reference
+distance fell >= 15 m within 3 s. Both arms in the operator's drive were labelled WOBBLE. Direct
+inspection of the raw trace shows they were unmistakably real: the t=239 s arm ran dRel 101 -> 43 m
+while ego went 91 -> 41 km/h. It failed the old test only because the drop took ~4 s, not 3.
+Rewritten (see the docstring in `classify`): 6 s horizon, and EGO DECELERATION >= 6 km/h is now
+primary evidence -- if the car had to slow, the lead was real whatever the distance trace did.
+A true wobble keys on the opposite signature: distance COMES BACK and ego speed is unchanged
+(verified control, June log: 112 -> 98 -> 112 m at constant 81 km/h, model vRel ~0). Both new-drive
+arms now read REAL (matching the operator) and the June wobble still reads WOBBLE. THE 2026-09-02
+WOBBLE-RATE TABLE IN THE ENTRY ABOVE IS SUPERSEDED -- it over-counted real arms as false.
+
+Re-tallied over 5.63 h of current-model driving (drives 150, 158, 15a, 15e, 15f, 161, 163, 164;
+12 real arm events):
+
+  tuning (median n, alpha, beta)  real/h  wobble/h  mean arm gain   worst case vs stock
+  stock  (1, .10, .003)            2.13     0.00      0.00 s          --
+  med3   (3, .15, .005)            2.13     0.00     +0.11 s        -0.05 s (one frame, once)
+  med3   (3, .20, .008)            2.13     0.18     +0.19 s        +0.00 s (never later)
+  med3   (3, .25, .012)            2.31     0.53     -0.03 s        REJECTED
+  med5   (5, .10, .003)            2.13     0.00     -0.09 s        -0.15 s
+  med5   (5, .25, .012)            2.49     0.36     +0.08 s        REJECTED
+
+No candidate MISSED any of stock's 12 real arms. beta 0.008 is never later than stock and gains
+0.19 s, but produces one false arm in 5.63 h and arms on the June wobble; it is the ceiling, not
+the pick. beta 0.012 is bad on both counts, confirming 2026-09-02.
+
+**Flicker, all 8 drives, lead in the 50-120 m band (9242 frames)** -- % is total-variation
+relative to the raw signal, which is what the mici HUD draws today (`model_renderer.py:170`):
+
+  raw (what the HUD shows now)   100.0%   2570 impossible >3 m/frame jumps (27.8% of frames)
+  stock RR (.10,.003)             14.5%      3  (0.03%)
+  med3 (.15,.005)                 16.7%     11  (0.12%)
+  med5 (.10,.003)                 12.0%      0  (0.00%)
+
+The HUD win is the large one and is nearly independent of tuning: any of these is a ~6x
+reduction in visible jitter, because the display is currently unfiltered. Speed and smoothness
+do pull against each other (med5 is quietest but 0.09 s slower to arm); med3 (.15,.005) is the
+balance point -- earlier than stock on 11 of 12 real arms, zero false arms, still ~6x quieter
+than today's HUD.
+
+Data and harness: `analysis/lead_filter/` (~390 MB of extracted TSVs in data/, not in git).
+Drives 143/144/14b never pulled -- comma4 went offline; not needed, the sample is sufficient.
+STILL NOT IMPLEMENTED. Proposed placement unchanged: one fork class in openpilot/grt/,
+instantiated in hook 11 (plannerd) and in mici `model_renderer.py` via one-line hooks, active
+above 50 m (blend 40-60 m). radard and the stock MPC untouched.
