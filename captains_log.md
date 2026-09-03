@@ -5700,3 +5700,56 @@ extractions disagree because presence dropouts fall differently at segment bound
 moves where the hot streak starts and therefore the anchor. The earlier anchor-freeze conclusion
 may be an artifact of the 6-segment window. Not re-litigated here; flagged so it is not treated
 as settled.
+
+## 2026-09-03 (c) — how the ">5 m/s" rate is actually measured, and the noise floor that explains
+## the 68% false rate. The threshold sits 1.4 sigma above the estimator's own noise.
+
+Measurement, stated exactly (analysis/lead_filter, RT class). It is NOT an average over 20 frames:
+
+  x, _ = hampel7_then_RR(.20,.008).update(dRel_raw)   # filter the raw sample
+  ring.append(x)                                       # ring of 21 FILTERED positions
+  rate = (ring[0] - ring[-1]) / 1.0 s                  # ENDPOINT DIFFERENCE, +ve = closing
+  fire if 5.0 < rate < v_ego
+
+21 samples = 20 intervals x DT_MDL 0.05 s = exactly 1.000 s. Note that averaging the 20
+frame-to-frame differences is mathematically the SAME number (the sum telescopes), so "sample and
+average 20 frames" and "endpoint difference" are one estimator, not two. A least-squares slope over
+the same window IS different, and was tested -- it is not better here:
+
+  estimator                RMS err vs true   noise SD when steady   |err| p95
+  endpoint 1.0 s (used)          6.01               3.57             11.81
+  endpoint 0.5 s                 6.13               4.45             12.43
+  LSQ slope 1.0 s                6.62               3.97             13.06
+  LSQ slope 1.5 s                6.45               3.34             12.22
+
+THE NOISE FLOOR IS THE WHOLE STORY. Measured on frames where the lead is genuinely steady
+(|true rate| < 1 m/s, n=2549): mean -0.12 m/s, SD 3.57 m/s, p95 5.6, p99 9.7, max 22.8. So
+5.9% of genuinely-steady frames read above 5 m/s. The 5 m/s threshold sits only 1.4 sigma above
+the estimator's own noise -- that is why the trigger produced 27 false arms and why 53% of the
+95 events were false. It is not a tuning problem, it is a signal-to-noise problem.
+
+Separation is poor at every threshold:
+
+  threshold   % steady above (false)   % real closures above (hit)
+     5 m/s            5.9%                        70.2%
+     7 m/s            2.9%                        59.4%
+     9 m/s            1.4%                        45.0%
+    11 m/s            0.6%                        32.5%
+
+Worse, during a genuine hard closure (true rate >8 m/s) the p5 of the measured rate is -2.1 m/s:
+5% of the time the estimator reads the lead as OPENING while it is really closing hard.
+
+Lengthening the window helps the noise but costs hits and adds lag:
+
+  window   noise SD   % steady >5 m/s   % real closures >5 m/s
+  0.5 s      4.45          9.3%                75.2%
+  1.0 s      3.57          5.9%                70.2%
+  2.0 s      2.72          3.4%                66.3%
+  3.0 s      2.32          2.1%                56.6%
+
+CONCLUSION, reinforcing 2026-09-03 (b): a flat rate threshold on this signal cannot be made
+reliable by tuning, because the estimate's noise is the same order as the threshold. The deployed
+gate avoids this not by measuring rate better but by requiring the condition to PERSIST
+(HOT_PERSIST_S = 0.5 s continuously) and by scaling with distance via a_req = v^2/(2d). Persistence
+is what buys the signal-to-noise back: independent noise excursions rarely survive 10 consecutive
+frames. That is a structural argument for the existing design, now quantified.
