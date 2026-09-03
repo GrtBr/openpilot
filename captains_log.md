@@ -5872,3 +5872,49 @@ signal there, the recommended filter improves it measurably, and a persistence-g
 acceptance would add ~0.9 s of early warning about once an hour. The 139.11 m model ceiling and the
 confidence collapse above ~120 m are unchanged -- they simply sit further out than the operating
 band this reframing targets.
+
+## 2026-09-03 (f) — should the sub-gate detection go into hook 11 now? MEASURED: NO, it is INERT.
+## Recommendation: ship the filter, not the gate change.
+
+Rather than argue this, ran it end to end. Method: promote sub-gate model detections
+(P < prob <= 0.5, 110-140 m, held H frames) to `present` in the frame stream, then run the SAME
+`fa.arms_for` gate code used everywhere else, so the baseline matches by construction.
+
+TWO EARLIER ATTEMPTS AT THIS TEST WERE WRONG AND WERE DISCARDED -- recorded so the mistake is not
+repeated. The first mapped radar frames to model frames by proportional index (i*m/n) instead of by
+timestamp; the second re-implemented the arm gate inline and reproduced only 8 of the known 12
+baseline arms. Neither result was reported. A harness that cannot reproduce the baseline cannot
+measure a delta -- always assert the baseline first.
+
+RESULT (5.63 h, baseline verified at 12 real / 0 false):
+
+  config                          real  false   frames promoted
+  baseline (nothing promoted)       12      0            0
+  prob>0.20 held 0.25 s             12      0           37
+  prob>0.30 held 0.25 s             12      0            5
+  prob>0.20 held 0.50 s             12      0            4
+  prob>0.10 held 0.25 s             12      0          195
+
+Not one arming decision changes, at any setting, including the most permissive. It is not risky --
+it is INERT.
+
+WHY: hook 11 requires PRESENCE_PERSIST_S (0.30 s) + HOT_PERSIST_S (0.50 s) = 0.80 s of CONTINUOUS
+presence carrying a sustained closing signal. After promotion the median contiguous presence run is
+0.35 s, and only 66-69 runs in 5.63 h reach 0.80 s -- essentially the same ones that already existed.
+The sub-gate detections are short, isolated flickers of confidence; they never assemble into a run
+long enough to matter. The ~0.9 s of "early warning" measured in the track-before-detect audit is
+real at the DETECTION level but is entirely consumed by hook 11's own persistence requirements.
+
+RECOMMENDATION:
+  1. DO NOT add sub-gate acceptance to hook 11. Measured as zero-effect over 5.63 h. Any benefit
+     would require ALSO relaxing hook 11's persistence, which is the one mechanism the SNR analysis
+     (entry (c): rate noise 4.2-7.6 m/s at range vs a 5 m/s threshold) says is load-bearing.
+     Relaxing it to chase a 0.9 s detection gain would trade the thing that makes the gate work.
+  2. DO ship the filter -- hampel7 -> RangeRate(.20,.008). Validated over 5.63 h and 19 dirty
+     episodes: better than stock on RMS (0.89 vs 1.36 m), on the FCW emergency worst-case
+     (6.30 vs 6.75 m), and 51x less flicker than the raw signal the HUD draws. In the >110 m band
+     specifically it is 25% better than stock. Same arm count, +0.20 s timing, 1 false arm in 5.63 h.
+  3. HUD ghost marker for 0.2 < prob < 0.5 remains available and zero-risk -- it is the only place
+     the sub-gate signal can be used without touching control.
+
+More data would not change (1): the effect is structurally zero, not statistically uncertain.
