@@ -5460,3 +5460,80 @@ Drives 143/144/14b never pulled -- comma4 went offline; not needed, the sample i
 STILL NOT IMPLEMENTED. Proposed placement unchanged: one fork class in openpilot/grt/,
 instantiated in hook 11 (plannerd) and in mici `model_renderer.py` via one-line hooks, active
 above 50 m (blend 40-60 m). radard and the stock MPC untouched.
+
+## 2026-09-03 (later) — REFRAMED: this is a FLICKER investigation, not a hook 11 investigation.
+## Benchmark rebuilt accordingly. Recommendation changes to median-9 + alpha 0.30 + slope velocity.
+
+Operator correction: "This investigation is not about hook 11 firing but about flickering. The
+6:20+ routes were driven on manual throttle to just keep lead on radar in as far distance as
+possible. The theory was that it will be a dirty signal sample we can use for testing new
+algorithms on." That invalidated the harness: `false_arms.py` gated on hook 11 eligibility
+(engaged, no pedal), which DISCARDS a manual-throttle sample -- exactly the data that was
+deliberately produced. The plan worked: those runs are among the dirtiest in the whole corpus
+(drive 163 t+1531 s: 5.5 impossible jumps/s; drive 164 t+150 s: 6.5/s).
+
+`analysis/lead_filter/test.py` rewritten as a pure flicker benchmark: episodes found ANYWHERE,
+no engagement/pedal gating (19 episodes, 604 s, 2411 physically impossible jumps in the raw
+signal). Scored against a non-causal reference (centred Hampel -> median -> mean). Metrics:
+impossible jumps surviving in the OUTPUT, total variation vs raw, lag (shift minimising RMS),
+RMS and 95th-percentile error after removing that lag, and step response to genuine lead swaps.
+Census: 19.8% of ALL far-lead frames move >3 m in one 20 Hz frame; at 20 Hz a real lead cannot
+move >1.5 m even closing at 30 m/s, so all of those are measurement error.
+
+Three findings that changed the design:
+
+1. **The clamp is dead, the rejection gate is dead too.** Innovation rejection (coast on the
+   prediction when a sample implies impossible motion) diverges: 929 ms lag, RMS 5.35 m. Both
+   forms of "gate the innovation" are now rejected on measurement.
+
+2. **A metric artifact nearly produced a false alarm.** Fast tunings appeared to take >4 s to
+   settle after a lead swap. Inspecting the case showed the "step" was the start of a continuous
+   104 -> 55 m approach, where "settle at the post-step level" is meaningless -- the RAW signal
+   scores 4.00 s there too. Restricting step tests to swaps that are stable before AND after
+   (36 found, 27 to a closer lead) reversed the verdict: the fast tunings settle in 0.85-0.90 s
+   worst case versus stock's 1.00 s. Faster, not slower.
+
+3. **Position and velocity fight inside one alpha-beta filter.** A high alpha tracks position
+   tightly, which SHRINKS the innovation r = z - x_pred, and the rate term is driven by exactly
+   that r (v += beta/dt * r). So improving position starves velocity: median-9 with alpha .30 /
+   beta .003 gave a superb position (RMS 0.39 m vs stock 1.36) but hook 11 then caught only 5 of
+   stock's 12 real arms, ~0.9 s late. Fix: take velocity from a least-squares SLOPE of the
+   filtered position history (`MedSlope`) instead of from the innovation. Position quality then
+   helps velocity instead of starving it.
+
+Benchmark, 19 episodes / 604 s (impossible jumps per second in the output; lag and RMS are
+lag-compensated; opt95 = 95th pct of reading FARTHER than truth, the unsafe direction):
+
+  signal                     imposs/s   tv%   lag ms   rms m   opt95 m
+  raw (what the HUD draws)      3.99   100.0      0     2.21     3.63
+  stock RR (.10,.003)           0.00    15.7    226     1.36     1.97
+  KF xStd (sshane #36965)       0.01    10.0    518     2.27     3.26
+  hampel7 -> RR                 0.00    15.1    255     1.36     1.91
+  med5 -> RR                    0.00    13.5    331     1.33     1.85
+  med9 -> RR(.25,.012)          0.03    16.6    297     0.54     0.71
+  med9 + a.30 + slope-v         0.03    16.5    300     0.32     0.52   <-- recommended
+  med9 + a.40 + slope-v         0.04    18.0    250     0.30     0.47
+
+On the operator's three deliberate manual-throttle runs specifically (the dirtiest data):
+
+  run                     raw imposs   stock RMS   med9+a.30 RMS   stock p95   med9+a.30 p95
+  163 t+1531 s (34.7 s)      191          1.04 m      0.31 m         1.98 m       0.71 m
+  164 t+150 s  (24.6 s)      161          1.43 m      0.40 m         2.77 m       0.81 m
+  164 t+236 s  (41.1 s)      202          1.36 m      0.29 m         2.55 m       1.02 m
+
+All impossible jumps removed in every case; 3-4x more accurate than stock's filter, at +50 ms lag.
+
+**Recommendation: median-9 -> alpha 0.30 position, velocity from a 15-frame least-squares slope**
+(`MedSlope` in `analysis/lead_filter/lead_filters.py`). Hampel was tested thoroughly and is NOT
+better than a plain median here (RMS 1.36 vs 1.31, and it leaks more): the noise is dense enough
+that Hampel's "leave clean samples alone" advantage does not materialise. sshane's xStd Kalman is
+the worst of the filtered options on this car (RMS 2.27, lag 518 ms), consistent with 2026-09-02.
+
+CAVEAT, and it is the open question: with slope velocity, hook 11 arms 0.44-0.50 s EARLIER and
+catches 13-14 real arms vs stock's 12, but adds 5-6 false arms over 5.63 h. So a single shared
+instance is NOT yet safe for control. Two options, undecided: (a) two instances -- this filter
+for the published/displayed distance, stock's existing `_RangeRateFilter` untouched inside hook
+11; or (b) retune the slope window/arming gate to remove the false arms. Option (a) is the
+conservative one and needs no hook 11 change at all.
+
+STILL NOT IMPLEMENTED.
