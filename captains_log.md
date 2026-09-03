@@ -5588,3 +5588,64 @@ only candidate that beats stock on accuracy and safety simultaneously.
 Unchanged caveat: slope velocity still adds false hook 11 arms, so the conservative deployment
 remains two instances -- this filter for the published/displayed distance, stock's
 `_RangeRateFilter` left untouched inside hook 11. STILL NOT IMPLEMENTED.
+
+## 2026-09-03 (final) — strict physics bound + the FCW emergency overturn the median entirely.
+## FINAL RECOMMENDATION: hampel7 -> RangeRate(alpha .20, beta .008). Beats stock on every axis.
+
+Operator tightened the physics: a genuine closure is >5 m/s AND < v_ego (a same-direction lead
+closes at exactly v_ego only when it is fully stopped; faster is not one object). My earlier
+bound used v_ego + 3.0, which was sloppy. Re-counted over 8725 far-lead 1-second windows:
+
+  closing >5 m/s and < v_ego  (valid)      1577   18.1%
+  closing >5 m/s but >= v_ego (impossible)   75    0.9%
+  valid-band rate: median 7.6, p90 14.0, p99 21.4, max 23.0 m/s
+  rate / v_ego: p50 0.42, p90 0.71, p99 0.94, max 1.00  (1.0 = lead fully stopped)
+
+57 windows close at >85% of v_ego -- a nearly stationary lead -- and they are all one event:
+drive 158 t=950-952 s, closing 20-22 m/s at 78-88 km/h. That is the 09:57 FCW emergency. So the
+fastest genuine closure in the whole corpus IS the emergency, which makes it the decisive test.
+
+**Tested every candidate on it (window t=949-985 s, 105 -> 3 m, 89 -> 7 km/h). Metric: the most
+the filter ever reads the lead FARTHER than it truly is, during the closure.**
+
+  raw                        4.59 m
+  stock RR (.10,.003)        6.75 m
+  hampel7 -> RR(.30,.018)    5.73 m   safer than stock
+  hampel7 -> RR(.20,.008)    6.30 m   safer than stock
+  med5 + a.30 + slope-v      9.72 m   WORSE than stock by 3.0 m
+  med9 + a.30 + slope-v     12.29 m   WORSE than stock by 5.5 m
+
+This reverses the 2026-09-03 entries above. The aggregate mean over all fast closes had med5
+looking marginally SAFER than stock (1.74 vs 1.97 m); the tail at the one moment that matters
+says the opposite. A median delays EVERY sample, so it lags precisely during a real approach --
+and with 18% of far-lead seconds closing faster than 5 m/s, that is not a rare corner. Hampel
+does not have this failure: it substitutes only samples it flags as outliers and passes clean
+samples through untouched, so a genuine ramp is not delayed at all.
+
+**hampel7 -> RangeRate(alpha 0.20, beta 0.008) is better than stock on every axis measured:**
+
+  metric                                   stock    hampel7->(.20,.008)
+  FCW emergency, max reads-too-far         6.75 m   6.30 m   safer
+  RMS vs reference, 19 dirty episodes      1.36 m   0.89 m   35% better
+  flicker leaked (604 s of dirty data)        3       41     vs 2112 raw = 51x less than the HUD
+  hook 11 real arms / 5.63 h                 12       12     no arm missed
+  hook 11 false arms / 5.63 h                  0        1
+  hook 11 arm timing                        0.00 s   +0.20 s earlier
+
+On the operator's three deliberate manual-throttle runs it is strictly better than stock on both
+accuracy and flicker:
+
+  run                    raw jumps   stock RMS / p95    hampel RMS / p95   hampel jumps
+  163 t+1531 s (35 s)       191       1.04 / 1.98 m      0.79 / 1.56 m         0
+  164 t+150 s  (25 s)       161       1.43 / 2.77 m      1.10 / 2.17 m         0
+  164 t+236 s  (41 s)       202       1.36 / 2.55 m      0.89 / 1.76 m         0
+
+Because it costs only 1 false arm in 5.63 h (against 5-6 for the slope-velocity variants), a
+SINGLE shared instance is defensible here -- the two-instance split proposed earlier is no longer
+required, though it remains the conservative option.
+
+Superseded by this entry: the median-9 recommendation and the median-5 revision above. Retained
+as a record of why -- both looked correct on aggregate metrics and failed the emergency tail.
+Hampel had been dismissed earlier on aggregate RMS alone; that dismissal was wrong.
+
+STILL NOT IMPLEMENTED.
