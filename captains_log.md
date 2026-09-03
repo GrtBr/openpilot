@@ -5918,3 +5918,57 @@ RECOMMENDATION:
      the sub-gate signal can be used without touching control.
 
 More data would not change (1): the effect is structurally zero, not statistically uncertain.
+
+## 2026-09-03 (g) — IMPLEMENTED the Hampel filter, with A/B shadow logging. Display path live,
+## hook 11's arming path deliberately UNCHANGED. Not yet deployed (comma4 offline).
+
+Three files added/changed, all fork-owned or single-seam:
+
+* NEW `openpilot/grt/lead_filter.py` -- `Hampel` (n=7, k=3.0, floor=1.5 m) -> `RangeRate(.20,.008)`,
+  plus `filtered_dRel(index, present, dRel)` for the UI. NO module-level openpilot imports, on
+  purpose: the UI process does not import `openpilot.grt` today and `hooks.py` pulls
+  `selfdrive.car.cruise` at import time; dragging plannerd's dependency graph into the UI risks
+  blanking the HUD on a bad boot. The docstring records the rejected alternatives (clamp,
+  rejection gate, xStd Kalman) with the measurement that killed each, so they are not retried.
+
+* `openpilot/selfdrive/ui/mici/onroad/model_renderer.py` -- one sentinel-wrapped GRT-MOD block in
+  `_update_leads`, hook 11c. DISPLAY ONLY. Falls back to the raw value on any exception, so the
+  failure mode is exactly today's behaviour.
+
+* `openpilot/grt/hooks.py` -- hook 11b, `observe_lead_filter()`, called from the existing
+  `far_lead_candidates` shim. OBSERVE ONLY: returns nothing, can change no command. Runs the old
+  and new filters on identical input plus a MIRROR of far_lead's arming gate (constants read live
+  from far_lead, never copied, so it cannot drift), and logs arm deltas always, position
+  disagreements over 2 m, and a 30 s heartbeat. Rotating log at `/data/media/0/grt/lead_filter.log`,
+  4 MB cap, rollover RECORDED as a line -- copied from set_speed.py rather than invented, because
+  the sibling `cruise_log.py` recorder hit a hard 50 MB cap and latched off SILENTLY, and the stale
+  rows it kept serving made a replay claim a 110 km/h set speed on a road posted 60.
+
+WHY THE ARMING PATH IS NOT SWITCHED OVER (advisor-endorsed, and it reverses the direction implied
+two turns earlier). Measured over 5.63 h / 12 real arm events, the new filter in the arming path
+scores 12 real / 1 FALSE against the deployed 12 / 0, buying +0.20 s of timing and no extra real
+arms. One extra false brake per 5.6 h is a degradation of the base system for a control gain
+inside the measurement noise, and the fork's first rule is that a feature must never degrade the
+base system -- the same reasoning already applied to reject the sub-gate trigger. The filter's
+unambiguous, control-free win is the display. `_SHADOW_ONLY = True` in hooks.py marks the switch;
+flipping it needs a deliberate decision and fresh numbers.
+
+VALIDATION ON THIS BOX (comma4 offline, so no on-device run yet):
+  * new suite `openpilot/grt/tests/test_lead_filter.py` -- 24/24 pass. Covers impulse rejection,
+    clean-sample passthrough, sustained-step tracking (a real lead change must not be rejected
+    forever), absence reset, per-lead isolation, and no-drift on constant input.
+  * existing suites unchanged: test_far_lead 29/29, test_hooks 44/44, test_scc_map 59/59,
+    test_schema_conformance 34/34 fields.
+  * SHADOW REPLAYED AGAINST A REAL DRIVE (drive 15e, 52246 frames, 43.5 min): the shadow's
+    `arms_old = 2` reproduces the offline `fa.arms_for` count for that drive EXACTLY, which is the
+    check that says the on-device mirror matches the analysis. arms_new = 2 on the same drive.
+    Log volume 0.010 MB per engaged hour -> ~414 h before the first rollover.
+
+HOW TO EVALUATE IT LATER, from `/data/media/0/grt/lead_filter.log`:
+  `ev=arm` lines carry `old`/`new` (0/1 each) plus both filters' x and v at that instant -- count
+  them to get the real arm-timing and false-arm delta on actual driving. `ev=diff` lines are every
+  moment the two filters disagreed by >2 m. `ev=hb` proves the shadow was alive on a quiet drive.
+  Absence of `ev=rotated` confirms nothing was silently dropped.
+
+NOT YET DEPLOYED. Deploy needs comma4 reachable; note it is a prebuilt branch, so this is a
+Python-only change (no scons, no cereal edits) and requires a reboot, not just an ignition cycle.

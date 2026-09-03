@@ -166,8 +166,24 @@ class ModelRenderer(Widget):
     leads = [radar_state.leadOne, radar_state.leadTwo]
 
     for i, lead_data in enumerate(leads):
+      # GRT HOOK 11c START -- flicker filter on the DISPLAYED lead distance.
+      # This car is vision-only (no radar): radard publishes the model's raw depth estimate with
+      # no filtering, and 27.8% of far-lead frames move >3 m in one 20 Hz frame, which is
+      # physically impossible. That jitter is what gets drawn here. See grt/lead_filter.py.
+      # Called for EVERY lead every frame, including absent ones, so the filter resets on a
+      # dropout instead of smoothing across it. Display only -- reaches neither planner nor car,
+      # and falls back to the raw value on any error (i.e. to today's behaviour).
+      _present = bool(lead_data and lead_data.present)
+      try:
+        from openpilot.grt.lead_filter import filtered_dRel
+        _fd = filtered_dRel(i, _present, lead_data.dRel if _present else 0.0)
+      except Exception:
+        _fd = None
+      # GRT HOOK 11c END
       if lead_data and lead_data.present:
         d_rel, y_rel, v_rel = lead_data.dRel, lead_data.yRel, lead_data.vRel
+        if _fd is not None:
+          d_rel = _fd
         idx = self._get_path_length_idx(path_x_array, d_rel)
 
         # Get z-coordinate from path at the lead vehicle position

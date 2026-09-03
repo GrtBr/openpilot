@@ -135,7 +135,12 @@ knows the target cannot win; the component that wins does not know the target.
                                         design, including why its call needs a `stock_min`
                                         argument the other hooks do not take.
 """
+import json
+import os
+import time
+
 from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
+from openpilot.grt.registry import GRT_CONFIG_DIR
 
 _scc = None
 _scc_broken = False          # set if the controller cannot even be constructed
@@ -699,11 +704,184 @@ def far_lead_candidates(sm, v_ego: float, stock_min: float) -> list:
     cs = sm['carState']
     driver_input = bool(cs.gasPressed or cs.brakePressed)
     lead = sm['radarState'].leadOne
+    observe_lead_filter(lead, v_ego)       # hook 11b: A/B shadow, observe-only, never returns a value
     return fl.step(bool(lead.present), float(lead.dRel), float(lead.vRel), float(v_ego),
                   relaxed, long_active, driver_input, float(stock_min))
   except Exception:
     _log_exception("far_lead_candidates")
     return []
+
+
+# ----------------------------------------------------------------------------------------
+# LEAD-FILTER SHADOW (A/B instrumentation, 2026-09-03). NOT a control path.
+# ----------------------------------------------------------------------------------------
+# Runs grt/lead_filter.py alongside hook 11's DEPLOYED `_RangeRateFilter` on the same input and
+# records where they differ, so the filter's real-world value can be judged from a drive instead
+# of from replay alone. Hook 11's own filter and arming are UNTOUCHED: this observes, it never
+# returns a value into the planner.
+#
+# WHY SHADOW RATHER THAN SWITCHING THE ARMING PATH OVER. Measured across 5.63 h / 12 real arm
+# events, the new filter in the arming path scores 12 real / 1 FALSE against the deployed
+# 12 real / 0 false, for +0.20 s of timing and no extra real arms. One extra false brake per
+# 5.6 h is a degradation of the base system for a control gain inside the measurement noise, and
+# the fork's first rule is that a feature must never degrade the base system. The filter's
+# unambiguous win is the DISPLAY (raw dRel has impossible jumps on 27.8% of far-lead frames;
+# filtered is ~0), which is where it is actually deployed. Flip _SHADOW_ONLY to False only with a
+# deliberate decision and fresh numbers.
+_SHADOW_ONLY = True
+
+_LEAD_LOG = os.path.join(GRT_CONFIG_DIR, "lead_filter.log")
+_LEAD_LOG_MAX_BYTES = 4 * 1024 * 1024      # 4 MB live, 8 MB worst case with one rolled file
+_LEAD_DISAGREE_M = 2.0                     # log only when the two filters differ by more than this
+_LEAD_HEARTBEAT_S = 30.0                   # so a quiet drive still proves the shadow was running
+
+_lead_shadow = None
+_lead_shadow_broken = False
+
+
+def _lead_write(record: dict) -> None:
+  """Append one JSON line, rolling over at _LEAD_LOG_MAX_BYTES and RECORDING that it rolled.
+
+  Copied deliberately from set_speed.py rather than invented: the sibling `cruise_log.py`
+  recorder had a hard 50 MB cap and, on reaching it, latched off SILENTLY -- every later row was
+  stale, and that stale data made a replay claim a 110 km/h set speed on a road posted 60. A cap
+  that stops writing without saying so is worse than no cap.
+  """
+  try:
+    rolled = False
+    try:
+      if os.path.getsize(_LEAD_LOG) >= _LEAD_LOG_MAX_BYTES:
+        os.replace(_LEAD_LOG, _LEAD_LOG + ".1")
+        rolled = True
+    except FileNotFoundError:
+      pass
+    os.makedirs(GRT_CONFIG_DIR, exist_ok=True)
+    with open(_LEAD_LOG, "a") as f:
+      if rolled:
+        f.write(json.dumps({"ev": "rotated", "why": f"reached {_LEAD_LOG_MAX_BYTES} bytes"}) + "\n")
+      f.write(json.dumps(record) + "\n")
+  except OSError:
+    pass
+
+
+class _LeadShadow:
+  """Old vs new filter on identical input, plus what hook 11's ARMING would have done with each.
+
+  The arming copy matters: filtered-position differences are a proxy, but the only thing that
+  answers "did it improve the car" is whether the arm decision changes. Constants are READ from
+  far_lead so this cannot drift from the deployed gate.
+  """
+
+  def __init__(self):
+    from openpilot.grt import far_lead as fl
+    from openpilot.grt.lead_filter import LeadFilter
+    self.fl = fl
+    self.old = fl._RangeRateFilter(fl.ALPHA, fl.BETA)
+    self.new = LeadFilter()
+    self.old_gate = self._fresh()
+    self.new_gate = self._fresh()
+    self.n = 0
+    self.last_hb = 0.0
+    self.arms_old = 0
+    self.arms_new = 0
+
+  @staticmethod
+  def _fresh():
+    return {"present_s": 0.0, "hot": 0.0, "anchor": None, "armed": False}
+
+  def _gate(self, g, present, dRel, v_filt):
+    """Mirror of far_lead.step()'s arming branch. Returns True on the frame it would arm."""
+    fl = self.fl
+    if not present or v_filt is None:
+      g.update(self._fresh())
+      return False
+    if g["armed"]:
+      return False
+    g["present_s"] += fl.DT_MDL
+    if g["present_s"] < fl.PRESENCE_PERSIST_S:
+      return False
+    a_req = (v_filt ** 2) / (2.0 * max(dRel - fl.STOP_MARGIN, 1.0))
+    if a_req > fl.HOT_A_REQ and v_filt <= -fl.HOT_CLOSING_RATE:
+      if g["hot"] == 0.0:
+        g["anchor"] = dRel
+      g["hot"] += fl.DT_MDL
+    else:
+      g["hot"] = 0.0
+      g["anchor"] = None
+      return False
+    if g["hot"] >= fl.HOT_PERSIST_S and g["anchor"] is not None and g["anchor"] > fl.ARM_MIN_DIST:
+      g["armed"] = True
+      return True
+    return False
+
+  def step(self, present: bool, dRel: float, v_ego: float) -> None:
+    self.n += 1
+    if present:
+      if self.old.x is None:
+        self.old.reset(dRel)
+      v_old = self.old.update(dRel)
+      x_old = self.old.x
+      x_new, v_new = self.new.update(True, dRel)
+    else:
+      self.old.x = None
+      self.old.v = 0.0
+      self.new.reset()
+      x_old = v_old = x_new = None
+      v_new = 0.0
+
+    a_old = self._gate(self.old_gate, present, dRel, v_old)
+    a_new = self._gate(self.new_gate, present, dRel, v_new if x_new is not None else None)
+    self.arms_old += int(a_old)
+    self.arms_new += int(a_new)
+
+    # Log an ARM DELTA always; a position disagreement only when it is material; otherwise a
+    # slow heartbeat. Never one line per frame -- this is a 20 Hz loop.
+    now = time.monotonic()
+    if a_old or a_new:
+      _lead_write({"ev": "arm", "t": round(now, 2), "old": int(a_old), "new": int(a_new),
+                   "dRel": round(float(dRel), 2), "v_ego": round(float(v_ego), 2),
+                   "x_old": None if x_old is None else round(x_old, 2),
+                   "x_new": None if x_new is None else round(x_new, 2),
+                   "v_old": None if v_old is None else round(v_old, 2),
+                   "v_new": round(v_new, 2)})
+    elif present and x_old is not None and x_new is not None and abs(x_old - x_new) > _LEAD_DISAGREE_M:
+      _lead_write({"ev": "diff", "t": round(now, 2), "dRel": round(float(dRel), 2),
+                   "x_old": round(x_old, 2), "x_new": round(x_new, 2),
+                   "d": round(x_new - x_old, 2), "v_ego": round(float(v_ego), 2)})
+    elif now - self.last_hb >= _LEAD_HEARTBEAT_S:
+      self.last_hb = now
+      _lead_write({"ev": "hb", "t": round(now, 2), "frames": self.n,
+                   "arms_old": self.arms_old, "arms_new": self.arms_new,
+                   "present": bool(present), "dRel": round(float(dRel), 2)})
+
+
+def _lead_shadow_singleton():
+  global _lead_shadow, _lead_shadow_broken
+  if _lead_shadow_broken:
+    return None
+  if _lead_shadow is None:
+    try:
+      _lead_shadow = _LeadShadow()
+    except Exception:
+      _lead_shadow_broken = True
+      _log_exception("lead_filter shadow construction; A/B logging disabled")
+      return None
+  return _lead_shadow
+
+
+def observe_lead_filter(lead, v_ego: float) -> None:
+  """Hook 11b. OBSERVE ONLY -- returns nothing and can change no command.
+
+  Called from far_lead_candidates, which already holds `lead`. Any failure latches the shadow off
+  rather than repeating; hook 11 itself is unaffected either way.
+  """
+  try:
+    sh = _lead_shadow_singleton()
+    if sh is None:
+      return
+    sh.step(bool(lead.present), float(lead.dRel), float(v_ego))
+  except Exception:
+    _log_exception("observe_lead_filter")
 
 
 def ramp_relaxed_accel(a_target: float, sm, long_active: bool) -> float:
