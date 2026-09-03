@@ -5819,3 +5819,56 @@ EXPECTATION RESET, stated plainly: the original goal "lock on a small lead >115 
 possible" is bounded by the model, not by our filtering. At 110-120 m only 28.7% of any-signal
 frames clear the gate; above 139 m the model emits nothing at all. The achievable version is
 "~0.8 s earlier at 100-130 m, with about one false lead per hour" -- not a lock at 115 m+.
+
+## 2026-09-03 (e) — same question re-run at the >110 m boundary (operator: ">120 m is too few
+## frames"). 14x more data, and it changes the verdict from "null" to "thin but real".
+
+At >120 m the published signal is 19 frames / 1.0 s in 5.63 h -- unanalysable. At >110 m it is
+271 frames / 13.6 s across 9 distinct runs. Still thin, but enough to say something.
+
+PUBLISHED radarState.leadOne by band:
+
+  band m     frames  seconds  runs   raw impossible   pos err SD   rate noise SD
+   90-100      692     34.6     17       40.0%          2.58 m       5.24 m/s
+  100-110      360     18.0     11       41.9%          2.31         7.56
+  110-120      252     12.6      9       30.6%          1.47         4.20
+  120-130       19      1.0      1        0.0%          0.51          --
+  130+           0
+
+Counterintuitive at first: 110-120 m is CLEANER than 100-110 m. Explained by a selection effect --
+the gate admits only the confident tail at range. Median model prob of the frames that actually get
+published: 0.852 at 90-100 m, 0.713 at 100-110, 0.627 at 110-120, 0.480 at 120-130, with the p25 at
+110-120 sitting exactly on the 0.5 gate. So what survives to be published at 110 m+ is already the
+model's best work; the noise there is low because the doubtful frames were removed, not because the
+model is better at range.
+
+FILTER PERFORMANCE RESTRICTED TO >110 m (271 frames, indicative only):
+
+  signal                  rms m   p95 |err|   max err   impossible jumps
+  raw (what the HUD draws) 2.71      5.22      12.33          77
+  stock RR (.10,.003)      1.93      4.34       6.06           0
+  hampel7 -> (.20,.008)    1.44      3.39       4.91           0
+  med5 -> RR               2.22      5.05       6.59           0
+  med9 + a.30 + slope-v    1.98      4.52       6.67           0
+
+The recommendation from entry (2026-09-03 final) holds in this band too and by a wider margin:
+hampel7 -> RR(.20,.008) is 25% better than stock on RMS (1.44 vs 1.93) and 47% better than raw,
+with zero impossible jumps against raw's 77. Nothing here changes the choice of filter.
+
+TRACK-BEFORE-DETECT AUDIT re-run at 110-140 m (sub-gate 0.1 < prob <= 0.5):
+
+  prob>0.10, no persistence     67 episodes   33% confirmed   median lead 0.60 s
+  prob>0.20, no persistence     36            56%                        0.45 s
+  prob>0.20, sustained 0.25 s    8            75%                        0.90 s
+  prob>0.30, sustained 0.25 s    2            50%                        0.50 s
+
+Same shape as the 100-130 m audit: persistence is what separates signal from noise. The best rule
+(prob>0.20 held 0.25 s) is 75% real and buys a median 0.90 s -- marginally better lead time than the
+100-130 m version's 0.80 s -- but fires only 8 times in 5.63 h, i.e. ~1.4 times per hour, of which
+~1 is real. That is a genuine but RARE benefit.
+
+REVISED CONCLUSION vs entry (d): ">110 m" is not a null problem the way ">120 m" is. There is real
+signal there, the recommended filter improves it measurably, and a persistence-gated sub-threshold
+acceptance would add ~0.9 s of early warning about once an hour. The 139.11 m model ceiling and the
+confidence collapse above ~120 m are unchanged -- they simply sit further out than the operating
+band this reframing targets.
