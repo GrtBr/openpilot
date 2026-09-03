@@ -5649,3 +5649,54 @@ as a record of why -- both looked correct on aggregate metrics and failed the em
 Hampel had been dismissed earlier on aggregate RMS alone; that dismissal was wrong.
 
 STILL NOT IMPLEMENTED.
+
+## 2026-09-03 (b) — scrutiny of the 1577 ">5 m/s and < v_ego" windows, and testing that rule as a
+## hook 11 trigger. Verdict: 68% of the events are false, and the rule is worse than the deployed gate.
+
+(a) THE 1577 WINDOWS ARE NOT 1577 EVENTS. Overlapping 1-second windows collapse into 95 distinct
+events (clustered with a 0.5 s gap). Classified against the non-causal reference using sustained
+drop, ego deceleration, post-event recovery, and monotonicity (fraction of frames actually closing
+-- a real approach closes consistently, noise oscillates):
+
+  TRUE closure    30  (32%)
+  FALSE alert     50  (53%)
+  marginal        15  (16%)
+
+The discriminator is DURATION and MAGNITUDE, not peak rate. True closures: drop 4.8-61.6 m,
+typically >10 m, lasting 1.1-6.1 s, monotonicity mostly >0.75. False alerts: drop 1.2-12.9 m,
+typically <9 m, lasting 1.0-2.2 s, and the distance RECOVERS afterwards. Peak rate alone does not
+separate them -- the largest false alert peaks at 14.2 m/s, above 13 of the 30 true closures.
+Full table in the session log; event list saved to analysis/lead_filter/events_5ms.json.
+
+(b) AS A HOOK 11 ARMING TRIGGER (causal: closing rate over the last 1 s of the hampel-filtered
+position, fires when 5 m/s < rate < v_ego). Deployed gate scores 12 real / 0 false over 5.63 h:
+
+  trigger config                       real  false   arm time vs deployed
+  bare (rate>5 & <vEgo)                  35     27        +0.55 s
+  + sustained 0.25 s                     29     20        +0.38 s
+  + sustained 0.50 s                     27     14        +0.21 s
+  + sustained 1.00 s                     15      7        -0.52 s
+  + 0.50 s, lead >50 m                   20     11        +0.21 s
+  + 0.50 s, lead >80 m                    7      1        +0.41 s
+  + 0.50 s, >7 m/s, >50 m                18      7        +0.13 s
+
+No configuration reaches the deployed gate's 12/0. The best-behaved one (0.50 s sustained, lead
+>80 m) catches only 7 of the deployed gate's 12 real arms and -- checked explicitly -- catches
+ZERO real closures the deployed gate misses. It is a strict subset, not a complement, so there is
+no value in OR-ing it in either. Its one merit: on the 7 it does catch it arms 0.41 s earlier.
+
+WHY, structurally: a flat 5 m/s threshold is DISTANCE-BLIND. The deployed gate uses
+a_req = v_filt^2 / (2 * (dRel - STOP_MARGIN)), which demands a higher closing rate when the lead
+is far (there is more time to act) and less when it is close. At 100 m, 5 m/s closing is
+a_req 0.13 m/s^2; at 50 m the same 5 m/s is 0.28. So the flat rule fires too readily at long range
+-- which is exactly where 50 of the 95 events are false -- and is insensitive up close. The
+deployed a_req form is already the correct shape; the operator's rule is a useful ANALYSIS filter
+for finding real closures in a log, not a better trigger.
+
+DISCREPANCY, recorded rather than resolved: in this whole-drive replay the deployed gate DOES arm
+at the 14:57 incident (t=1702.5 s, anchor 83.6 m, hot streak 1.85 s), whereas the 2026-09-01
+segment-scoped diagnosis found anchor 69.82 m and no arm ("ARM_MIN_DIST anchor-freeze"). The two
+extractions disagree because presence dropouts fall differently at segment boundaries, which
+moves where the hot streak starts and therefore the anchor. The earlier anchor-freeze conclusion
+may be an artifact of the 6-segment window. Not re-litigated here; flagged so it is not treated
+as settled.
