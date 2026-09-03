@@ -5753,3 +5753,69 @@ gate avoids this not by measuring rate better but by requiring the condition to 
 (HOT_PERSIST_S = 0.5 s continuously) and by scaling with distance via a_req = v^2/(2d). Persistence
 is what buys the signal-to-noise back: independent noise excursions rarely survive 10 consecutive
 frames. That is a structural argument for the existing design, now quantified.
+
+## 2026-09-03 (d) — advisor consultation on improving dRel beyond 120 m under SNR constraints.
+## RESULT: >120 m is a NULL PROBLEM. The model has a hard 139 m ceiling and no confidence there.
+
+Characterised the regime before consulting (all 8 drives, 5.63 h, 405054 modelV2 frames). This is
+what the model actually emits on `leadsV3[0]`, independent of any filtering we do:
+
+  x[0] band   frames   frames prob>0.10   of those, % >0.5   median prob
+   40-90 m     27870          9648             ~90%             0.94-0.99
+   90-100       5613          1139              73.7%             0.805
+  100-110       4974           857              47.7%             0.460
+  110-120       8495           894              28.7%             0.243
+  120-130       6345           224              12.9%             0.178
+  130-140       1153             0                 --                --
+  150+              0             -                  -                 -
+
+  MAX x[0] EVER EMITTED: 139.11 m. Hard ceiling.
+
+Downstream of radard's `lead_prob > 0.5` gate, only 19 frames in 5.63 h ever reach a published
+dRel above 120 m. So "improve dRel measurements >120 m" has a null answer: there is no measurement
+there to improve. No filter, estimator or gate change reaches it -- the ceiling is upstream of
+everything this fork can touch, and moves only with a model retrain or a different sensor.
+
+SNR BY DISTANCE (noise SD of the 1-s closing-rate estimate when the lead is genuinely steady):
+
+  band        rate noise SD   position err SD   raw impossible jumps
+  50-80 m         4.25 m/s        1.85 m              23.4%
+  80-100          4.68            2.44               34.9%
+  100-120         6.36            2.01               37.3%
+
+A 5 m/s closure at 100-120 m therefore has SNR ~0.8. Reaching SNR 3 would need a ~19 m/s threshold
+or a 3-4 s window -- the latter costing exactly the reaction time the feature exists to buy.
+**Conclusion: velocity estimation beyond ~100 m is not viable on this signal.** Only position
+PERSISTENCE ("is a consistent object here") survives at range, which is precisely the shape of the
+deployed gate's 0.5 s hold. Third independent confirmation of that design.
+(Note: 4.25 here vs the 3.57 quoted in entry (c) -- that run required runs of >=80 frames, this one
+>=30. Same conclusion; cite the run conditions with the number.)
+
+THE ONE ANSWERABLE VERSION -- track-before-detect audit of the 100-130 m band. Detections with
+0.1 < prob <= 0.5 are discarded by the gate; do they represent real objects? For each new sub-gate
+episode, is it CONFIRMED (prob>0.5 at a position consistent with the same object closing) within 3 s?
+
+  acceptance rule                       episodes  confirmed  false  median lead gained
+  prob>0.10, no persistence                  93     35 (38%)    58        0.50 s
+  prob>0.20, no persistence                  55     34 (62%)    21        0.35 s
+  prob>0.30, no persistence                  40     26 (65%)    14        0.25 s
+  prob>0.20, sustained 0.25 s                20     15 (75%)     5        0.80 s
+  prob>0.30, sustained 0.25 s                 7      6 (86%)     1        0.80 s
+  prob>0.20, sustained 0.50 s                 6      4 (67%)     2        0.85 s
+
+Bare sub-gate acceptance at prob>0.1 is 78% noise -- the gate is right to reject it. Adding
+persistence flips that: prob>0.20 held 0.25 s is 75% real and buys a median 0.80 s of early
+warning; prob>0.30 held 0.25 s is 86% real but fires only 7 times in 5.63 h. So there IS a real,
+modest early-warning signal below the gate, worth ~0.8 s, at the cost of roughly one false lead
+per hour. NOT a recommendation yet -- it changes what `radarState.leadOne.present` means for the
+stock MPC as well as for hook 11, and that blast radius needs its own decision.
+
+ZERO-RISK ITEM, display only: the HUD draws nothing below the gate. A dimmed "ghost" marker for
+0.2 < prob < 0.5 would give early visual warning at range without touching hook 11, the MPC or the
+published radarState at all. This directly serves the operator's original "so I can visually
+confirm and monitor" requirement.
+
+EXPECTATION RESET, stated plainly: the original goal "lock on a small lead >115 m as quickly as
+possible" is bounded by the model, not by our filtering. At 110-120 m only 28.7% of any-signal
+frames clear the gate; above 139 m the model emits nothing at all. The achievable version is
+"~0.8 s earlier at 100-130 m, with about one false lead per hour" -- not a lock at 115 m+.
