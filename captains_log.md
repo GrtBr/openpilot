@@ -5972,3 +5972,48 @@ HOW TO EVALUATE IT LATER, from `/data/media/0/grt/lead_filter.log`:
 
 NOT YET DEPLOYED. Deploy needs comma4 reachable; note it is a prebuilt branch, so this is a
 Python-only change (no scons, no cereal edits) and requires a reboot, not just an ignition cycle.
+
+## 2026-09-03 (h) — DEPLOYED to comma4 and verified on device. Display filter live, shadow logging.
+
+Device was parked (reachable), up 2 min, tree clean at `8e82486`. Deployed by DIRECT FILE COPY,
+not git: comma4 still has no working GitHub credential (established 2026-09-01), so its history is
+content-verified against origin, never hash-linked.
+
+PRE-FLIGHT, before overwriting anything: md5 of the device's `hooks.py` and `model_renderer.py`
+compared against Pi5's HEAD~1 versions -- both matched exactly, confirming the device had not
+diverged and the deploy was landing on the expected baseline. Four files copied
+(`grt/lead_filter.py`, `grt/tests/test_lead_filter.py`, `grt/hooks.py`,
+`ui/mici/onroad/model_renderer.py`), then md5-verified byte-identical to Pi5 HEAD. `git status` on
+device afterwards showed EXACTLY those four paths and nothing else -- in particular no cereal file
+was touched, per the standing rule in CLAUDE.md.
+
+ON-DEVICE TESTS BEFORE COMMIT (via /usr/local/venv):
+  test_lead_filter ALL PASS | test_far_lead 29/29 | test_hooks 44/44 | test_scc_map 59/59 |
+  test_schema_conformance 34/34 fields.
+
+REAL-IMPORT CHECK on the device interpreter: hampel n=7 k=3.0 floor=1.5, alpha=0.2, beta=0.008;
+a 30 m impulse fed after a steady run returned 100.06 (rejected, NOT 70); `_SHADOW_ONLY=True`;
+log path `/data/media/0/grt/lead_filter.log`, 4 MB cap.
+
+Committed on device as `733f0d0` (local-only hash by design), then REBOOTED -- required, because
+this is a prebuilt branch and Python changes are not picked up by an ignition cycle alone.
+
+POST-REBOOT VERIFICATION (back in 70 s):
+  * plannerd, selfdrived, card and ui.py all running.
+  * grt exceptions in this boot: 0. Tracebacks/ImportError/ModuleNotFound in this boot: 0.
+    That last one matters most -- hook 11c runs inside the UI process, and a bad import there
+    would have blanked the HUD.
+  * `/data/media/0/grt/lead_filter.log` created and writing. Heartbeats land at exactly 30 s
+    (t=30.71, 60.72, 90.77, 120.81) with the frame counter advancing 600 per 30 s = 20 Hz, which
+    confirms hook 11's shim is being called every frame and the shadow is observing it.
+    `present: false`, `arms_old: 0`, `arms_new: 0` -- correct for a parked car with no lead.
+
+WHAT TO DO AFTER THE NEXT DRIVE: pull `/data/media/0/grt/lead_filter.log`. `ev=arm` lines give the
+real arm-timing and false-arm delta between the deployed filter and the new one; `ev=diff` lines
+are every moment they disagreed by more than 2 m; `ev=hb` proves the shadow stayed alive; and the
+ABSENCE of any `ev=rotated` line confirms nothing was silently dropped. Expected volume is
+~0.010 MB per engaged hour, i.e. ~414 h before the first rollover.
+
+REVERT PATH: on device, `git revert 733f0d0` (or `git checkout 8e82486 -- <the four paths>` plus
+`rm openpilot/grt/lead_filter.py`) then reboot. The display filter fails safe to the raw value on
+any exception, and the shadow returns nothing into the planner, so neither can affect the car.
