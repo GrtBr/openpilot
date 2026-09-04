@@ -6529,3 +6529,54 @@ RECOMMENDATION: keep ARM_MIN_DIST at 80 m. If more range is wanted later, 75 m i
 step (+2 real, +1 false) rather than 65 m. Revisit if the shadow accumulates evidence that hook 11
 is MISSING approaches in the 65-80 m band -- that is the observation that would justify it, and it
 is not in the data today.
+
+## 2026-09-04 (k) — OPERATOR CORRECTS THE METHOD, twice, and both land. (j)'s recommendation is
+## revised: the marginal step to 75 m is clean, and 70 m is where the cost curve actually bends.
+
+Two criticisms, both valid:
+
+1. "We just determined false arming is not bad per se and should not be over-emphasised." Correct,
+   and (j) was internally inconsistent: entry (f) measured a false arm at ~1.7 s of 0.04 g and
+   ~2.4 km/h with no safety consequence, then (j) used raw false-arm counts as the primary reason
+   to reject a change. That is the same symmetry error (f) itself identified, repeated one entry
+   later.
+
+2. "Do not compare false arms over 6.8 hours -- there is no statistical link between driving hours
+   and the need to brake." Correct, and this invalidates a metric used repeatedly in this log
+   (arms/h in 2026-09-03, 2026-09-04 (a), (f), (j)). An hour of empty motorway offers zero
+   opportunity for either a real or a false arm, so wall-clock is not exposure. The right
+   denominator is the number of situations where arming is even possible.
+
+Re-normalised by EXPOSURE -- an eligible lead-approach episode is a contiguous engaged, no-pedal
+presence run of >= 0.8 s where the lead was ever beyond ARM_MIN_DIST and a genuine closure occurred:
+
+  ARM_MIN_DIST  episodes  real  false  precision  real/episode  false/episode
+      80 m         54       17     3      85%         0.31          0.06
+      75 m         56       19     4      83%         0.34          0.07
+      70 m         58       22     9      71%         0.38          0.16
+      65 m         59       26    11      70%         0.44          0.19
+      60 m         60       29    13      69%         0.48          0.22
+
+The episode count barely moves (54 -> 60), which is itself informative: lowering ARM_MIN_DIST does
+not expose the hook to many NEW situations, it makes it arm more often within the SAME ones.
+
+WHERE THE COST CURVE ACTUALLY BENDS -- visible only once normalised:
+  80 -> 75 m:  +2 real, +1 false, precision 85% -> 83%   cheap
+  75 -> 70 m:  +3 real, +5 false, precision 83% -> 71%   <- the knee
+  70 -> 65 m:  +4 real, +2 false, precision 71% -> 70%
+  65 -> 60 m:  +3 real, +2 false
+
+REVISED RECOMMENDATION. With false arms correctly weighted as cheap, the honest reading is that
+75 m is a clean, near-free step (+2 real for +1 false, precision essentially unchanged) and that
+70 m is the point where precision falls off a cliff -- 5 extra false arms for 3 real. In driver
+terms at 65 m: 44% of approaches get an early brake and roughly 1 in 5 gets a harmless ~2.4 km/h
+dip; at 80 m it is 31% and 1 in 17.
+
+So: 75 m is defensible now on the data. 65 m is a preference call about how often a mild
+unnecessary dip is acceptable, not a safety question -- and the earlier "keep 80" was argued from
+a metric that should not have been used. The structural argument for 80 m (it sits at the edge of
+stock's competence -- stock's onset is median 65 m, effectively nothing above 84 m, per (i))
+still stands on its own, but it is a design-cleanliness argument, not a safety one, and it should
+not have been dressed up with false-arm rates.
+
+NOT CHANGED in code. ARM_MIN_DIST remains 80 m pending an explicit decision.
