@@ -6774,3 +6774,58 @@ the population medians separate cleanly and in the physically correct direction,
 with the lead-speed median over a longer window.
 
 ADOPTED as the primary evidence for arming comparisons, replacing gap drop. Recorded to memory.
+
+## 2026-09-04 (p) — ARM_MIN_DIST re-run with the uncontaminated classifier. The earlier answer was
+## an ARTEFACT of the contaminated one. But the new answer is UNUSABLE: 62-75% of arms are UNKNOWN.
+
+Built `classify_v2.py` on evidence our own braking cannot touch: was the hook's belief true? It
+compares the TRUE closing rate -- from the smoothed gap slope over the 1 s BEFORE the arm, so no
+response can contaminate it -- against HOT_CLOSING_RATE, with the operator's THEIRS attribution as
+secondary evidence.
+
+FIRST RESULT LOOKED LIKE A CLEAN REVERSAL, and would have been wrong to report:
+
+    AMD 80: 13 justified / 1 unjust / 93% precision      AMD 65: 30 / 0 / 100%
+    i.e. precision IMPROVING as the floor drops -- the exact opposite of v1's 85% -> 70%.
+
+CHECKED IT BEFORE BELIEVING IT. Of the 12 arms where v2 disagreed with v1, five showed
+single-frame steps of 3.1-4.3 m in the SMOOTHED reference. A real object cannot move 3 m in 50 ms
+(that is 64 m/s); those are leadOne switching to a DIFFERENT OBJECT, which the reference correctly
+preserves as a step -- and which a gap-slope reading turns into a fake 10-18 m/s "closure". So v2
+had its own contamination: v1 is fooled by our response, v2 is fooled by object swaps.
+
+Added swap rejection (any adjacent-frame step > 2.5 m in the lookback returns UNKNOWN, never a
+number) and re-ran:
+
+  ARM_MIN_DIST  episodes  justified  unjust  unknown  %unknown  precision
+      80 m         54          4        1       15      75%       80%
+      75 m         56          5        1       17      74%       83%
+      70 m         58         10        1       20      65%       91%
+      65 m         59         14        0       23      62%      100%
+      60 m         60         15        0       27      64%      100%
+
+TWO CONCLUSIONS, and the second one matters more.
+
+1. v1's answer WAS an artefact. Its claim that precision collapses from 85% to 70% as the floor
+   drops does not survive an uncontaminated test -- the direction reverses. The mechanism is now
+   clear: at closer range stock brakes sooner, so the gap does NOT collapse, and v1 read that
+   successful response as evidence the approach was never real. v1 systematically mislabelled
+   correctly-handled close-range approaches as false positives. Every ARM_MIN_DIST recommendation
+   in entries (j), (k) and (l) rested on that, and none of them should be relied on.
+
+2. THE NEW ANSWER IS NOT USABLE EITHER. 62-75% of arms come back UNKNOWN once swaps and dropouts
+   are excluded honestly. A precision of 100% computed over 14 of 37 arms is not a measurement of
+   anything -- and the discarded 60%+ are not random, they are the busy, cluttered scenes where
+   leads swap and drop out, which is precisely where arming behaviour matters most.
+
+SO: I cannot currently answer whether ARM_MIN_DIST should move. What can be said is narrow and
+worth stating plainly -- the evidence that previously argued for KEEPING 80 m was contaminated and
+is withdrawn; nothing yet argues for LOWERING it either. ARM_MIN_DIST stays at 80 m by default,
+not by demonstration.
+
+WHAT WOULD SETTLE IT: per-object tracking. Every failure here -- v1's response contamination,
+v2's swap contamination, the 60% unknown rate -- comes from `leadOne` being an anonymous slot with
+no object identity, so "the lead" silently becomes a different car. `modelV2.leadsV3` offers no
+track ID either. Establishing identity (associating detections across frames by predicted position
+and gating on plausibility) is the prerequisite for measuring arming quality at close range at all.
+That is a substantial piece of work and should be scoped as such, not bolted onto this harness.
