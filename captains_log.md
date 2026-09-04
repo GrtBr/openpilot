@@ -6580,3 +6580,55 @@ still stands on its own, but it is a design-cleanliness argument, not a safety o
 not have been dressed up with false-arm rates.
 
 NOT CHANGED in code. ARM_MIN_DIST remains 80 m pending an explicit decision.
+
+## 2026-09-04 (l) — every FALSE arm anchored below 80 m, classified with its evidence. 7 of 8 are
+## rate-estimator NOISE, not resolved approaches. This is the real argument about ARM_MIN_DIST.
+
+Swept with ARM_MIN_DIST = 60 m so every sub-80 m arm is captured, then dumped the classifier's own
+evidence for each one it called FALSE:
+
+ drive     t     anchor  dRel  vEgo  v_filt | ego decel  max drop  came back | why FALSE
+ 158    313.8    70.6    71.4    56  -4.24  |   0.7 km/h    0.0 m     yes    gap never moved
+ 158    816.8    74.2    67.7   102  -7.95  |   0.0         0.8       yes    gap never moved
+ 163   1561.7    78.5    77.5    44  -4.29  |   0.2         4.9       no     gap barely moved
+ 164    262.8    74.6    73.1    58  -4.61  |   0.9         0.7       yes    gap never moved
+ 178    617.1    68.5    68.1    55  -5.16  |   3.9         0.4       yes    gap never moved
+ 179   1654.2    65.4    62.3   110  -3.61  |   2.1         3.8       no     gap barely moved
+ 179   2699.8    76.2    75.9    61  -5.33  |   0.6        17.5       yes    REAL closure, recovered
+ 179   2806.2    64.5    56.2    50  -6.52  |   2.0         3.2       yes    gap barely moved
+
+  7 of 8: gap barely moved (0.0-4.9 m over the following 6 s)
+  1 of 8: a genuine 17.5 m closure that then recovered
+
+THE SEVEN ARE GENUINE FALSE POSITIVES, and the arithmetic is decisive rather than a judgement
+call. The filter reported closing rates of 3.6-6.5 m/s. Sustained for even 2 s that is 7-13 m of
+gap; over the 6 s window, 22-39 m. The gap actually fell 0.0-4.9 m, and in four cases NEVER went
+below its value at the arm frame. The closure being reported did not exist. That is the estimator's
+noise, not a resolved approach.
+
+ONE IS NOT A FALSE ARM IN ANY USEFUL SENSE. 179 t=2699.8 shows the gap falling 17.5 m and then
+recovering -- a real approach that resolved on its own (lead pulled away, or ego was already
+matching). Arming on it was correct; the classifier calls it WOBBLE only because the recovery
+test fires. Worth remembering when reading any "false" count: about one in eight is of this kind.
+
+THE MECHANISM, and it is the substantive reason ARM_MIN_DIST matters -- not the overlap-with-stock
+argument I used before, which the operator correctly dismantled. Arming needs
+v_req = sqrt(2 * HOT_A_REQ * (d-6)), so the bar the NOISE must clear FALLS as the lead gets closer:
+
+    anchor      65 m   70 m   75 m   80 m   90 m   110 m
+    v_req       3.44   3.58   3.71   3.85   4.10   4.56  m/s
+    rate noise  4.30   4.30   4.40   4.40   4.70   4.60  m/s   (measured, per-band)
+    noise/v_req 1.25   1.20   1.18   1.14   1.15   1.01
+
+The eight false arms fired with v_filt of -3.6 to -6.5 m/s against a v_req of just 3.4-3.8 m/s at
+their anchors -- barely clearing a bar the estimator's own noise reaches routinely. Lowering
+ARM_MIN_DIST does not admit "harmless overlaps with stock"; it admits the region where the
+signal-to-noise ratio is WORST, because the threshold drops while the noise does not.
+
+Note this is the same 1/d scaling as (g), seen from the other end. Above 80 m it makes real
+closures too HARD to detect; below 80 m it makes noise too EASY to accept. The distance-neutral
+threshold fixed the first. The second is why the floor should not simply be lowered.
+
+REVISION to (k): the 75 m step still looks cheap on the numbers (+2 real, +1 false), but the
+reason to be cautious below that is now mechanistic rather than a rate comparison -- at 70 m and
+below, noise/v_req is 1.20+ and rising as the bar falls.
