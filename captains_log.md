@@ -6138,3 +6138,49 @@ So the useful version of the operator's idea is not 4.56 but ~3.50, and it is a 
 rather than a clear win: +1 real arm and +8 m of arming distance today, against +2 false arms per
 5.6 h. NOT adopted; the sample is 68 min of new data and the false-arm cost lands on the larger
 set. Re-run when the shadow has accumulated more drives.
+
+## 2026-09-04 (b) — the >120 m question re-asked against post-deployment data. Verdict UNCHANGED
+## and firmer. New: SNR ~= 1.0 at 110-120 m is the same fact as (b)'s arming-latency finding.
+
+Re-ran the range characterisation over 11 drives / 500079 model frames (was 8 drives / 405054):
+
+  MAX modelV2.leadsV3[0].x[0] EVER EMITTED: 139.11 m  -- IDENTICAL to the 405k-frame figure.
+
+  band m     model frames   prob>0.5    pass    med prob(of those >0.1)   med xStd
+   90-100        8365          2047     24.5%          0.885               16.6
+  100-110        8255          1557     18.9%          0.719               16.9
+  110-120       12558           781      6.2%          0.351               16.7
+  120-130       10050            61      0.6%          0.201               15.4
+  130-140        1392             0      0.0%          0.118               12.8
+  140+              0             -        -              -                  -
+
+Published `radarState.leadOne` above 120 m: 25 frames = 1.2 s, across 2 runs, in 6.8 h of driving.
+There is still no measurement above 120 m to improve, and the deployed filter cannot change that:
+it sits downstream of radard's presence gate, which sits downstream of the model. 24% more data
+moved the ceiling by 0.00 m.
+
+WHAT THE POST-DEPLOYMENT DATA ACTUALLY ADDED. Not a different answer -- CONFIRMATION THAT REPLAY
+REPRODUCES THE CAR. The earlier work was replay of real logs, not simulation, but that was an
+assumption until the shadow ran on-device: its `arms_old = 2` reproduced the offline count for
+drive 15e exactly, and today's 17/17 earlier-arm result is the direction replay predicted. So the
+2026-09-03 verdict was already grounded; it is now device-verified.
+
+THE ONE GENUINELY NEW INSIGHT, and it links this question to today's arming-latency finding.
+At 110-120 m the rate-noise SD is 4.63 m/s. The filtered closing rate that `a_req > 0.10` demands
+at 110 m is 4.56 m/s. **SNR ~= 1.0 at exactly the range of interest.** That is the quantified
+reason 76% of today's arming latency sat on `a_req`: at range the arming criterion asks for a
+signal the same size as the estimator's noise floor, so only PERSISTENCE can separate them, and
+persistence is precisely the seconds being complained about. This is not a dRel-measurement
+problem that a better filter can solve beyond what the new one already did (median lag 3.2 s ->
+2.8 s). It is `a_req`'s 1/d scaling meeting the noise floor.
+
+RECOMMENDATION CHANGE vs 2026-09-03. Yesterday the arming path measured 12 real / 1 false against
+the deployed 12 / 0, and switching was correctly declined. Today: new filter 7 real / 3 false vs
+deployed 5 / 3 on today's drives, and 9 / 0 vs 8 / 0 on the 5.63 h corpus -- MORE real arms and NO
+extra false arms on either set. That reverses the case, and the evidence now supports flipping
+`_SHADOW_ONLY` to False. Caveat kept in front: 68 min of new data against a 5.63 h baseline. One
+or two more drives through the shadow settle it, at no cost, since the shadow is already running.
+
+STILL NOT RECOMMENDED: lowering HOT_A_REQ. At 0.07 it adds 2 corpus false arms AND REDUCES corpus
+real arms 9 -> 7, because arming earlier re-triggers differently around the 5 s dead time. The
+achievable target was always the 100-120 m band, and the new filter is the right tool for it.
