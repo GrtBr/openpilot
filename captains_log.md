@@ -6299,3 +6299,55 @@ vacuous and could rot silently.
 
 Tests: test_lead_filter ALL PASS (28 checks, was 24); far_lead 29/29, hooks 44/44, scc_map 59/59.
 Still display-only; still cannot reach the planner or the car. NOT YET DEPLOYED to comma4.
+
+## 2026-09-04 (f) — OPERATOR CHALLENGE: "is false arming really worth avoiding? does it cause
+## discomfort or danger?" Measured. Answer: barely either -- and the asymmetry changes a decision.
+
+Measured every FALSE arm in the corpus (3 in ~6.8 h) by replaying hook 11's armed branch from the
+arm frame until one of its release conditions fires:
+
+  drive   t        vEgo     armed    mean cmd   hardest   speed lost
+  178     392.8s    74 km/h  0.65 s   -0.40      -0.40      0.9 km/h
+  178     591.2s    67       1.70 s   -0.40      -0.40      2.4 km/h
+  179    1785.3s   108       2.65 s   -0.45      -0.66      4.3 km/h
+
+  median 1.70 s armed, 2.4 km/h lost, hardest command ever issued on a false arm -0.66 m/s^2.
+  (Upper bound: the `stock_min <= FLOOR` release is omitted because stock_min is not in the
+  extraction, and it can only shorten these.)
+
+Also checked whether the candidate would even BIND -- hook 11 enters a `min()`, so it changes
+nothing when the planner already wants something harder. All 3 would have bound: the car was
+coasting at a mean aEgo of -0.10 m/s^2.
+
+IS IT DANGEROUS? No, and structurally so. Hook 11's candidate is clamped to [CAP, FLOOR] =
+[-2.0, -0.40] and is always negative, so it can only ever ADD braking -- it cannot accelerate and
+cannot cause a failure to brake. The worst false arm measured is -0.66 m/s^2 = 0.067 g, against a
+vehicle limit (ACCEL_MIN) of -3.5 and ordinary traffic decelerations of 1-3 m/s^2. Nothing here
+would surprise a following driver.
+
+IS IT UNCOMFORTABLE? Mildly, at most. 2.4 km/h shed over 1.7 s at 0.04 g is near the threshold of
+perception as a discrete event. The rate is 3 in 6.8 h = 0.44/h. The real risk would be CLUSTERING
+-- several on one stretch of road reading as phantom braking -- which has not been observed but
+which the 3-event sample cannot rule out.
+
+THE CONSEQUENCE, and it is a correction to my own reasoning. I have been treating a false arm and
+a missed arm as SYMMETRIC costs -- that is what "12 real / 1 false vs 12 / 0" and "21/4 vs 19/3"
+were being judged against, and it is what justified declining to switch the arming path twice.
+They are not symmetric:
+
+  a false arm costs   ~1.7 s of 0.04 g braking, ~2.4 km/h, no safety consequence
+  a missed arm costs  the exact thing hook 11 exists to provide on a genuine approach
+
+Under that weighting the full-corpus comparison (new filter +2 real arms for +1 false arm) is a
+GOOD trade, not a marginal one. The 2026-09-04 (d) recommendation to keep waiting was reasoned
+from a symmetry that the data does not support.
+
+HONEST COUNTERWEIGHT, so this does not over-correct: "REAL arm" in the classifier means a genuine
+closure occurred, NOT that braking was required -- stock may have handled several of those
+perfectly well on its own. So +2 real arms is not automatically +2 safety wins; it is +2 occasions
+where hook 11 pre-braked on a real approach. The asymmetry argument is sound in direction, and its
+magnitude is unproven.
+
+REVISED RECOMMENDATION: the case for flipping `_SHADOW_ONLY` is now stronger than in (d). Still
+worth one or two more shadow drives, because that costs nothing, but the decision should be judged
+on "does it miss real approaches" first and false arms second -- not on a one-for-one ledger.
