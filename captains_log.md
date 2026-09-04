@@ -6274,3 +6274,28 @@ the more favourable numbers; the full-corpus figure is the one to trust.
 RECOMMENDATION, revised: do NOT flip `_SHADOW_ONLY` yet. The shadow costs ~0.01 MB per engaged
 hour and is already running, so waiting is free while switching is not. Revisit when the shadow
 has several more hours, and judge on the full corpus under one harness, not on a single drive.
+
+## 2026-09-04 (e) — hook 11c part 2: the path-length clamp now uses the filtered distance too.
+## A double-advance bug was caught in review before it shipped.
+
+The chevron was filtered on 2026-09-03 but the driving path's draw length was not: `_update_model`
+clamps `max_distance` from `lead.dRel * 2.0`, so the green path's far end still inherited the raw
+signal's flicker while the marker sat still. Now filtered, same value, same raw fallback.
+
+THE BUG THIS ALMOST INTRODUCED. `filtered_dRel` is a RECURSIVE filter, so calling it twice in one
+frame advances the state twice and changes the dynamics. leadOne's distance is consumed TWICE per
+frame in this renderer -- once by `_update_model` for the path clamp, once by `_update_leads` for
+the chevron -- and worse, they run a DIFFERENT number of times: `_update_model` always runs, while
+`_update_leads` is gated on `render_lead_indicator` (longitudinal control on). A naive second call
+would therefore have stepped the filter one or two times per frame depending on configuration --
+non-deterministic dynamics that no unit test with a single consumer would have caught.
+
+Fix: exactly ONE update site. `_update_model` runs first and unconditionally, so it advances lead
+0's filter; `_update_leads` reads the frame's value through a new `last_dRel(index, fallback)`
+accessor that does NOT advance. Lead 1 is not touched by `_update_model`, so it is still advanced
+in `_update_leads`. The new accessor and the invariant are covered by four added tests, including
+one that asserts double-advancing genuinely changes the output -- otherwise the guard would be
+vacuous and could rot silently.
+
+Tests: test_lead_filter ALL PASS (28 checks, was 24); far_lead 29/29, hooks 44/44, scc_map 59/59.
+Still display-only; still cannot reach the planner or the car. NOT YET DEPLOYED to comma4.

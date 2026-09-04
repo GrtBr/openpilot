@@ -175,8 +175,11 @@ class ModelRenderer(Widget):
       # and falls back to the raw value on any error (i.e. to today's behaviour).
       _present = bool(lead_data and lead_data.present)
       try:
-        from openpilot.grt.lead_filter import filtered_dRel
-        _fd = filtered_dRel(i, _present, lead_data.dRel if _present else 0.0)
+        from openpilot.grt.lead_filter import filtered_dRel, last_dRel
+        # lead 0 was already advanced this frame by _update_model (the single update site);
+        # read its cached value. lead 1 is not used there, so advance it here.
+        _fd = (last_dRel(0, lead_data.dRel if _present else 0.0) if i == 0
+               else filtered_dRel(i, _present, lead_data.dRel if _present else 0.0))
       except Exception:
         _fd = None
       # GRT HOOK 11c END
@@ -211,9 +214,21 @@ class ModelRenderer(Widget):
       road_edge.projected_points = self._map_line_to_polygon(road_edge.raw_points, line_width_factor, 0.0, max_idx)
 
     # Update path using raw points
+    # GRT HOOK 11c (part 2) START -- the path's draw length is clamped by the lead distance, so it
+    # inherits the same raw-signal flicker the chevron did. Same filtered value, same fallback.
+    # THIS IS THE SINGLE UPDATE SITE for lead 0: _update_model always runs, whereas _update_leads
+    # only runs when longitudinal control is on, so advancing the filter there would step it a
+    # variable number of times per frame. _update_leads reads the cached value instead.
+    _present0 = bool(lead and lead.present)
+    try:
+      from openpilot.grt.lead_filter import filtered_dRel
+      _fd0 = filtered_dRel(0, _present0, lead.dRel if _present0 else 0.0)
+    except Exception:
+      _fd0 = None
     if lead and lead.present:
-      lead_d = lead.dRel * 2.0
+      lead_d = (lead.dRel if _fd0 is None else _fd0) * 2.0
       max_distance = np.clip(lead_d - min(lead_d * 0.35, 10.0), 0.0, max_distance)
+    # GRT HOOK 11c (part 2) END
 
     soon_acceleration = self._acceleration_x[len(self._acceleration_x) // 4] if len(self._acceleration_x) > 0 else 0
     self._acceleration_x_filter.update(soon_acceleration)

@@ -83,6 +83,23 @@ check("leadOne and leadTwo keep separate state",
 check("absent lead returns the raw value it was handed", filtered_dRel(0, False, 0.0) == 0.0)
 check("bad input degrades to raw rather than raising", filtered_dRel(0, True, float("nan")) is not None)
 
+print("\nlast_dRel: second consumer reads the frame's value WITHOUT advancing the filter")
+_display.clear()
+from openpilot.grt.lead_filter import last_dRel
+a1 = filtered_dRel(0, True, 100.0)
+r1 = last_dRel(0, 0.0)
+r2 = last_dRel(0, 0.0)
+check("last_dRel returns what filtered_dRel just produced", r1 == a1)
+check("repeated last_dRel is stable (does not advance)", r2 == r1)
+# advancing once vs twice must differ -- proves last_dRel is genuinely not advancing
+fa_ = LeadFilter(); fb = LeadFilter()
+for z in (100.0, 90.0, 80.0):
+  fa_.update(True, z)
+  fb.update(True, z); fb.update(True, z)          # double-stepped
+check("double-advancing a filter really does change it (guard is meaningful)",
+      abs(fa_.rr.x - fb.rr.x) > 1e-9)
+check("last_dRel falls back when nothing cached", last_dRel(7, 42.0) == 42.0)
+
 print("\nthe filter must never invent motion the raw signal does not have")
 f2 = LeadFilter()
 xs = [f2.update(True, 80.0)[0] for _ in range(60)]

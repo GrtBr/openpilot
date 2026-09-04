@@ -155,16 +155,37 @@ class LeadFilter:
 # state to be smoothed across a dropout -- so a lead reacquired at a different distance would be
 # dragged toward the old one. Both are avoided by calling this for every lead, every frame.
 _display: dict = {}
+_last: dict = {}
 
 
 def filtered_dRel(index: int, present: bool, dRel: float) -> float:
-  """Filtered distance for DISPLAY of lead `index`. Returns the raw value on any error, and
-  passes `present=False` through so the filter resets on a dropout."""
+  """ADVANCE lead `index`'s filter by one frame and return the filtered distance.
+
+  Call this EXACTLY ONCE PER FRAME per lead. It is a recursive filter, so calling it twice in a
+  frame advances the state twice and changes the dynamics. Consumers that need the same frame's
+  value again must use `last_dRel()` instead. Returns the raw value on any error, and passes
+  `present=False` through so the filter resets on a dropout.
+  """
   try:
     f = _display.get(index)
     if f is None:
       f = _display[index] = LeadFilter()
     x, _ = f.update(present, dRel)
-    return float(dRel) if x is None else float(x)
+    out = float(dRel) if x is None else float(x)
+    _last[index] = out
+    return out
   except Exception:
     return float(dRel)
+
+
+def last_dRel(index: int, fallback: float) -> float:
+  """Read the value `filtered_dRel` produced for this lead THIS frame, WITHOUT advancing the
+  filter. Exists because the mici renderer consumes leadOne's distance twice per frame -- once for
+  the chevron and once to clamp how far the driving path is drawn -- and the second consumer must
+  not re-run the filter. Falls back to the caller's raw value if nothing has been cached yet.
+  """
+  try:
+    v = _last.get(index)
+    return float(fallback) if v is None else float(v)
+  except Exception:
+    return float(fallback)
