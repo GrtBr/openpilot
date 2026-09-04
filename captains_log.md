@@ -6867,3 +6867,34 @@ WHAT TO WATCH FOR ON THE ROAD: ghost braking in the 70-80 m band specifically --
 dip (measured cost of a false arm: ~1.7 s at 0.04 g, ~2.4 km/h) with no obvious slower vehicle
 ahead. Frequency matters more than any single event; the concern flagged in (f) was CLUSTERING,
 several on one stretch of road, which would read as phantom braking rather than as one oddity.
+
+## 2026-09-04 (r) — ARM_MIN_DIST = 70 m DEPLOYED to comma4 and verified live.
+
+Device baseline md5-checked against the previous commit before anything was copied (the deploy
+script aborts on mismatch), both files verified byte-identical after copy, then on-device suites:
+test_far_lead 47/47, test_hooks 44/44, test_scc_map 59/59, test_lead_filter ALL PASS. Committed on
+device as `7cc6dc1` and rebooted.
+
+LIVE VALUES read back by real import after the reboot -- this is the check that matters, because
+it proves the decoupling actually holds on the car and not just in the test harness:
+
+  ARM_MIN_DIST      = 70.0    lowered
+  THRESH_SCALE_DIST = 80.0    pinned -- did NOT move with the floor
+
+    d= 65 m  thr 0.1000  v_req 3.44 m/s        d= 80 m  thr 0.1000  v_req 3.85 m/s
+    d= 70 m  thr 0.1000  v_req 3.58 m/s        d=110 m  thr 0.0727  v_req 3.89 m/s
+    d= 75 m  thr 0.1000  v_req 3.71 m/s
+
+The threshold at 110 m is 0.0727, exactly as before the change, confirming the far-field curve is
+untouched. Any behaviour difference the operator notices is attributable to the arming floor alone.
+
+POST-REBOOT HEALTH: 0 grt exceptions, 0 tracebacks/import errors, plannerd and ui both running,
+shadow log present and growing (346 KB).
+
+ONE PROCESS NOTE for the next deploy script: the log path was relative and the script `cd`s to the
+repo before writing, so the log landed in nightly-dev/ instead of analysis/lead_filter/. It looked
+briefly as though the deploy had not run at all. Harmless, but resolve LOG to an absolute path
+before any `cd`.
+
+NOW WATCHING FOR: ghost braking in the 70-80 m band. The shadow log continues to record old-vs-new
+filter behaviour independently of this change.
