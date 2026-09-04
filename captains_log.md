@@ -6351,3 +6351,56 @@ magnitude is unproven.
 REVISED RECOMMENDATION: the case for flipping `_SHADOW_ONLY` is now stronger than in (d). Still
 worth one or two more shadow drives, because that costs nothing, but the decision should be judged
 on "does it miss real approaches" first and false arms second -- not on a one-for-one ledger.
+
+## 2026-09-04 (g) — operator confirms far-lead response MATTERS. Tested arming criteria that fix
+## a_req's backwards distance scaling. One candidate is clean: threshold * min(1, 80/d).
+
+The structural defect (2026-09-04 (b)): arming needs v_req = sqrt(2 * HOT_A_REQ * (d-6)), so the
+closing rate required GROWS with distance -- 3.85 m/s at 80 m but 4.56 at 110 m. A far-lead
+feature is hardest to trigger exactly where it is supposed to work. Seven alternatives tested on
+11 drives, all using the new filter:
+
+  variant                          real  false  med dRel@arm  arms >100 m
+  A deployed: a_req > 0.10           16     3        89 m          1
+  B a_req > 0.10 * min(1, 80/d)      17     3        92 m          5
+  C TTC < 18 s                       14     3        90 m          0
+  D fixed closing > 4.0 m/s          15     2        92 m          5
+  E fixed closing > 4.5 m/s          14     3        90 m          1
+  F a_req > 0.10 OR closing > 4.5    16     3        89 m          1
+  G B with persistence 0.8 s         16     2        91 m          2
+
+B is the pick, and the reason is arithmetic rather than tuning. Scaling the threshold by 80/d
+almost exactly cancels the (d-6) growth inside the square root, so v_req becomes DISTANCE-NEUTRAL:
+
+    distance      80 m    90 m   100 m   110 m   120 m
+    v_req, B      3.85    3.86    3.88    3.89    3.90   m/s
+    v_req, now    3.85    4.10    4.34    4.56    4.77   m/s
+
+i.e. it turns "harder the farther away" into "the same closing rate everywhere", which is what the
+feature always meant. Measured effect against the deployed criterion:
+
+  * 12 of the shared arms fire EARLIER -- median +0.21 s, max +3.05 s
+  * and FARTHER OUT: 95 -> 113 m, 76 -> 105 m on the clearest two
+  * arms beyond 100 m go from 1 to 5
+  * REAL arms it misses that the deployed criterion catches: ZERO -- structurally impossible,
+    see below
+  * false arms unchanged at 3
+
+SAFETY PROPERTY, and it is the reason to prefer B over D or G: `min(1, 80/d)` is exactly 1 for
+d <= 80 m, so B is BIT-IDENTICAL to the deployed criterion below 80 m, and ARM_MIN_DIST already
+requires the anchor above 80 m. B can therefore only ever RELAX, never tighten -- it cannot cause
+a missed arm that the deployed gate would have caught. Variants D and E replace the criterion
+outright and do not have that guarantee; C (TTC) was simply worse on every axis.
+
+CAVEATS. 19-20 arms over 6.8 h is a thin sample, and relaxing a threshold is exactly the move that
+added false arms when HOT_A_REQ was lowered globally (2026-09-04 (a)) -- the difference here is
+that the relaxation is confined to d > 80 m instead of applying everywhere, which is why the false
+count held. The scaling is also unbounded as d grows; in practice the published signal stops near
+120 m so the effective floor is ~0.067, but a real implementation should clamp it explicitly
+rather than rely on that.
+
+NOT IMPLEMENTED -- research only, per the standing rule that diagnosis and implementation are
+separate phases. This is the answer to "how could we trigger earlier, especially >80 m": not a
+better filter (that is already deployed and worth ~0.2 s), but removing the 1/d penalty from the
+arming criterion, worth a further ~0.2 s median and up to 3 s, with the danger caught up to 18 m
+farther out.
