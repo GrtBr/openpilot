@@ -6680,3 +6680,57 @@ the drop itself, which is why they were grouped by that.
 TO FIX in the harness when next touched: report `recovered` as a three-state value
 (yes / no / n-a: lead lost) rather than a bool, so an absence of evidence cannot be printed as
 evidence of absence.
+
+## 2026-09-04 (n) — OPERATOR IDENTIFIES A CONFOUND in the REAL/FALSE classifier, and it is real.
+## The outcome being measured is contaminated by the response to the event.
+
+Operator: "shouldn't max gap drop INCREASE when braking was unnecessary (my speed decreased while
+the lead kept his), and dRel stay the same or decrease when braking was necessary?"
+
+That is correct, and it exposes a structural weakness. Both of the classifier's tests measure
+what happened AFTER the arm, and both are contaminated by whether the system (or driver) responded:
+
+  * GAP DROP is contaminated in the direction that matters most. A real approach that was
+    correctly braked shows the gap stabilising or even growing -> small drop -> called FALSE. The
+    test therefore REWARDS approaches the system failed to answer and PENALISES the ones it
+    handled. That is backwards.
+  * EGO DECELERATION is worse: it is CIRCULAR. If hook 11 falsely arms and its command binds, ego
+    slows, and the classifier reads that deceleration as proof the approach was real. The
+    circularity is bounded -- FLOOR is -0.40 m/s^2 and the median false arm lasts 1.7 s, shedding
+    ~2.4 km/h against a 6 km/h threshold, so a typical false arm CANNOT manufacture its own REAL
+    label -- but the mechanism exists and nothing in the code guards it.
+
+THE UNCONTAMINATED SIGNAL is the LEAD's own absolute speed: our braking changes v_ego and the gap,
+but it cannot change how fast the lead is travelling. Derived as v_ego + d(gap)/dt over frames
+where the lead is genuinely present.
+
+FIRST ATTEMPT AT THIS WAS WRONG AND IS RECORDED SO IT IS NOT REPEATED: the reference array falls
+back to raw dRel (0.0 when absent), so a lost lead produced a fake 77 m -> 0 m collapse and lead
+speeds of -278 km/h. It printed a tidy "8/8 lead genuinely slower", which was garbage. Recomputed
+over present frames only:
+
+ drive     t     vEgo  egoMin | leadV med  leadV min   n | gap -> end   lead lost?
+ 158    313.8      56     56  |     65        22     120 |  72 -> 87       no
+ 158    816.8     102    102  |    104        90     120 |  70 -> 73       no
+ 163   1561.7      44     44  |     53        25      70 |  77 -> 84       YES
+ 164    262.8      58     57  |     60        14     120 |  73 -> 74       no
+ 178    617.1      55     51  |     77        47      87 |  71 -> 106      no
+ 179   1654.2     110    108  |    180        89      53 |  62 -> 108      YES
+ 179   2699.8      61     60  |     51         1     120 |  76 -> 61       no
+ 179   2806.2      50     48  |     45        29     120 |  61 -> 58       no
+
+Only 2 of 8 had a lead genuinely more than 5 km/h slower than us on median. In 5 of 8 the lead was
+at or ABOVE our speed (65 vs 56, 104 vs 102, 60 vs 58, 77 vs 55, 180 vs 110), and in 6 of 8 the
+gap ENDED LARGER than it started. So the seven "gap barely moved" calls hold up under the
+uncontaminated test: there was no approach to answer.
+
+Two caveats kept in front. The `leadV min` column is noisy (values of 1 and 14 km/h are the
+derivative picking up gap jitter, not the lead braking to walking pace) -- the median is the
+column to read. And 179 t=1654.2's median of 180 km/h is not credible at all; that row has only
+53 usable frames and lost the lead, so it should be treated as no-data rather than evidence.
+
+WHAT THIS CHANGES. The sub-80 m conclusion of (l) survives, but the CLASSIFIER does not get a
+clean bill of health. It is adequate for separating "nothing happened" from "something happened",
+which is what (l) needed, and it is NOT sound for judging cases where the system responded well --
+precisely the cases that matter most for deciding whether hook 11 earns its place. Any future
+comparison of arming variants should use lead speed, not gap drop, as the primary evidence.
