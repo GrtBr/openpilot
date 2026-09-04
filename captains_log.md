@@ -6184,3 +6184,62 @@ or two more drives through the shadow settle it, at no cost, since the shadow is
 STILL NOT RECOMMENDED: lowering HOT_A_REQ. At 0.07 it adds 2 corpus false arms AND REDUCES corpus
 real arms 9 -> 7, because arming earlier re-triggers differently around the 5 s dead time. The
 achievable target was always the 100-120 m band, and the new filter is the right tool for it.
+
+## 2026-09-04 (c) — comparative table, prior corpus vs today, and what the new filter actually did
+## to SNR. IMPORTANT: the filter is DISPLAY-ONLY, so today's logged dRel is still RAW.
+
+A direct "today vs yesterday" table of the logged signal measures DRIVING CONDITIONS, not the
+filter -- hook 11 and radarState both still consume the deployed filter, and hook 11c changed only
+what the HUD draws. Separating the two:
+
+CONDITIONS (raw signal; filter-independent):
+
+  band m     PRIOR frames   sec    raw imposs  |  TODAY frames   sec    raw imposs
+   50-80         6115      305.8      23.4%    |     4374       218.7      24.5%
+   80-100        2249      112.5      34.9%    |     2402       120.1      32.1%
+  100-110         360       18.0      41.9%    |     1004        50.2      30.2%
+  110-120         252       12.6      30.6%    |      344        17.2      22.7%
+  120+             19        1.0       0.0%    |        6         0.3      33.3%
+
+Today produced 2.8x more 100-110 m data and its raw signal was CLEANER at range (41.9% -> 30.2%,
+30.6% -> 22.7% impossible jumps). That is road/traffic, not the filter. Above 120 m: 6 frames.
+
+FILTER EFFECT, same data, three signals -- position error SD (m) / rate-noise SD (m/s):
+
+  PRIOR corpus                        TODAY
+  band       raw     old     new      band       raw     old     new
+  50-80    2.41/5.00 2.37/3.82 1.85/4.25   50-80    2.30/5.22 2.15/3.90 1.68/4.40
+  80-100   3.06/6.27 3.14/4.13 2.44/4.68   80-100   2.79/5.83 2.98/4.53 2.33/4.95
+  100-110  3.52/8.77 3.13/6.93 2.31/7.56   100-110  2.67/6.86 2.96/5.52 2.37/6.10
+  110-120  2.78/4.33 1.99/4.18 1.47/4.20   110-120  2.24/5.93 1.98/3.66 1.67/4.72
+
+Two findings, one of them uncomfortable and worth stating plainly:
+
+1. POSITION: the new filter is best in every band on both datasets -- 1.47-2.44 m SD vs the old
+   filter's 1.99-3.14 m. Note that on TODAY's cleaner data the OLD filter is WORSE THAN RAW at
+   80-110 m (2.98 vs 2.79, 2.96 vs 2.67): its lag costs more than its smoothing gains once the raw
+   signal is reasonably clean. The new filter stays better than raw everywhere. This is the HUD
+   signal, and it is the deployed change.
+
+2. RATE: the new filter is consistently NOISIER than the old one (4.25 vs 3.82, 4.68 vs 4.13,
+   7.56 vs 6.93, 4.72 vs 3.66). That is the honest cost of being faster -- less smoothing means a
+   jumpier velocity estimate. It arms earlier and catches more real arms anyway (2026-09-04 (a):
+   17/17 earlier, 7 vs 5 real today) because LAG, not rate noise, was the binding limitation.
+
+SNR AT THE ARMING CRITERION (v_req = sqrt(2 * HOT_A_REQ * (d-6)), divided by rate-noise SD):
+
+  band m    v_req    PRIOR old  PRIOR new  |  TODAY old  TODAY new
+   50-80     3.44      0.90       0.81     |    0.88       0.78
+   80-100    4.10      0.99       0.88     |    0.90       0.83
+  100-110    4.45      0.64       0.59     |    0.81       0.73
+  110-120    4.67      1.12       1.11     |    1.28       0.99
+
+EVERY CELL IS AT OR BELOW ~1.1. The arming criterion asks for a signal the same size as the
+estimator's noise at EVERY range, not just beyond 110 m. The new filter does not improve this
+ratio -- it slightly lowers it, because it trades rate-smoothness for speed. That is the
+quantitative statement of why PERSISTENCE (the 0.5 s hot streak), not threshold tuning, is what
+makes hook 11 work at all, and why lowering HOT_A_REQ backfired on the corpus.
+
+So: the new filter improved the POSITION signal (the HUD, measurably, everywhere) and improved
+arm TIMING, but it did not improve rate SNR and was never going to -- SNR ~ 1 is a property of
+differencing a noisy position over 1 s, not of which smoother is applied.
