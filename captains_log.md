@@ -6485,3 +6485,47 @@ brake onset later in the same episode):
 Two of the twelve show a gap of 0-4 m, i.e. cases where stock was already about to act and the
 hook added nothing -- which is the correct behaviour, not a failure. The value is concentrated in
 the high-speed, long-range approaches, exactly as designed.
+
+## 2026-09-04 (j) — OPERATOR QUESTION: keep ARM_MIN_DIST at 80 m or lower it to stock's median
+## onset (65 m), given min() means overlap is harmless? Measured. RECOMMEND: keep 80 m.
+
+The operator's premise is CORRECT and the data confirms it: hook 11 enters a `min()`, so arming
+inside stock's own range cannot make the car brake LESS. Measured directly -- the fraction of
+armed frames where the hook's command is actually HARDER than what the car was already doing (i.e.
+where min() picks the hook) is FLAT at ~42% for every ARM_MIN_DIST from 80 down to 60 m. Lowering
+the threshold does NOT make the hook progressively redundant. That argument survives.
+
+  ARM_MIN_DIST   real  false   median dRel@arm   % armed frames where the hook BINDS
+      80 m         17     3          92 m                     42%
+      75 m         19     4          87 m                     41%
+      70 m         22     9          88 m                     43%
+      65 m         26    11          86 m                     42%
+      60 m         29    13          78 m                     44%
+
+BUT the arms it adds are the low-value ones, and the false arms grow faster than the real ones.
+80 -> 65 m adds 9 real (+53%) and 8 false (+267%); the real:false ratio degrades from 5.7:1 to
+2.4:1. Splitting the 65 m real arms into those 80 m already caught versus those genuinely added:
+
+  already caught at 80 m     n=16   median anchor 97 m   median lead over stock 2.85 s
+  ADDED by lowering to 65 m  n=10   median anchor 73 m   median lead over stock 2.20 s
+                                    of those 10: 3 give under 1 s, 2 give under 0.5 s
+
+So the added arms are real, and about two thirds of them are worth something (2.2 s median lead is
+not nothing). The problem is the price: 8 extra false arms over 6.8 h takes the false rate from
+0.44/h to ~1.6/h. At the measured cost of a false arm (2026-09-04 (f): ~1.7 s of 0.04 g, ~2.4 km/h,
+no safety consequence) that is roughly one mild unnecessary dip every 40 minutes instead of every
+2.3 hours -- and CLUSTERING was already flagged there as the untested risk that would read as
+phantom braking.
+
+There is also a structural argument for 80 m independent of the counts. Stock's own brake onset is
+median 65 m with 71% of onsets in 50-80 m and effectively nothing above 84 m (2026-09-04 (i)).
+ARM_MIN_DIST = 80 m therefore sits exactly at the edge of stock's competence: above it the hook is
+the only thing acting, below it the hook is a second opinion on a decision stock is already making
+well. Keeping the boundary where the other controller's coverage ends is a cleaner contract than
+overlapping into it, and it keeps the hook's purpose legible -- "the far-lead hole", not "a
+general-purpose second brake".
+
+RECOMMENDATION: keep ARM_MIN_DIST at 80 m. If more range is wanted later, 75 m is the defensible
+step (+2 real, +1 false) rather than 65 m. Revisit if the shadow accumulates evidence that hook 11
+is MISSING approaches in the 65-80 m band -- that is the observation that would justify it, and it
+is not in the data today.
