@@ -6437,3 +6437,51 @@ NOT YET DEPLOYED -- comma4 offline. NOTE this one is NOT display-only: it change
 arming, i.e. the car's behaviour. The safety argument is that it can only relax beyond 80 m and
 is bit-identical below, but it deserves a real drive with attention rather than a silent rollout.
 The pending `deploy_pathclamp.sh` covers only the HUD change and does NOT include this file.
+
+## 2026-09-04 (i) — DEPLOYED the arming-threshold change + HUD path clamp. And the baseline it
+## beats: where does STOCK historically start braking on a genuine approach?
+
+DEPLOY. Device baseline md5-verified against the Sep-3 state first (all three files matched), five
+files copied and verified byte-identical, `git status` on device showed exactly those five and no
+cereal file. On-device suites: far_lead 41/41, lead_filter ALL PASS, hooks 44/44, scc_map 59/59,
+schema 34/34. Real-import check of the live threshold:
+
+    d= 40 m thr 0.1000 v_req 2.61     d= 90 m thr 0.0889 v_req 3.86
+    d= 80 m thr 0.1000 v_req 3.85     d=110 m thr 0.0727 v_req 3.89
+                                      d=120 m thr 0.0667 v_req 3.90
+    d=200 m thr 0.0600 v_req 4.82  <- clamp active, beyond the model's 139 m ceiling
+
+i.e. unchanged at/below 80 m, flat 3.86-3.90 m/s across 90-120 m, bounded past that. Committed on
+device as `b63da74`, rebooted, plannerd confirmed back up. Note: UNLIKE the HUD filter this changes
+CAR BEHAVIOUR. The device's link became intermittent shortly after (operator likely driving), so
+the swaglog exception scan is still outstanding -- check `journalctl -b | grep -i grt:` next time.
+
+OPERATOR QUESTION: historically, at what distance does stock start braking on a slow lead?
+Measured across the corpus. Definition: aEgo <= -0.5 m/s^2 (clearly past coasting drag) sustained
+0.5 s, while engaged with NO driver pedal, during a genuine closure -- so it is stock's own
+decision. 21 onsets found:
+
+    p10 31 m | p25 52 m | MEDIAN 65 m | p75 72 m | p90 78 m | max 84 m
+
+      0-50 m    5 onsets (23.8%)
+     50-80 m   15 onsets (71.4%)   <- the band asked about
+    80-110 m    1 onset  ( 4.8%)
+      >110 m    0 onsets ( 0.0%)
+
+In the 50-80 m band specifically: median 68 m, range 52-80 m, at a median closing rate of 6.4 m/s.
+
+THE POINT: stock essentially NEVER brakes beyond 80 m -- one onset in 21, none above 84 m, and
+that is with the approach already genuine. Everything above 80 m is silent. That is precisely the
+hole hook 11 exists to fill, and it is why ARM_MIN_DIST sits at 80 m: below that, stock is already
+acting and the hook would only be duplicating it.
+
+PAIRING THE TWO on the same 12 genuine approaches (hook 11 with the new threshold vs stock's own
+brake onset later in the same episode):
+
+    median: hook 11 arms 27 m EARLIER than stock starts braking = 2.80 s of lead time
+    range 0.00-9.70 s; the largest gaps are the fast ones (113 -> 66 m at 95 km/h, 6.75 s;
+    110 -> 61 m at 94 km/h, 8.75 s)
+
+Two of the twelve show a gap of 0-4 m, i.e. cases where stock was already about to act and the
+hook added nothing -- which is the correct behaviour, not a failure. The value is concentrated in
+the high-speed, long-range approaches, exactly as designed.
