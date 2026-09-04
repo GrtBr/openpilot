@@ -296,8 +296,26 @@ ALPHA = 0.10
 BETA = 0.003
 
 # ---- arming (spec section 4, amended -- see module docstring, "THIRD BUG") ----
-ARM_MIN_DIST = 80.0          # m -- dRel_at_hot_start must exceed this (anchor semantics changed,
-                             # see docstring -- this is NOT "distance at first sight" anymore)
+ARM_MIN_DIST = 70.0          # m -- dRel_at_hot_start must exceed this (anchor semantics changed,
+                             # see docstring -- this is NOT "distance at first sight" anymore).
+                             #
+                             # 80 -> 70 m on 2026-09-04, OPERATOR DECISION under acknowledged
+                             # measurement uncertainty. The honest position at the time: the
+                             # evidence that had argued for keeping 80 m was contaminated (the
+                             # old REAL/FALSE classifier scored a correctly-braked approach as a
+                             # false positive, because a handled approach does not collapse the
+                             # gap), and the uncontaminated replacement could only classify ~35%
+                             # of arms -- the rest unknowable without per-object tracking, since
+                             # leadOne is an anonymous slot. On the measurable subset 70 m scored
+                             # 10 justified / 1 unjustified. Operator elected to settle it on the
+                             # road and report ghost braking if it appears. REVERT TO 80.0 if it
+                             # does; that is the whole rollback.
+THRESH_SCALE_DIST = 80.0     # m -- reference distance for the distance-neutral threshold below.
+                             # DELIBERATELY NOT ARM_MIN_DIST, though they were equal until
+                             # 2026-09-04. Tying them means moving the arming floor also relaxes
+                             # the far-field threshold (at 110 m, 70/110 instead of 80/110), i.e.
+                             # two changes at once and an unreadable road test. Keep this pinned
+                             # to the distance the scaling was VALIDATED at.
 PRESENCE_PERSIST_S = 0.30    # s -- continuous presence required before the arming gate evaluates
 HOT_A_REQ = 0.10             # m/s^2 -- a_req(v_filt) must clear this... LOWERED from 0.30,
                              # 2026-08-31, attempt 5 (deployed despite failing validation -- see
@@ -350,12 +368,15 @@ LEAD_LOST_S = 1.0            # s -- release if the lead itself is lost this long
 def hot_a_req_for(dRel: float) -> float:
   """Effective arming threshold at this distance. See HOT_A_REQ_MIN_SCALE for the full rationale.
 
-  Returns exactly HOT_A_REQ at or below ARM_MIN_DIST, and a bounded relaxation beyond it, so the
-  CLOSING RATE required to arm is roughly constant with distance instead of growing.
+  Returns exactly HOT_A_REQ at or below THRESH_SCALE_DIST, and a bounded relaxation beyond it, so
+  the CLOSING RATE required to arm is roughly constant with distance instead of growing.
+
+  Keyed on THRESH_SCALE_DIST, not ARM_MIN_DIST: the two are independent knobs and were only
+  briefly equal. See THRESH_SCALE_DIST for why coupling them would be a mistake.
   """
-  if dRel <= ARM_MIN_DIST:
+  if dRel <= THRESH_SCALE_DIST:
     return HOT_A_REQ
-  return HOT_A_REQ * max(HOT_A_REQ_MIN_SCALE, ARM_MIN_DIST / dRel)
+  return HOT_A_REQ * max(HOT_A_REQ_MIN_SCALE, THRESH_SCALE_DIST / dRel)
 
 
 class _RangeRateFilter:

@@ -151,16 +151,23 @@ def main():
         len(out_stop) == 1 and len(out_slow) == 1 and out_stop[0][0] <= out_slow[0][0])
   check("110 vs 0 candidate still >= CAP", len(out_stop) == 1 and out_stop[0][0] >= fl.CAP)
 
-  # KNOWN LIMITATION (documented in module docstring): a fully-stopped lead first detected
-  # already inside ~87 m never arms, because dRel_at_hot_start freezes below ARM_MIN_DIST on the
-  # very first hot frame and is never re-anchored. Not a regression vs v1 (which has the
-  # analogous failure for a lead first sighted already inside 100 m) and outside this hook's
-  # declared envelope (sub-3-second emergency stop, not long-range complacency correction) --
-  # documented here so a future reader does not "fix" this file back into the v1 absence-gate
-  # bug while chasing it.
+  # This WAS a known limitation while ARM_MIN_DIST was 80 m: a fully-stopped lead first detected
+  # already inside ~87 m never armed, because dRel_at_hot_start freezes on the first hot frame
+  # and, at 86 m, that anchor landed below 80 m. Lowering the floor to 70 m on 2026-09-04 removed
+  # it -- the case now arms, which is one of the concrete gains the change was meant to buy. The
+  # limitation still exists in principle, just at a shorter range: see the sub-floor case below.
   h_close = new_hook()
   out_close, _ = arm(h_close, 86.0, 30.6, -30.6)
-  check("KNOWN LIMIT: stopped lead first seen at 86 m never arms (see docstring)", out_close == [])
+  check("stopped lead first seen at 86 m NOW ARMS (was the known limit at ARM_MIN_DIST=80)",
+        len(out_close) == 1)
+  check("...and its anchor genuinely cleared the new floor",
+        h_close.dRel_at_hot_start is not None and h_close.dRel_at_hot_start > fl.ARM_MIN_DIST)
+  # the anchor-freeze limitation itself is unchanged in kind -- a lead first seen well inside the
+  # floor still cannot arm, and must not, or the hook would be duplicating stock at close range.
+  h_vclose = new_hook()
+  out_vclose, _ = arm(h_vclose, 62.0, 30.6, -30.6)
+  check("anchor freeze still holds below the floor: lead first seen at 62 m does not arm",
+        out_vclose == [])
 
   # hot-streak anchor is distinct from first-presence: a lead present and steady (non-closing)
   # for a while, THEN starts closing hard, must anchor dRel_at_hot_start at the moment it goes
@@ -269,11 +276,11 @@ def main():
   # work. Scaling the threshold by ARM_MIN_DIST/dRel cancels that. These tests pin the two
   # properties the safety argument rests on: identical below 80 m, and bounded above it.
   print("\ndistance-neutral arming threshold")
-  check("threshold is EXACTLY HOT_A_REQ at ARM_MIN_DIST",
-        fl.hot_a_req_for(fl.ARM_MIN_DIST) == fl.HOT_A_REQ)
+  check("threshold is EXACTLY HOT_A_REQ at THRESH_SCALE_DIST",
+        fl.hot_a_req_for(fl.THRESH_SCALE_DIST) == fl.HOT_A_REQ)
   check("threshold is EXACTLY HOT_A_REQ below it (near field bit-identical to before)",
         all(fl.hot_a_req_for(d) == fl.HOT_A_REQ for d in (5.0, 40.0, 79.9)))
-  check("beyond ARM_MIN_DIST it only ever RELAXES, never tightens",
+  check("beyond THRESH_SCALE_DIST it only ever RELAXES, never tightens",
         all(fl.hot_a_req_for(d) <= fl.HOT_A_REQ for d in (81.0, 100.0, 120.0, 200.0, 1e4)))
   check("threshold is monotonically non-increasing with distance",
         all(fl.hot_a_req_for(a) >= fl.hot_a_req_for(b)
@@ -295,6 +302,28 @@ def main():
         old[1] - old[0] > 0.8)
   check("required closing rate still exceeds HOT_CLOSING_RATE at every distance",
         all(v > fl.HOT_CLOSING_RATE for v in vs))
+
+  # ARM_MIN_DIST and THRESH_SCALE_DIST are INDEPENDENT knobs. They were equal until 2026-09-04,
+  # when the arming floor moved to 70 m. Coupling them would mean that lowering the floor also
+  # relaxes the far-field threshold -- two changes at once, and an unreadable road test.
+  print("\nARM_MIN_DIST and THRESH_SCALE_DIST must stay decoupled")
+  check("the threshold helper does NOT depend on ARM_MIN_DIST",
+        "ARM_MIN_DIST / dRel" not in (GRT / "far_lead.py").read_text())
+  _amd, _tsd = fl.ARM_MIN_DIST, fl.THRESH_SCALE_DIST
+  try:
+    fl.ARM_MIN_DIST = 999.0                      # moving the floor must not move the threshold
+    check("moving ARM_MIN_DIST leaves the threshold curve unchanged",
+          all(abs(fl.hot_a_req_for(d) - fl.HOT_A_REQ * max(fl.HOT_A_REQ_MIN_SCALE,
+                                                           min(1.0, _tsd / d))) < 1e-12
+              for d in (50.0, 80.0, 100.0, 120.0)))
+  finally:
+    fl.ARM_MIN_DIST = _amd
+  check("arming floor is at or below the threshold-scaling distance",
+        fl.ARM_MIN_DIST <= fl.THRESH_SCALE_DIST)
+  check("between the floor and the scaling distance the threshold is the plain constant",
+        all(fl.hot_a_req_for(d) == fl.HOT_A_REQ
+            for d in (fl.ARM_MIN_DIST + 0.1, 0.5 * (fl.ARM_MIN_DIST + fl.THRESH_SCALE_DIST),
+                      fl.THRESH_SCALE_DIST)))
 
   # the severity formula decides how HARD to brake, not WHETHER -- it must stay physically exact
   _src = (GRT / "far_lead.py").read_text()

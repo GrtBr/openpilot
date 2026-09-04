@@ -6829,3 +6829,41 @@ no object identity, so "the lead" silently becomes a different car. `modelV2.lea
 track ID either. Establishing identity (associating detections across frames by predicted position
 and gating on plausibility) is the prerequisite for measuring arming quality at close range at all.
 That is a substantial piece of work and should be scoped as such, not bolted onto this harness.
+
+## 2026-09-04 (q) — ARM_MIN_DIST 80 -> 70 m, OPERATOR DECISION. Decoupled from the threshold
+## scaling so the road test reads cleanly. Removes a documented known limitation.
+
+Operator: "lower ARM_MIN_DIST = 70 m and I'll report back / complain if ghost braking happens."
+Taken as the decision it is. My measurement was inconclusive -- (p) could classify only ~35% of
+arms once contamination was excluded honestly -- so settling it on the road is a reasonable call,
+and the operator is the one who experiences the result.
+
+ONE COUPLING HAD TO BE BROKEN FIRST. `hot_a_req_for()` scaled the far-field threshold by
+ARM_MIN_DIST/dRel. Lowering ARM_MIN_DIST would therefore ALSO have relaxed the threshold at every
+distance beyond it (at 110 m: 70/110 = 0.0636 instead of 80/110 = 0.0727) -- two changes shipping
+at once, and a road report that could not distinguish them. Added `THRESH_SCALE_DIST = 80.0`,
+pinned to the distance the scaling was validated at, and keyed the helper on that instead. The
+arming floor and the threshold curve are now independent knobs, with tests to keep them that way.
+
+VERIFIED the change does exactly one thing:
+  stopped lead first seen at 86 m   armed=True, anchor 70.7 m   (was NOT armed at floor 80)
+  stopped lead first seen at 62 m   armed=False                 (anchor freeze still holds)
+  threshold at 110 m               0.0727                       (UNCHANGED by the floor move)
+  threshold at 75 m                0.1000                       (plain constant between the two)
+
+A KNOWN LIMITATION IS REMOVED, and it is the concrete gain. test_far_lead has asserted since v2
+that "a fully-stopped lead first detected already inside ~87 m never arms", because the anchor
+freezes on the first hot frame and at 86 m that landed below 80. It now arms. The failing test was
+not rewritten to fit -- it was inverted deliberately, and a NEW test added at 62 m to prove the
+anchor-freeze behaviour itself still holds below the floor, which it must, or the hook would
+duplicate stock at close range.
+
+Tests: test_far_lead 41 -> 47 checks (the 4 decoupling tests, plus the inverted limitation test
+and its sub-floor counterpart). hooks 44/44, scc_map 59/59, lead_filter pass.
+
+ROLLBACK IS ONE CONSTANT: set ARM_MIN_DIST back to 80.0. THRESH_SCALE_DIST does not move with it.
+
+WHAT TO WATCH FOR ON THE ROAD: ghost braking in the 70-80 m band specifically -- a brief, gentle
+dip (measured cost of a false arm: ~1.7 s at 0.04 g, ~2.4 km/h) with no obvious slower vehicle
+ahead. Frequency matters more than any single event; the concern flagged in (f) was CLUSTERING,
+several on one stretch of road, which would read as phantom braking rather than as one oddity.
