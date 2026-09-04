@@ -6017,3 +6017,77 @@ ABSENCE of any `ev=rotated` line confirms nothing was silently dropped. Expected
 REVERT PATH: on device, `git revert 733f0d0` (or `git checkout 8e82486 -- <the four paths>` plus
 `rm openpilot/grt/lead_filter.py`) then reboot. The display filter fails safe to the raw value on
 any exception, and the shadow returns nothing into the planner, so neither can affect the car.
+
+## 2026-09-04 — first drive data AFTER the filter deployment. (a) shadow A/B says the new filter
+## is earlier on every shared arm; (b) 76% of hook 11's arming delay is one condition: a_req.
+
+Pulled `/data/media/0/grt/lead_filter.log` (335 KB, 3250 valid lines, 12 boot sessions, 208084
+frames = 2.89 h of plannerd at 20 Hz, ZERO rotations) plus today's drives 178 (13.4 min), 179
+(54.9 min) and 17a (10.9 min, no leads at all).
+
+ONE MALFORMED LINE, and it is benign: line 5 is NUL bytes, and the line after it restarts at
+frame 602 -- an ext4 unclean-shutdown artifact at a power-off boundary, not a logger fault. The
+parser skips unparseable lines. Worth knowing the log survives power loss with one torn line.
+
+(a) PRE vs POST -- the two filters on byte-identical real input.
+A first pass reported "both filters armed: 0", which was an ARTIFACT: each arm is logged on the
+frame it happens, and the two filters arm a few frames apart, so they never share a line. Pairing
+arms within 6 s inside a boot gives the real picture:
+
+  both filters armed the same episode   17
+  deployed only (new MISSED)             1
+  new only (EXTRA arm)                   7
+  on all 17 shared episodes the NEW filter armed EARLIER -- 17/17, median +0.20 s, up to +1.70 s
+
+and it arms while the lead is still farther out (e.g. 90.6 -> 104.2 m, 99.4 -> 111.7 m at the arm
+frame). Position disagreement >2 m occurred on 1.37% of frames, median 2.63 m, max 10.09 m, split
+evenly between reading closer and farther. CAVEAT recorded in the code and repeated here: the
+shadow gate does NOT apply hook 11's personality/longActive/pedal eligibility, so these counts are
+filter-vs-filter, not hook-11-vs-hook-11.
+
+(b) WHY HOOK 11 TAKES SECONDS TO FIRE ON A FAR LEAD. 10 arms on today's drives (7 REAL, 3 WOBBLE).
+Latency from the lead FIRST being seen to the arm: median 4.9 s, range 1.1-8.4 s. Decomposing what
+the gate was blocked on, summed over all 10 arms:
+
+  a_req <= 0.10 (danger "too gentle")   33.9 s   75.8%   <-- dominant
+  hot streak < 0.50 s                    6.4 s   14.3%
+  presence < 0.30 s                      2.5 s    5.6%
+  closing < 2.78 m/s                     1.8 s    3.9%
+  anchor <= 80 m                         0.2 s    0.4%
+
+THE STRUCTURAL REASON, and it is arithmetic. Arming needs a_req = v_filt^2 / (2*(d-6)) > 0.10, i.e.
+a FILTERED closing rate of v_req = sqrt(2 * 0.10 * (d-6)):
+
+  at 110 m  v_req = 4.56 m/s     at 80 m  v_req = 3.85 m/s     HOT_CLOSING_RATE = 2.78 m/s
+
+So beyond ~50 m it is a_req, NOT the closing-rate floor, that binds -- and the requirement gets
+HARDER the farther away the lead is, which is exactly backwards from what "trigger earlier at
+range" wants. The anchor rule (0.4%) and the presence gate (5.6%) are almost irrelevant by
+comparison; earlier work that suspected the ARM_MIN_DIST anchor was mostly chasing the wrong term.
+
+Measured against a non-causal reference of when the danger GENUINELY satisfied a_req, the deployed
+filter lags by a median 3.2 s and the new filter by 2.8 s. Of that ~3 s, 0.3 s is presence
+persistence and 0.5 s is the hot streak (both mandatory); the remaining ~2 s is the velocity
+estimate climbing to v_req. That climb is the only real lever, and it is exactly what the new
+filter shortens. (One row shows a 15.4 s "lag" -- it is a RE-arm after a release within the same
+presence run, not a first response. Do not quote it as a latency.)
+
+OPTIONS MEASURED, today's 68 min and the 5.63 h corpus:
+
+  option                              today real / false     corpus real / false
+  deployed (stock filt, a_req .10)          5 / 3                  8 / 0
+  new filter, a_req .10                     7 / 3                  9 / 0
+  new filter, a_req .07                     9 / 3                  7 / 2
+  new filter, a_req .05                    11 / 3                  7 / 3
+  stock filter, a_req .05                   7 / 4                  9 / 1
+
+The new filter at the CURRENT threshold catches more real arms (7 vs 5 today, 9 vs 8 on the
+corpus) with no extra false arms on either set -- it is strictly better here, unlike the
+arming-path result from 2026-09-03 which showed 12/1 vs 12/0. Lowering HOT_A_REQ buys more real
+arms today but costs false arms on the corpus (0 -> 2 -> 3), and note it REDUCES corpus real arms
+(9 -> 7) because earlier arming re-triggers differently around the 5 s dead time. Not recommended
+without more data.
+
+NOT CHANGED. Hook 11's arming path still runs the deployed filter (`_SHADOW_ONLY = True`). Today's
+result argues for switching it, but on 68 min of new data against a 5.63 h baseline; the honest
+next step is to let the shadow accumulate more drives and re-run this exact comparison.
