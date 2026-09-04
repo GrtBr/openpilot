@@ -6734,3 +6734,43 @@ clean bill of health. It is adequate for separating "nothing happened" from "som
 which is what (l) needed, and it is NOT sound for judging cases where the system responded well --
 precisely the cases that matter most for deciding whether hook 11 earns its place. Any future
 comparison of arming variants should use lead speed, not gap drop, as the primary evidence.
+
+## 2026-09-04 (o) — OPERATOR PROPOSES THE RIGHT TEST: after the arm, did the gap grow because the
+## LEAD DROVE AWAY (brake unnecessary) or because WE BRAKED? Implemented as an attribution split.
+
+Operator: "shouldn't dRel just after braking < dRel 1 second later ... relative to lead speed, as
+he drove away instead of slowing down?" Yes -- with the refinement that gap growth must be
+ATTRIBUTED, because our own braking produces some of it. Since d(gap)/dt = v_lead - v_ego:
+
+    actual   = gap(t1) - gap(t0)
+    ours     = integral of (v_lead(t0) - v_ego(t)) dt      <- what OUR speed change alone gives,
+                                                              holding the lead's speed constant
+    THEIRS   = actual - ours = integral of (v_lead(t) - v_lead(t0)) dt
+
+  THEIRS > 0  the lead sped up / drove away  -> the brake was answering nothing
+  THEIRS ~ 0  the lead held speed; any gap growth is entirely OUR braking
+  THEIRS < 0  the lead slowed further        -> a genuine approach
+
+This is uncontaminated in the way gap drop and ego deceleration are not: it isolates the lead's
+own behaviour, which our braking cannot influence.
+
+Measured over every arm in the corpus (v_lead from the smoothed gap slope, present frames only):
+
+    window 1 s    REAL   n=28  median THEIRS  -1.86 m   (19 slowed further,  7 drove away)
+                  WOBBLE n=13  median THEIRS  +0.95 m   ( 4 slowed further,  8 drove away)
+
+    window 2 s    REAL   n=28  median THEIRS  -5.03 m   (18 slowed further,  9 drove away)
+                  WOBBLE n=13  median THEIRS  +4.77 m   ( 5 slowed further,  8 drove away)
+
+The sign of THEIRS separates the two populations in the direction the operator predicted, and the
+2 s window separates far better than 1 s (a ~10 m spread between class medians versus ~2.8 m) --
+expected, since the derivative is noisy and a longer window averages it down. USE 2 s, not 1 s.
+
+HONEST LIMIT: per-event, the sign of THEIRS agrees with the existing labels only ~63% of the time.
+That is NOT necessarily error -- the existing labels are the contaminated ones this test exists to
+replace, so disagreement is as likely to be the old label being wrong. What can be said is that
+the population medians separate cleanly and in the physically correct direction, while a single
+1-2 s window is too noisy to adjudicate one event on its own. For per-event verdicts, combine it
+with the lead-speed median over a longer window.
+
+ADOPTED as the primary evidence for arming comparisons, replacing gap drop. Recorded to memory.
