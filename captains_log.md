@@ -6243,3 +6243,34 @@ makes hook 11 work at all, and why lowering HOT_A_REQ backfired on the corpus.
 So: the new filter improved the POSITION signal (the HUD, measurably, everywhere) and improved
 arm TIMING, but it did not improve rate SNR and was never going to -- SNR ~ 1 is a property of
 differencing a noisy position over 1 s, not of which smoother is applied.
+
+## 2026-09-04 (d) — can the position gain be had without the rate-noise cost? NO. And on the FULL
+## 11-drive corpus the arming-path case is weaker than the 68-min snapshot suggested. Tempering (b).
+
+Tested whether decoupling the rate term recovers the old filter's quieter velocity while keeping
+the new filter's better position (>80 m band, all 11 drives, same gate code):
+
+  variant                    pos err SD   rate noise SD   real   false
+  old (.10/.003)                2.97 m       4.66 m/s      19      3
+  deployed new (.20/.008)       2.32         5.19          21      4
+  hampel + (.20/.005)           2.31         5.02          18      2
+  hampel + (.20/.003)           2.32         4.90           8      2
+  hampel + (.15/.003)           2.65         4.79          12      2
+
+Three things follow:
+* The POSITION gain (2.97 -> 2.32 m, 22%) comes from Hampel + alpha 0.20 and survives every beta.
+* RATE noise falls as beta falls but NEVER reaches the old filter's 4.66. There is no setting that
+  has both. The rate-noise cost of being faster is structural, not a tuning oversight.
+* REAL arms collapse with beta: 21 -> 18 -> 8. Beta is doing the arming work, so "quiet rate" and
+  "arms on real closures" are the same dial pulled in opposite directions.
+
+IMPORTANT CORRECTION to 2026-09-04 (b). That entry said the evidence "now supports flipping
+`_SHADOW_ONLY`", based on today's 68 min (7/3 vs 5/3) and an 8-drive corpus slice (9/0 vs 8/0). On
+the FULL 11-drive corpus under one consistent code path the comparison is 21 real / 4 false versus
+19 real / 3 false -- ONE extra real arm bought with ONE extra false arm. That is marginal, not the
+clear win the smaller slices implied. Different subsets and two different gate harnesses produced
+the more favourable numbers; the full-corpus figure is the one to trust.
+
+RECOMMENDATION, revised: do NOT flip `_SHADOW_ONLY` yet. The shadow costs ~0.01 MB per engaged
+hour and is already running, so waiting is free while switching is not. Revisit when the shadow
+has several more hours, and judge on the full corpus under one harness, not on a single drive.
