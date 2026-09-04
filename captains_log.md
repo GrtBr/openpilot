@@ -6632,3 +6632,51 @@ threshold fixed the first. The second is why the floor should not simply be lowe
 REVISION to (k): the 75 m step still looks cheap on the numbers (+2 real, +1 false), but the
 reason to be cautious below that is now mechanistic rather than a rate comparison -- at 70 m and
 below, noise/v_req is 1.20+ and rising as the bar falls.
+
+## 2026-09-04 (m) — definitions of "max gap drop" and "came back", and an AMBIGUITY in (l)'s table
+## that the operator's question exposed.
+
+Both come from `false_arms.classify()`. Exact definitions, over a 6 s horizon after the arm frame:
+
+  x0            = x_ref at the ARM FRAME. x_ref is the NON-CAUSAL reference (centred Hampel ->
+                  median -> mean), not raw dRel -- so it is the best offline estimate of the true
+                  gap, deliberately not what the filter saw.
+
+  max gap drop  = x0 - min(x_ref) over the next 6 s, counting only frames where the lead is
+                  present. It answers: how much CLOSER did the lead get than it was at the
+                  instant of arming?
+
+  came back     = max(x_ref over the 4-6 s SLICE) >= x0 - 6.0 m. It answers: by the end of the
+                  window, had the gap returned to within 6 m of its value at arming?
+
+Four properties worth stating because they are easy to misread:
+  * Drop is measured FROM THE ARM FRAME. Closing that happened BEFORE the arm is not counted, so
+    an arm that fires late in an approach shows a small drop even though a large closure occurred.
+  * "came back" looks ONLY at the 4-6 s slice, not the whole window -- a dip that recovers at 2 s
+    and then falls again is judged on where it ended up, not on the excursion.
+  * The 6 m tolerance is arbitrary, chosen to match the June wobble (112 -> 98 -> 112 m).
+  * Neither is used alone. The classifier returns REAL if ego slowed >= 6 km/h, OR if drop >= 12 m
+    AND not recovered. Otherwise WOBBLE.
+
+THE AMBIGUITY, and it affects two rows of (l)'s table. `recovered` is `bool(tail) and max(tail)
+>= x0 - 6.0`, so it is FALSE when the tail is EMPTY -- i.e. when there is no data -- exactly as it
+is when the gap genuinely stayed closed. Checked the two rows printed as "came back: no":
+
+    drive 163 t=1561.7  drop 5.1 m  tail frames: 0 present, 39 ABSENT  -> lead LOST at 4-6 s
+    drive 179 t=1654.2  drop 4.5 m  tail frames: 0 present, 39 ABSENT  -> lead LOST at 4-6 s
+
+Neither means "the gap stayed closed". Both mean "the lead disappeared before the window ended".
+The column should have read `n/a`, not `no`. It is arithmetically detectable in hindsight -- with a
+drop of only ~5 m, every tail value would necessarily exceed x0 - 6, so `recovered` could not have
+been False for any reason other than an empty tail -- but the table as printed invited the wrong
+reading, and the operator was right to query it.
+
+The finding of (l) is UNCHANGED: those two rows were classified FALSE on the drop test (4.5-5.1 m,
+far below the 12 m bar) and the ego test (2.1 and 0.2 km/h, far below 6), not on `recovered`. And
+for the seven "gap barely moved" rows generally, `came back` is close to vacuous -- if the gap
+never fell, returning to its start is trivially true. The load-bearing evidence in those rows is
+the drop itself, which is why they were grouped by that.
+
+TO FIX in the harness when next touched: report `recovered` as a three-state value
+(yes / no / n-a: lead lost) rather than a bool, so an absence of evidence cannot be printed as
+evidence of absence.
