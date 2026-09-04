@@ -6404,3 +6404,36 @@ separate phases. This is the answer to "how could we trigger earlier, especially
 better filter (that is already deployed and worth ~0.2 s), but removing the 1/d penalty from the
 arming criterion, worth a further ~0.2 s median and up to 3 s, with the danger caught up to 18 m
 farther out.
+
+## 2026-09-04 (h) — IMPLEMENTED the distance-neutral arming threshold, with the clamp and tests.
+
+Operator confirmed far-lead response matters, so (g)'s research variant B is now real code.
+
+  * `hot_a_req_for(dRel)` in far_lead.py: returns HOT_A_REQ at or below ARM_MIN_DIST, and
+    `HOT_A_REQ * max(HOT_A_REQ_MIN_SCALE, ARM_MIN_DIST/dRel)` beyond it.
+  * `HOT_A_REQ_MIN_SCALE = 0.60` is the requested clamp. It binds only past ~133 m; the model's
+    hard ceiling is 139.11 m and the published signal effectively stops near 120 m, so on all
+    measured data it never activates. It is a guard against an unseen regime, not a tuning knob --
+    without it the relaxation would be open-ended as dRel grows.
+  * Applied at the ARMING GATE ONLY. The armed branch's severity `a_req` is untouched and still
+    physically exact: it decides how HARD to brake, and scaling that would misstate the physics.
+    A test asserts `hot_a_req_for(` appears exactly twice in the file (its definition and one
+    call), so a future edit cannot quietly apply it to the severity site too.
+
+TESTS: test_far_lead 29 -> 41 checks. The 12 new ones pin what the safety argument rests on:
+threshold exactly equal to HOT_A_REQ at and below ARM_MIN_DIST (near field bit-identical),
+relax-only and monotonic beyond it, clamped at the floor, strictly positive at any distance, the
+required closing rate flat within 0.25 m/s across 80-120 m where it previously spread over
+0.8 m/s, and that rate still exceeding HOT_CLOSING_RATE everywhere so the gate stays meaningful.
+Other suites unchanged: hooks 44/44, scc_map 59/59, lead_filter all pass.
+
+REPLAY VALIDATION of the committed file (constants parsed from the real source, not
+reimplemented), 11 drives / 6.8 h:
+
+  before (flat 0.10)         real 16   false 3   median dRel@arm 89 m   arms >100 m: 1
+  after  (distance-scaled)   real 17   false 3   median dRel@arm 92 m   arms >100 m: 5
+
+NOT YET DEPLOYED -- comma4 offline. NOTE this one is NOT display-only: it changes hook 11's
+arming, i.e. the car's behaviour. The safety argument is that it can only relax beyond 80 m and
+is bit-identical below, but it deserves a real drive with attention rather than a silent rollout.
+The pending `deploy_pathclamp.sh` covers only the HUD change and does NOT include this file.

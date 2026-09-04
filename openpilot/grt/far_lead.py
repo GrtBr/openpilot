@@ -302,6 +302,27 @@ PRESENCE_PERSIST_S = 0.30    # s -- continuous presence required before the armi
 HOT_A_REQ = 0.10             # m/s^2 -- a_req(v_filt) must clear this... LOWERED from 0.30,
                              # 2026-08-31, attempt 5 (deployed despite failing validation -- see
                              # module docstring "ATTEMPT 5, DEPLOYED DESPITE FAILING VALIDATION")
+# DISTANCE-NEUTRAL ARMING THRESHOLD, 2026-09-04. Arming requires a_req = v^2/(2*(d-STOP_MARGIN))
+# to clear HOT_A_REQ, which means the CLOSING RATE it demands is v_req = sqrt(2*HOT_A_REQ*(d-6)) --
+# a rate that GROWS with distance: 3.85 m/s at 80 m but 4.56 m/s at 110 m. A far-lead feature was
+# therefore hardest to trigger exactly where it is meant to work, and measurement showed this is
+# the dominant cost: 76% of arming latency on a real drive sat on this one condition
+# (captains_log 2026-09-04 (b)).
+#
+# Scaling the threshold by ARM_MIN_DIST/dRel almost exactly cancels the (d-6) growth inside the
+# square root, making v_req flat at ~3.85-3.90 m/s at every distance -- which is what the feature
+# always meant. Measured over 11 drives: 12 shared arms fired earlier (median +0.21 s, max
+# +3.05 s), arms beyond 100 m went from 1 to 5, ZERO real arms lost, false arms unchanged at 3.
+#
+# SAFETY: min(1.0, ...) makes this EXACTLY 1.0 for dRel <= ARM_MIN_DIST, so the threshold is
+# bit-identical to the old constant at and below 80 m, and ARM_MIN_DIST already requires the
+# anchor above 80 m. It can only ever RELAX, never tighten, so it cannot cause a missed arm that
+# the previous criterion would have caught.
+HOT_A_REQ_MIN_SCALE = 0.60   # floor on that scaling, so the relaxation is BOUNDED rather than
+                             # open-ended. It binds only beyond ~133 m; the model's own hard
+                             # ceiling is 139.11 m and the published signal effectively stops near
+                             # 120 m, so on measured data this floor never activates -- it is a
+                             # guard against an unseen regime, not a tuning knob.
 HOT_CLOSING_RATE = 2.78      # m/s (~10 km/h) -- ...AND v_filt must be closing at least this fast
                              # ("FOURTH BUG" in module docstring -- a_req alone can clear 0.30 on
                              # tiny closing rates at long range, which is correct for a genuine
@@ -324,6 +345,17 @@ JERK_ARM = 1.5               # m/s^3 -- rate limit on the FALLING edge only, fir
 # ---- release (spec section 6, amended -- see module docstring) ----
 RELEASE_DIST = 20.0          # m -- absolute backstop regardless of stock
 LEAD_LOST_S = 1.0            # s -- release if the lead itself is lost this long
+
+
+def hot_a_req_for(dRel: float) -> float:
+  """Effective arming threshold at this distance. See HOT_A_REQ_MIN_SCALE for the full rationale.
+
+  Returns exactly HOT_A_REQ at or below ARM_MIN_DIST, and a bounded relaxation beyond it, so the
+  CLOSING RATE required to arm is roughly constant with distance instead of growing.
+  """
+  if dRel <= ARM_MIN_DIST:
+    return HOT_A_REQ
+  return HOT_A_REQ * max(HOT_A_REQ_MIN_SCALE, ARM_MIN_DIST / dRel)
 
 
 class _RangeRateFilter:
@@ -403,7 +435,10 @@ class FarLeadPreBrake:
       # a_req alone can clear HOT_A_REQ on a tiny closing rate at long range -- correct for a
       # genuine slow-pack approach, but also fires on ordinary highway measurement noise (see
       # module docstring, "FOURTH BUG"). Require a real closing rate too.
-      if a_req_filt > HOT_A_REQ and v_filt <= -HOT_CLOSING_RATE:
+      # Distance-neutral threshold (2026-09-04): identical to HOT_A_REQ at/below ARM_MIN_DIST,
+      # bounded relaxation beyond it. Applied HERE ONLY -- the armed branch's severity formula
+      # must stay physically exact, since it decides how hard to brake, not whether to.
+      if a_req_filt > hot_a_req_for(dRel) and v_filt <= -HOT_CLOSING_RATE:
         if self.hot_elapsed == 0.0:
           # anchor once, at the first frame the streak goes hot -- NOT at first presence
           # (removed with the absence gate) and not re-checked live every frame thereafter

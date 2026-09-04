@@ -263,6 +263,46 @@ def main():
   check("FOURTH BUG: closing rate decays to -1.5 m/s (<10km/h) -> released, not held",
         out == [] and not h.armed)
 
+  # ---- distance-neutral arming threshold (2026-09-04) ----
+  # a_req = v^2/(2*(d-6)) means the CLOSING RATE arming demands grows with distance (3.85 m/s at
+  # 80 m, 4.56 at 110 m), so the far-lead feature was hardest to trigger where it is meant to
+  # work. Scaling the threshold by ARM_MIN_DIST/dRel cancels that. These tests pin the two
+  # properties the safety argument rests on: identical below 80 m, and bounded above it.
+  print("\ndistance-neutral arming threshold")
+  check("threshold is EXACTLY HOT_A_REQ at ARM_MIN_DIST",
+        fl.hot_a_req_for(fl.ARM_MIN_DIST) == fl.HOT_A_REQ)
+  check("threshold is EXACTLY HOT_A_REQ below it (near field bit-identical to before)",
+        all(fl.hot_a_req_for(d) == fl.HOT_A_REQ for d in (5.0, 40.0, 79.9)))
+  check("beyond ARM_MIN_DIST it only ever RELAXES, never tightens",
+        all(fl.hot_a_req_for(d) <= fl.HOT_A_REQ for d in (81.0, 100.0, 120.0, 200.0, 1e4)))
+  check("threshold is monotonically non-increasing with distance",
+        all(fl.hot_a_req_for(a) >= fl.hot_a_req_for(b)
+            for a, b in zip((80.0, 90.0, 100.0, 110.0), (90.0, 100.0, 110.0, 120.0))))
+  check("relaxation is CLAMPED at HOT_A_REQ_MIN_SCALE (bounded, not open-ended)",
+        abs(fl.hot_a_req_for(1e6) - fl.HOT_A_REQ * fl.HOT_A_REQ_MIN_SCALE) < 1e-12)
+  check("clamp floor in (0,1): can bind, cannot invert the threshold",
+        0.0 < fl.HOT_A_REQ_MIN_SCALE < 1.0)
+  check("threshold stays strictly positive at any distance",
+        all(fl.hot_a_req_for(d) > 0.0 for d in (0.0, 1.0, 80.0, 1e6)))
+
+  def _v_req(d):
+    return (2.0 * fl.hot_a_req_for(d) * max(d - fl.STOP_MARGIN, 1.0)) ** 0.5
+  vs = [_v_req(d) for d in (80.0, 90.0, 100.0, 110.0, 120.0)]
+  check("THE POINT: required closing rate is now flat over 80-120 m (spread < 0.25 m/s)",
+        max(vs) - min(vs) < 0.25)
+  old = [(2.0 * fl.HOT_A_REQ * (d - fl.STOP_MARGIN)) ** 0.5 for d in (80.0, 120.0)]
+  check("...whereas unscaled it spread by more than 0.8 m/s over the same range",
+        old[1] - old[0] > 0.8)
+  check("required closing rate still exceeds HOT_CLOSING_RATE at every distance",
+        all(v > fl.HOT_CLOSING_RATE for v in vs))
+
+  # the severity formula decides how HARD to brake, not WHETHER -- it must stay physically exact
+  _src = (GRT / "far_lead.py").read_text()
+  check("armed-branch severity a_req is unscaled and physically exact",
+        "a_req = (eff_vRel_range ** 2) / (2.0 * max(eff_dRel - STOP_MARGIN, 1.0))" in _src)
+  check("hot_a_req_for is used at the arming gate ONLY (def + exactly one call)",
+        _src.count("hot_a_req_for(") == 2)
+
   print(f"\n{sum(results)}/{len(results)} passed")
   return 0 if all(results) else 1
 
