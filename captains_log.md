@@ -6091,3 +6091,50 @@ without more data.
 NOT CHANGED. Hook 11's arming path still runs the deployed filter (`_SHADOW_ONLY = True`). Today's
 result argues for switching it, but on 68 min of new data against a 5.63 h baseline; the honest
 next step is to let the shadow accumulate more drives and re-run this exact comparison.
+
+## 2026-09-04 (b) — operator proposal: replace a_req>0.10 with a FLAT closing-rate trigger at
+## 4.56 m/s. MEASURED: worse than the deployed rule. But the idea contains a real finding.
+
+Proposal: since a_req>0.10 demands 4.56 m/s of filtered closing at 110 m, just require 4.56 m/s
+everywhere and drop the distance term.
+
+WHAT a_req>0.10 ACTUALLY DEMANDS, as a flat rate (v_req = sqrt(2*0.10*(d-6))):
+
+  40 m 2.61 | 50 m 2.97 | 60 m 3.29 | 70 m 3.58 | 80 m 3.85
+  90 m 4.10 | 100 m 4.34 | 110 m 4.56 | 120 m 4.77   (m/s)
+
+A flat 4.56 therefore equals the current rule at 110 m and is STRICTER everywhere closer. Since
+hook 11's operating band is 80-120 m, the proposal is net stricter, not looser -- the opposite of
+"trigger earlier". Measured (new filter in every row; today = drives 178+179, 68 min; corpus =
+the 8 earlier drives, 5.63 h):
+
+  rule                        today R/F     corpus R/F   arms >80 m   arms <60 m
+  a_req>0.10 (deployed)          7/3           9/0           15            0
+  FLAT > 4.56 m/s                5/3           9/0           14            0
+  FLAT > 4.00 m/s                6/2           9/0           15            0
+  FLAT > 3.50 m/s                8/3           7/2           18            0
+  FLAT > 3.00 m/s               11/3           8/4           22            0
+  FLAT > 2.78 m/s               11/3           7/4           22            0
+
+Flat 4.56 MISSES 2 of the 7 real arms the deployed rule catches today, with no reduction in false
+arms. Rejected on the numbers.
+
+TWO FINDINGS WORTH KEEPING FROM THE QUESTION:
+
+1. **a_req's distance-scaling is largely a non-issue for hook 11**, because ARM_MIN_DIST already
+   requires the anchor >80 m -- every arm in the entire corpus, under every rule tested, happened
+   above 60 m. The short-range leniency the formula provides is NEVER exercised. The only band
+   that matters is 80-120 m, where a_req asks 3.85-4.77 m/s. So "distance-scaled vs flat" is a
+   much smaller question than it looks; over that narrow band the two are nearly the same curve.
+
+2. **The flat rules DO arm farther out**: median dRel at arm 93.6 m vs the deployed rule's 85.7 m,
+   across every flat threshold tested, at identical median latency (~2.6-2.7 s). That is the real
+   grain of truth in the proposal -- a flat threshold does not get harder as the lead gets more
+   distant, so when it fires it fires sooner in the approach. FLAT > 3.50 m/s gets BOTH more real
+   arms than deployed (8 vs 7) and the greater arm distance, at a cost of 2 false arms on the
+   5.63 h corpus (0 -> 2).
+
+So the useful version of the operator's idea is not 4.56 but ~3.50, and it is a real candidate
+rather than a clear win: +1 real arm and +8 m of arming distance today, against +2 false arms per
+5.6 h. NOT adopted; the sample is 68 min of new data and the false-arm cost lands on the larger
+set. Re-run when the shadow has accumulated more drives.
