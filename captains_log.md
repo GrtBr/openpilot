@@ -6898,3 +6898,43 @@ before any `cd`.
 
 NOW WATCHING FOR: ghost braking in the 70-80 m band. The shadow log continues to record old-vs-new
 filter behaviour independently of this change.
+
+## 2026-09-05 — OPERATOR QUESTION: how often is the reported vRel greater than v_ego (i.e. a
+## closing rate no same-direction lead can produce)? Answer: 31 frames in 62841, ALL below 40 m.
+
+A same-direction lead closes at exactly v_ego only when fully STOPPED; faster than that means it
+is moving TOWARD us -- oncoming, or not one object. Checked on the RAW published signal
+(`radarState.leadOne.vRel`), the model's own velocity output, across all 11 drives:
+
+  frames with a lead present                                        62841
+  frames where the reported closing rate exceeds v_ego (+0.5 m/s
+  tolerance for measurement slop)                                      31   (0.05%)
+
+  by distance:   0-20 m   30
+                20-40 m    1
+                  >40 m    0
+
+  worst cases:  drive 15f t=1.2 s    dRel  9.7 m  vRel -6.28  v_ego 0.00  excess 6.28 m/s
+                drive 179 t=2649 s   dRel  8.9 m  vRel -7.07  v_ego 4.09  excess 2.98 m/s
+                drive 15f t=3485 s   dRel  7.6 m  vRel -5.42  v_ego 3.09  excess 2.33 m/s
+
+Two things worth stating.
+
+1. THE FAR FIELD IS CLEAN. Not one impossible reading beyond 40 m, in ~63k present frames. So in
+   hook 11's entire operating band the model never claims a closure it cannot physically be
+   seeing. That is a genuinely reassuring result for the far-lead work, and it is the first
+   independent evidence that the far-field vRel, however NOISY (rate-noise SD 4-6 m/s), is not
+   systematically corrupt.
+
+2. THEY ARE ALL CLOSE-RANGE, LOW-SPEED. Nearly all at v_ego 0-4 m/s, i.e. crawling or stopped, at
+   7-12 m. The worst is a stationary car (v_ego 0.00) with the model reporting a lead approaching
+   at 6.28 m/s -- that is something genuinely moving toward the car, or leadOne switching object,
+   not a same-direction lead at all. Consistent with the 2026-09-01 finding that this car's
+   near-field detections at low speed are noisy in their own way.
+
+DOES IT REACH THE CONTROL PATH? No. Hook 11's severity formula uses `min(vRel_model, v_filt)`, so a
+spuriously negative vRel WOULD make it brake harder -- checked explicitly across the 1752 frames
+where the hook was armed in this corpus: ZERO of the 31 fell inside an armed window. Structurally
+expected, since all 31 are below 40 m while the arming floor is 70 m and RELEASE_DIST is 20 m, but
+worth confirming rather than assuming, because the pessimistic `min()` pairing is exactly the place
+where a bad vRel would do damage.
