@@ -7151,3 +7151,55 @@ missing from every extraction before today. Add it, and `leadTwo`, to the standa
 `leadTwo` tracking leadOne within a metre is a cheap, strong "this is one object" check, and
 divergence between them is a cheap identity-change detector. This is the lateral-signature idea
 from (c), and it works.
+
+## 2026-09-06 (e) — OPERATOR: would lowering the presence gate into the 0.26-0.44 band improve
+## reaction time and distance? MEASURED: essentially NO on both, for a specific structural reason.
+
+Tested by rebuilding the frame stream with radard's `lead_prob > 0.5` gate moved down, then
+replaying the CURRENT deployed arming config (ARM_MIN_DIST=70, distance-neutral threshold) over
+all 12 drives.
+
+  gate    arms  justified  unjust  unknown   median dRel@arm   arms >100 m
+  0.50      36      12        0      24          87.9 m             6
+  0.44      37      14        0      23          86.4 m             6
+  0.35      39      15        0      24          87.9 m             7
+  0.26      42      13        0      29          90.2 m             9
+  0.20      43      11        0      32          87.0 m            11
+
+REACTION TIME -- on the events both settings catch (the fair comparison):
+
+  gate   shared  fired earlier   median gain   max gain   median extra distance
+  0.44     36          2           +0.00 s     +0.25 s          +0.0 m
+  0.35     36          7           +0.00 s     +3.30 s          +0.0 m
+  0.26     36          8           +0.00 s     +1.70 s          +0.0 m
+  0.20     35          7           +0.00 s     +1.09 s          +0.0 m
+
+THE MEDIAN GAIN IS ZERO AT EVERY SETTING. Only 2-8 of 36 shared events move at all; the rest are
+bit-identical. A handful gain a lot (up to 3.3 s), but the typical approach gains nothing.
+
+WHY, and it is the same structural reason as the 2026-09-03 sub-gate test: hook 11 needs
+PRESENCE_PERSIST_S (0.30 s) + HOT_PERSIST_S (0.50 s) = 0.80 s of CONTINUOUS presence carrying a
+sustained closing signal. Sub-gate detections have a median contiguous run of ~0.35 s. Publishing
+them earlier does not create the 0.8 s of continuity the gate requires, so the arm still waits for
+the confident detection that would have arrived anyway. Lowering the gate changes WHEN a lead is
+published, not when it becomes PERSISTENT -- and hook 11 keys on the latter.
+
+WHAT DOES MOVE: arms beyond 100 m nearly double (6 -> 11 at gate 0.20) and the median arm distance
+drifts up slightly at 0.26 (87.9 -> 90.2 m). So there IS a real long-range effect, just not a
+reaction-time one -- and it is bought with UNKNOWNs rising 24 -> 32, i.e. more arms that cannot be
+classified, which by 2026-09-04 (p) are disproportionately the cluttered scenes where leads swap.
+
+BEST OF THE OPTIONS, if one were taken: 0.35. It is the only setting where JUSTIFIED peaks (15 vs
+12 today) without unknowns rising. Below that, justified falls again (13 at 0.26, 11 at 0.20)
+while unknowns climb -- the extra detections are increasingly junk.
+
+RISK CHECKED, and it is reassuring: lowering the gate does NOT make the 08:56 overtake-cut-in
+ghost fire earlier. It arms at t=1066.98 / 76.1 m at 0.50, 0.44, 0.35 and 0.20, and only trivially
+differently (1066.93 / 69.1 m) at 0.26. The ghost is triggered by the identity SWEEP after
+acquisition, not by when acquisition happens, so moving the gate does not amplify it.
+
+ANSWER: no meaningful reaction-time or distance improvement should be expected. The bottleneck is
+hook 11's own 0.8 s persistence requirement, not radard's confidence gate. If the goal is earlier
+far-lead response, the persistence requirement is the thing to attack -- and the SNR work
+(2026-09-04 (c)) says that persistence is precisely what makes the gate work at all, so that is a
+real trade rather than free money.
