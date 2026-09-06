@@ -7105,3 +7105,49 @@ extraction is written and armed; comma4 has been offline since.
 
 Also unresolved: the operator's report of a similar event ~11:30 (trip 00000184). Its two arms in
 the shadow log do NOT carry the sweep signature, so it may be a different mechanism. NOT ANSWERED.
+
+## 2026-09-06 (d) — the ~11:30 event is NOT the same failure. It is hook 11 working correctly.
+## First extraction with LATERAL POSITION, which settles it immediately.
+
+Pulled trip 00000184 with `yRel` and `leadTwo` included -- fields never extracted before, and they
+answer the question on sight. One arm in the window: 11:29:45, dRel 93.3 m, anchor 94.5 m,
+v_filt -7.19 m/s, 73 km/h.
+
+  wall       dRel    yRel    vRel   prob | vEgo  cmd accel
+  11:29:42  110.3   -0.88   -0.69   0.79 |  75    -0.09
+  11:29:44  113.3   -1.54   -7.42   0.82 |  74    -0.35
+  11:29:45   93.3   -0.36   -7.27   0.92 |  73    -0.90   <== ARM
+  11:29:46   86.4   -0.26   -5.59   0.97 |  72    -1.13
+  11:29:47   69.1   -0.14   -8.21   0.98 |  68    -1.32
+  11:29:48   54.0   -0.27   -1.58   0.99 |  61    -1.71
+  11:29:50   39.9   -0.14   -6.93   1.00 |  49    -2.11
+  11:29:52   16.0    0.08   -4.04   1.00 |  25    -2.16
+
+EVERY DIAGNOSTIC POINTS THE OPPOSITE WAY FROM 08:56:
+  * yRel sits at -0.5 to -1.5 m and converges to ~0 -- a vehicle DIRECTLY AHEAD, not entering
+    from an adjacent lane. At 08:56 there was no yRel data; this is exactly what it is for.
+  * vRel is consistently -5 to -9.8 m/s throughout, i.e. the model's own velocity channel AGREES
+    the lead is genuinely slower. At 08:56 it read ~0 and then turned positive.
+  * dRel falls SMOOTHLY 121 -> 16 m with no step; leadTwo tracks leadOne within 1 m the whole
+    way, so it is one object, not an identity change.
+  * the car decelerates progressively from 77 to 25 km/h over 13 s. That is a real approach to a
+    genuinely slower vehicle, and slowing down was correct.
+
+So: a real slow lead, correctly detected, correctly braked for. Hook 11 armed on it correctly.
+
+AND IT MADE ALMOST NO DIFFERENCE. Hook 11 enters a `min()`, so it only binds when harder than what
+the planner already wanted. Comparing its command against the actual commanded accel frame by
+frame: it bound on 28 of 129 armed frames (22%), all in a single 1.5 s stretch around 184-186 s
+where it asked for -1.5 to -2.0 while stock was at -1.5 to -1.7. Before and after, stock was
+already braking harder and the hook was inert.
+
+CONCLUSION FOR THE OPERATOR: the two events are unrelated. 08:56 was a ghost brake from an
+overtake-and-pull-in with no danger present; 11:29:45 was a correct response to a genuinely slower
+car, in which hook 11 contributed a modest amount of extra braking for about 1.5 s and was
+otherwise redundant with stock.
+
+METHOD NOTE. `yRel` settled in one glance what the distance channel alone could not, and it was
+missing from every extraction before today. Add it, and `leadTwo`, to the standard extractor --
+`leadTwo` tracking leadOne within a metre is a cheap, strong "this is one object" check, and
+divergence between them is a cheap identity-change detector. This is the lateral-signature idea
+from (c), and it works.
