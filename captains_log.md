@@ -6938,3 +6938,61 @@ where the hook was armed in this corpus: ZERO of the 31 fell inside an armed win
 expected, since all 31 are below 40 m while the arming floor is 70 m and RELEASE_DIST is 20 m, but
 worth confirming rather than assuming, because the pessimistic `min()` pairing is exactly the place
 where a bad vRel would do damage.
+
+## 2026-09-06 — OPERATOR: "why did hook 11 fire at 8:55?" It was a GHOST BRAKE, and the mechanism
+## is one the design explicitly bet against. First real-world failure of the arming signal choice.
+
+Trip 00000183 (08:38:19 SAST start). Six arms; the one asked about is at 08:56:05, t=1067.0 s,
+120 km/h. Frame-by-frame from the rlog:
+
+  08:56:04.x  lead ABSENT for ~6 s. Model x ~115-121 m at prob 0.26-0.44 -- below radard's 0.5
+              gate, so nothing published. xStd 19-23 m.
+  08:56:05.3  prob crosses the gate (0.47 -> 0.70 -> 0.89 -> 0.94 -> 0.99) and a lead appears
+              at 118.6 m.
+  08:56:05.5  the model's position estimate then SWEEPS DOWN: 120 -> 107 -> 95 -> 78 -> 56 -> 44
+    to        -> 34 -> 27 m over about 1.4 s, while xStd tightens 22 -> 3.1 m.
+  08:56:06.9
+  08:56:07-08 car decelerates to -1.95 m/s^2.
+  08:56:08.5  DRIVER INTERVENES (pedal), openpilot longitudinal disengages, speed recovers.
+
+WHAT ACTUALLY HAPPENED: there was a real vehicle at ~27-35 m (prob 0.99, xStd 3.1), travelling at
+or slightly above our speed. The model had simply mis-placed it at 120 m while unsure, then
+CONVERGED onto the true distance as confidence rose. The 93 m of apparent approach in 1.4 s never
+happened -- at 120 km/h we covered 47 m in that time, so a genuine 93 m closure is impossible.
+Hook 11's position-derived filter integrated the convergence sweep as v_filt = -25.9 m/s and armed.
+
+THE PART THAT MATTERS. The model's OWN vRel said the opposite throughout: -0.68, -1.37, -0.91,
+-1.78, -2.24, -0.26, -0.58, -0.49, then POSITIVE +1.11, +1.02, +1.47, +2.09. It never once reached
+HOT_CLOSING_RATE. The two signals disagreed completely, and the hook is built to trust the one that
+was wrong.
+
+That is a deliberate design decision, documented in far_lead.py's docstring ("THE ARMING GATE, AND
+WHY IT DOES NOT USE min(lead.vRel, v_filt)") and taken for good reason: on the 2026-08-25 log,
+gating arming on raw vRel false-armed on a single noisy sample and on a flickering blip. The bet
+was that vRel is the unreliable one. THIS EVENT IS THE FIRST MEASURED CASE WHERE THE BET LOST --
+in an acquisition-convergence artefact, vRel is the accurate signal and the position-derived rate
+is the liar, because the position is sweeping through values the object never occupied.
+
+TESTED A FIX: also require the model's own vRel to agree that we are closing (a conjunction, not a
+replacement). Over all 12 drives:
+
+  vRel gate            arms  justified  unjustified  unknown   blocks the 08:56 ghost arm?
+  none (deployed)        35        11         1         23     NO
+  vRel <= 0.0            31        13         1         17     YES
+  vRel <= -0.5           21         6         1         14     YES
+  vRel <= -1.0           17         5         1         11     YES
+  vRel <= -2.78          4          0         0          4     YES
+
+`vRel <= 0.0` is the striking row: it blocks the ghost arm, drops 4 arms in total, and JUSTIFIED
+goes UP (11 -> 13) while unjustified stays at 1. It removes arms that were mostly unclassifiable,
+i.e. exactly the acquisition/swap artefacts. Anything stricter than 0.0 starts destroying real
+arms fast (13 -> 6 -> 5 -> 0).
+
+NOT IMPLEMENTED -- research only, per the standing rule. But this is the strongest candidate change
+to come out of the whole investigation: it is a one-line conjunction, it is aimed at a mechanism now
+observed on the road rather than inferred, and on the corpus it costs nothing. Caveat: "justified
+goes up" is partly an artefact of removing UNKNOWNs from the denominator, and the classifier's
+limits (2026-09-04 (p)) still apply.
+
+NOTE ON ARM_MIN_DIST=70: this ghost arm is NOT attributable to it. The anchor was 98.7 m, far above
+either 70 or the old 80. It would have fired identically before yesterday's change.
