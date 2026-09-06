@@ -6996,3 +6996,54 @@ limits (2026-09-04 (p)) still apply.
 
 NOTE ON ARM_MIN_DIST=70: this ghost arm is NOT attributable to it. The anchor was 98.7 m, far above
 either 70 or the old 80. It would have fired identically before yesterday's change.
+
+## 2026-09-06 (b) — OPERATOR CORRECTS THE 08:56 DIAGNOSIS: it was a CUT-IN, not depth convergence.
+## The corrected mechanism is worse for the design, and the shadow log shows the new filter
+## AMPLIFIES it 1.4-1.6x.
+
+Operator: "this basically happened due to following a distant car, then a close cut-in but one that
+drove faster than us. It was never a danger as it moved away at a faster speed."
+
+That is a better explanation than mine and it fits the data. I read the 120 -> 27 m sweep as one
+object's depth estimate converging as confidence rose. It is in fact leadOne CHANGING IDENTITY:
+the distant car we were following, then a nearer car cutting in. The 1.4 s ramp rather than an
+instant step is the model re-weighting which vehicle is "the lead" as the cut-in enters the lane --
+`leadsV3[0].x` is a regression output, not a tracked object, so an identity change appears as a
+sweep through distances no single vehicle ever occupied.
+
+WHY THE CORRECTION MATTERS. Depth convergence would be a transient perception artefact, rare and
+self-limiting. A CUT-IN IS A NORMAL, FREQUENT TRAFFIC EVENT -- and one this hook cannot represent,
+because it reasons about a single anonymous distance channel with no object identity. Every cut-in
+from a farther lead to a nearer one produces a downward sweep that the position-derived filter
+must read as closing. The operator's key point stands: the cut-in was FASTER than us, so there was
+never any danger; the gap opened immediately afterwards (vRel positive throughout, +1.0 to +2.7).
+
+THE SHADOW LOG SHOWS THE NEW FILTER MAKES IT WORSE. Searching all 68 arms in today's log for a
+sweep signature (filter closing rate beyond ~12 m/s):
+
+  boot     t      dRel  vEgo |  x_old  v_old |  x_new  v_new | x_new-dRel  v_new/v_old
+   20   1093.5    58.4   120 |   87.9 -15.78 |   80.3 -24.38 |     +21.9       1.54   <- 08:56
+   20   1093.6    49.3   120 |   76.2 -21.21 |   66.4 -32.43 |     +17.1       1.53   <- 08:56
+   20   1331.6    51.1    95 |   64.9 -14.62 |   57.5 -23.28 |      +6.4       1.59   <- 2nd, same drive
+   ...9 more, v_new/v_old between 1.32 and 1.62
+
+12 of 68 arms carry this signature, and in EVERY one the new filter reports a closing rate
+1.3-1.6x larger than the deployed filter. That is the deployed Hampel change working exactly as
+designed -- it is faster, so it follows the sweep more closely -- and being faster is precisely
+wrong for this failure mode. The `x_new - dRel` column shows both filters were still 17-22 m
+BEHIND the raw sweep when they armed, i.e. neither had caught up to a "closure" that was not real.
+
+A SECOND EVENT IN THE SAME DRIVE at t=1331.6 (95 km/h, dRel 51.1, v_new -23.28) has the identical
+shape. The operator also reports a similar event around 11:30, which is trip 00000184 -- extraction
+is armed and waiting for the device, so that is UNCONFIRMED. What can be said from the shadow log
+alone is that trip 184's two arms (t=210.4 and t=844.8, v_new -7.26 and -6.48) do NOT carry the
+sweep signature, so if something happened at 11:30 it either has a different mechanism or falls in
+a boot I have not correctly identified. NOT ANSWERED YET -- do not assume it is the same cause.
+
+BEARING ON THE PROPOSED vRel GATE (2026-09-06). This strengthens it considerably. A cut-in by a
+FASTER vehicle has positive vRel by definition -- the model reports the true relative velocity of
+the new object correctly even as the position channel sweeps. `vRel <= 0.0` as an arming
+conjunction blocks precisely this class, and the corpus test showed it costs 4 arms while raising
+justified ones. The mechanism is now understood well enough to say WHY it works, not just that it
+does: vRel is measured on the object currently selected, while dRel-derived rate is corrupted by
+the selection CHANGE.
