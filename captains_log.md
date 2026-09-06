@@ -7047,3 +7047,61 @@ conjunction blocks precisely this class, and the corpus test showed it costs 4 a
 justified ones. The mechanism is now understood well enough to say WHY it works, not just that it
 does: vRel is measured on the object currently selected, while dRel-derived rate is corrupted by
 the selection CHANGE.
+
+## 2026-09-06 (c) — OPERATOR: the cut-in was "a car coming from behind on a 2-lane highway", i.e.
+## an OVERTAKE-AND-PULL-IN. And two of my own earlier claims about the fix do not survive scrutiny.
+
+The mechanism is now fully pinned: we were following a distant car; a FASTER car overtook us and
+pulled into our lane at ~27 m; leadOne switched identity from the distant car to the overtaking
+one; the reported distance swept 120 -> 27 m in 1.4 s; hook 11 read that as a 26 m/s closure and
+braked at 120 km/h until the operator intervened. The overtaking car was accelerating away the
+whole time. This is not an exotic perception glitch -- it is ordinary two-lane-highway traffic,
+and it will recur every time someone overtakes and pulls in.
+
+TWO CORRECTIONS TO MY OWN PREVIOUS ENTRY. Both were reported too confidently and are withdrawn:
+
+1. "A faster cut-in has positive vRel by definition, so `vRel <= 0` blocks this class." NOT TRUE
+   as stated. Frame-by-frame through the arming decision, vRel during the whole hot streak reads
+   -0.87, -0.68, -1.33, -1.37, -1.31, -0.91, -1.56, -1.78, -0.68, -2.24, -1.32, -0.26, -0.33,
+   -0.58, -0.15, -0.49 -- consistently NEGATIVE. vRel only turns positive AFTER the sweep settles
+   on the new lead. During the identity change, vRel is confused too.
+
+2. "The vRel gate blocks the 08:56 arm." That result was an ARTEFACT OF A BUG IN MY TEST HARNESS.
+   Accumulating `hot += 0.05` gives 0.4999999 at ten frames, so `h >= 0.5` failed and the arm
+   landed one frame LATE -- on the single frame where vRel had turned +0.56. Fixing the comparison
+   to `h >= HP - 1e-9` moves the arm one frame earlier, where vRel is -0.49, and the gate no
+   longer blocks anything. Across the corpus the vRel gate now scores 32 arms / 10 justified /
+   1 unjustified against the deployed 36 / 12 / 0 -- it is WORSE, not better. Withdrawn.
+
+WHAT DOES WORK, AND ONLY NARROWLY. The operator's own physics -- a same-direction lead cannot close
+faster than v_ego -- applied to the RAW gap rather than the filtered estimate. The filtered rate at
+the arm was -25.7 m/s against v_ego of 33.3, which is physically possible, so a gate on the FILTER
+catches nothing. The RAW gap fell 59.7 m in 1.5 s = 39.8 m/s, which is NOT possible.
+
+  window   margin   arms  justified  unjust  unknown   blocks 08:56
+  none      0.0      36      12        0       24        NO
+  0.5 s     0.0      26       8        0       18        YES
+  1.0 s     0.0      34      13        0       21        NO
+  1.5 s     0.0      34      12        0       22        NO
+
+Only the 0.5 s window blocks it, and it costs 10 of 36 arms and 4 of 12 justified ones. Longer
+windows keep more arms but stop catching the event, because the sweep is fast enough to be averaged
+away. That is not a good trade, and I am not recommending it.
+
+HONEST POSITION. The cut-in failure mode is real, understood, and will recur -- but I do not yet
+have a gate that suppresses it without meaningful collateral. Every candidate tried so far
+(innovation clamp, rejection gate, xStd weighting, vRel conjunction, filtered-rate physics gate,
+raw-rate physics gate) either misses this class or costs real arms. The reason is the same one
+identified on 2026-09-04 (p): leadOne is an ANONYMOUS SLOT. A cut-in and a genuine closure look
+identical in a single distance channel, and no threshold on that channel can separate them. The
+fix is object identity, not another gate.
+
+WHAT I WOULD DO INSTEAD, and it needs data I do not have: leadsV3 carries a LATERAL position (y)
+that is not currently extracted. An overtaking car pulling in has a large |y| that decreases as it
+enters the lane, whereas a lead we have been following sits near y~0 throughout. That is a
+DIRECT signature of the event, independent of the distance channel, and it is the first candidate
+I would test that is not another threshold on a signal already known to be ambiguous. The
+extraction is written and armed; comma4 has been offline since.
+
+Also unresolved: the operator's report of a similar event ~11:30 (trip 00000184). Its two arms in
+the shadow log do NOT carry the sweep signature, so it may be a different mechanism. NOT ANSWERED.
