@@ -7203,3 +7203,62 @@ hook 11's own 0.8 s persistence requirement, not radard's confidence gate. If th
 far-lead response, the persistence requirement is the thing to attack -- and the SNR work
 (2026-09-04 (c)) says that persistence is precisely what makes the gate work at all, so that is a
 real trade rather than free money.
+
+## 2026-09-08 — OLD vs NEW filter through hook 11's arming gate. The new filter is strictly better
+## on today's data, and the shadow's "55 vs 67" was a LINE COUNT, not an arm comparison.
+
+FIRST, A CORRECTION TO MY OWN NUMBERS. I quoted "55 old-armed, 67 new-armed" from the shadow log.
+Those are LOG LINES. The two filters arm on different frames, so each gets its own line and the
+same event is counted twice. Paired within a boot by time (6 s window), the accumulated shadow log
+since the 2026-09-03 deploy actually reads:
+
+    both 53    OLD only 2    NEW only 14
+    on the 53 shared: new fired EARLIER 48, later 3; median +0.25 s, max +5.76 s, worst -0.50 s
+    median extra distance at arm +1.4 m, max +21.5 m
+
+Second caveat, already noted in the code: the shadow gate does NOT apply hook 11's
+personality/longActive/pedal eligibility, so those are filter-vs-filter counts over ALL driving,
+not hook 11 arms.
+
+REPLAY WITH FULL ELIGIBILITY, today's 5 drives (72.6 min), using the v2 extraction:
+
+    armed by BOTH          12
+    OLD only (new missed)   0     <- the new filter missed nothing
+    NEW only (extra arm)    2
+    on the 12 shared: new earlier 11, later 1
+      median gain +0.25 s   max +5.20 s   worst -0.10 s
+      median extra distance +3.1 m   max +16.1 m
+
+So on today's data the new filter is strictly better: it loses no arm the deployed filter catches,
+fires earlier on 11 of 12, and catches the danger a median 3 m farther out. The single "later" case
+is 0.10 s, i.e. two frames.
+
+IDENTITY CHECK ON ALL 14 ARMS -- now possible for the first time, using yRel and leadTwo from the
+v2 extraction. For each arm: the raw gap fall rate (is it faster than v_ego, hence impossible for
+one object), the lateral swing, and leadOne/leadTwo divergence.
+
+  13 of 14 read as a SINGLE OBJECT: lateral swing 0.11-1.34 m, leadOne/leadTwo within 0.2-0.7 m,
+  raw fall 3.7-18.1 m/s but never above v_ego. These are genuine approaches.
+
+  1 of 14 is different -- 18f t=974.1 (12:24:57), and it is NOT a cut-in either. The "lead" sits
+  at yRel -2.3 to -4.4 m for the whole event, i.e. 2-4 m to the LEFT, while the steering angle
+  wanders between -5.2 and +2.4 deg with a mean of -0.7 -- essentially straight. A genuine lead on
+  a bend would show a sustained steering angle; this does not. The raw gap OPENS over the lookback
+  (-5.4 m/s) while the filter reports -4.97 m/s of closing, and vRel oscillates around zero
+  (+1.29, -0.27, +1.00, -0.32). Hook 11 armed and its command reached FLOOR (-0.40) at t=974.7.
+  A vehicle in the ADJACENT LANE, with a noisy distance, producing a small unnecessary brake at
+  50 km/h.
+
+THREE FAILURE MODES NOW DISTINGUISHED, all invisible in the distance channel alone:
+  * genuine approach            -- yRel near 0, leadTwo agrees, vRel negative and consistent
+  * overtake cut-in (2026-09-06) -- raw fall exceeds v_ego, vRel confused then positive
+  * adjacent-lane lead (today)  -- yRel sustained at 2-4 m with no matching steering angle
+
+The third is new and was undetectable before yRel was extracted. It is also the cheapest to gate:
+a sustained |yRel| well outside the lane, with no steering to justify it, is a clean disqualifier
+that needs no velocity reasoning at all. NOT IMPLEMENTED -- one instance is not a basis for a gate,
+but it is now measurable and worth counting over the next drives.
+
+NET: the new filter earns its place on arming quality (0 missed, 11/12 earlier, +3.1 m median).
+Its known cost remains the 1.3-1.6x amplification of sweep artefacts recorded on 2026-09-06.
+_SHADOW_ONLY is still True; nothing changed on the car today.
