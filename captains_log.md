@@ -7262,3 +7262,48 @@ but it is now measurable and worth counting over the next drives.
 NET: the new filter earns its place on arming quality (0 missed, 11/12 earlier, +3.1 m median).
 Its known cost remains the 1.3-1.6x amplification of sweep artefacts recorded on 2026-09-06.
 _SHADOW_ONLY is still True; nothing changed on the car today.
+
+## 2026-09-08 (b) — the 10:52:55 event: hook 11 STARTED the braking on a genuine hard approach,
+## 0.2 s before the planner. The clearest evidence yet that the feature does its job.
+
+Drive 18d, 10:52:55 SAST, 106 km/h. The whole event, with the identity signals now available:
+
+  10:52:50-53  lead ABSENT for ~3 s
+  10:52:53     appears at 103.6 m, yRel 0.08 (dead ahead), prob 0.82
+  10:52:55     dRel 86.5, vRel only -0.58 -- the model's velocity channel shows almost NO closing
+               yet -- but the position filter reads -9.62 m/s. HOOK 11 ARMS.
+  10:52:55.6   commanded accel goes -0.40 -> -0.47 -> -0.57  (braking begins)
+  10:52:56-58  vRel catches up: -2.7, -4.5, -8.3, -8.6, -10.1, -11.2
+  10:52:58     commanded accel reaches -3.50 = ACCEL_MIN, the vehicle limit; aEgo -3.42
+  10:52:59     gap down to 20.8 m, speed 106 -> 76 km/h
+
+This was a REAL emergency approach. yRel stays within +/-0.3 m of dead ahead the whole way,
+leadTwo tracks leadOne within 0.2 m -- one object, no cut-in, no adjacent-lane artefact. The car
+ended up braking at its maximum.
+
+HOOK 11 LED THE BRAKING. Replaying its command against what was actually commanded:
+
+  t=192.32  hook wants -0.48, planner commanded +0.04   <- hook leads
+  t=192.53  hook wants -0.77, planner commanded -0.40   <- braking begins, 0.20 s after the arm
+  t=193.9   hook wants -1.88, planner commanded -1.40   <- still leading
+  ...
+  hook 11's command was harder than the planner's on 40 of 83 armed frames, and on the FIRST
+  frame of the event.
+
+So on this event hook 11 initiated braking roughly 0.2 s before the rest of the planner asked for
+anything, and kept leading through the first ~1.5 s of the response. At 106 km/h, 0.2 s is 5.9 m.
+
+THE INTERESTING PART -- THIS IS THE MIRROR IMAGE OF THE 08:56 GHOST. There, the position filter
+said -25.9 m/s while vRel said ~0 and vRel WAS RIGHT (a cut-in, no danger). Here the position
+filter said -9.6 m/s while vRel said -0.58, and the POSITION FILTER was right -- a genuine
+emergency that vRel only registered 1-2 s later.
+
+That is the direct counter-example to the `vRel <= 0` arming conjunction I floated on 2026-09-06
+and then withdrew. It is now doubly dead: it failed on its own numbers, and this event shows the
+class of approach it would have delayed. The design's original bet -- trust the position-derived
+rate, not vRel -- is right for genuine closures and wrong for identity changes, and NEITHER signal
+distinguishes the two. Only the identity evidence (yRel, leadTwo) does.
+
+Both filters armed within 0.1 s of each other here (new at 192.3 with v_filt -9.62, deployed at
+192.4 with -7.62), so this event is not an argument for or against the shadow filter -- it is an
+argument that hook 11 itself earns its place.
