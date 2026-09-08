@@ -7346,3 +7346,60 @@ fires earlier and, being a physical uncertainty rather than a classification sco
 speckly. Whether that holds across the corpus is UNTESTED; this is one event. Worth measuring
 before anything is proposed, and it is the first idea in a while that is not another threshold on
 a signal already known to be ambiguous.
+
+## 2026-09-08 (d) — TESTED xStd as a presence discriminator. It IS strongly discriminative, and an
+## earlier finding of mine was confounded -- but as a gate it buys almost nothing.
+
+Operator asked to test "uncertainty below about 10 m at 120 m range" as a cleaner discriminator.
+
+STEP 1 -- IS xStd DISCRIMINATIVE? Compared its distribution for CONFIDENT detections (prob>0.9)
+against the NOISE FLOOR (prob<0.05), by range, over all 12 drives:
+
+  band       confident: n, p50, p90    noise: n, p10, p50    noise below the confident p90
+  60-90 m     12552   7.6   10.1        24406  12.8  17.1              0.9%
+  90-110       3198   8.4   10.7        20359  13.7  18.8              0.5%
+  110-130       221   7.7   10.5        46086  12.9  18.0              1.1%
+
+Yes -- and better than expected. A threshold near 10-11 m separates a real lead from noise with
+about a 1% leak. Note also that a REAL lead's xStd does NOT grow with distance: 7.6, 8.4, 7.7 at
+the median from 60 m to 130 m.
+
+THAT CORRECTS AN EARLIER FINDING OF MINE. On 2026-09-01 I reported "median xStd by distance:
+<80 m 2.07, 80-100 m 20.77, 100-120 m 18.48" and treated it as the model becoming less certain
+with range. That was CONFOUNDED: it averaged over all frames, and far-range frames are
+overwhelmingly noise (no lead present). Conditioned on a lead actually being there, xStd is flat
+with distance. The apparent growth was the changing mix of lead/no-lead frames, not degrading
+depth perception.
+
+STEP 2 -- WHY A FIXED THRESHOLD FAILS GLOBALLY. Applied corpus-wide, xStd<10 marks 481935 frames
+present against the deployed gate's 86232 -- 5.6x too many. The reason is the noise floor's own
+xStd shrinks at short range: with NOTHING there, the share of noise frames with xStd<10 is 84%
+at 0-30 m, 29% at 30-60 m, but only 0.1-0.8% beyond 60 m. The discriminator is real only where it
+was measured -- the far band.
+
+STEP 3 -- SCOPED TO THE FAR BAND, WHICH IS THE HONEST TEST:
+
+  gate                        present  runs>=0.8s  arms  just  unjust  unknown  med dRel@arm
+  prob>0.5 (deployed)           86232      194      51    17      0      34       87.9 m
+  +far xStd<10 & prob>0.15      87367      199      50    17      0      33       88.7 m
+  +far xStd<10 & prob>0.10      87559      203      50    17      0      33       88.7 m
+  +far xStd<11 & prob>0.15      88012      203      50    19      0      31       92.3 m
+  +far xStd<10, no prob req     88048      206      51    17      0      34       88.7 m
+  +far prob>0.25 (no xStd)      88752      196      56    18      1      37       89.0 m
+
+VERDICT: essentially no gain. The best row (xStd<11 & prob>0.15) adds 2 justified arms (17->19)
+and 4.4 m of median arm distance, for 1780 extra present frames and 9 extra usable runs. Every
+variant leaves unjustified arms at 0, so nothing is harmed -- but nothing much is gained either.
+And the plain prob>0.25 comparison row shows a similar effect without xStd at all, so the benefit
+is not specific to the uncertainty signal.
+
+WHY, and it is the same wall for the third time: the constraint is not detection, it is
+PERSISTENCE. Usable runs (>=0.8 s, hook 11's requirement) go 194 -> 206 at best, about 6%. The
+sub-gate signal is speckle -- in the 10:52 trace, runs of 27, 12, 2, 2, 2, 2, 1, 1, 1 frames -- and
+a better discriminator on individual frames does not assemble speckle into continuity.
+
+WHAT I WOULD KEEP FROM THIS: not a gate change, but the CORRECTED FACT that a real lead's xStd is
+~8 m flat from 60 to 130 m and the noise floor is ~13-19 m there. That is a clean, distance-stable
+separation and it may be useful for something other than presence gating -- for instance as the
+identity/quality check the cut-in problem actually needs, where the question is "is this the same
+object" rather than "is something there".
