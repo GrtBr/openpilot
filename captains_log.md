@@ -7307,3 +7307,42 @@ distinguishes the two. Only the identity evidence (yRel, leadTwo) does.
 Both filters armed within 0.1 s of each other here (new at 192.3 with v_filt -9.62, deployed at
 192.4 with -7.62), so this event is not an argument for or against the shadow filter -- it is an
 argument that hook 11 itself earns its place.
+
+## 2026-09-08 (c) — how early was the 10:52:55 lead knowable? FIRST flicker 7.79 s before the arm,
+## at 119.5 m. And xStd, not prob, is what actually announces it.
+
+Traced the raw `leadsV3[0]` channel back from the arm, every frame.
+
+  10:52:30 - 10:52:46   prob 0.001-0.014, xStd 14-27 m. Noise floor; nothing there.
+  10:52:46.56           first stirring: xStd drops 18.1 -> 11.5 and prob lifts to 0.045
+  10:52:47.51           FIRST FLICKER above 0.10: x = 119.5 m, xStd 9.3, prob 0.223
+  ...                   6 s of intermittent sub-gate signal at 112-125 m
+  10:52:53.56           crosses the 0.5 gate at 112.9 m, prob 0.519 -- PUBLISHED
+  10:52:55.55           hook 11 arms at 86.5 m
+
+  first flicker -> publication   6.05 s
+  first flicker -> hook 11 arm   7.79 s
+
+So the object was detectable, intermittently, for SIX SECONDS before radard would publish it, at
+119.5 m -- about 33 m farther out than where the hook eventually armed, at 106 km/h.
+
+xStd IS THE EARLIER SIGNAL, NOT prob. Through the noise floor xStd sits at 14-27 m. Every single
+frame where prob lifts above 0.10 is a frame where xStd has dropped to 9-13 m, and the drop leads:
+at 10:52:46.56 xStd fell to 11.5 while prob was still 0.045, a full second before the first 0.10
+crossing. The model becomes certain WHERE the object is before it becomes certain THAT it is one.
+That is worth recording, because every gate discussed so far -- radard's 0.5, my sub-gate audits,
+the 0.26-0.44 question -- keys on prob and ignores xStd entirely.
+
+BUT THE SIGNAL IS NOT USABLE AS-IS, and this is the same wall as before. Over the 9 s window, 50
+of 180 frames exceed prob 0.10, in runs of: 27, 12, 2, 2, 2, 2, 1, 1, 1 frames. Only ONE run
+(1.35 s) is long enough to satisfy hook 11's 0.80 s presence+persistence requirement, and it is the
+run immediately preceding publication anyway. The rest is 1-2 frame speckle. Accepting sub-gate
+detections would have bought essentially nothing here -- consistent with the 2026-09-06 (e)
+measurement that gate-lowering gives a median reaction-time gain of ZERO.
+
+WHAT THIS DOES SUGGEST, and it is new: a gate on xStd rather than prob, or on the two together.
+xStd < ~10 m at 120 m range is a far cleaner discriminator than prob > 0.5 in this trace -- it
+fires earlier and, being a physical uncertainty rather than a classification score, it is less
+speckly. Whether that holds across the corpus is UNTESTED; this is one event. Worth measuring
+before anything is proposed, and it is the first idea in a while that is not another threshold on
+a signal already known to be ambiguous.
