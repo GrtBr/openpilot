@@ -7403,3 +7403,42 @@ WHAT I WOULD KEEP FROM THIS: not a gate change, but the CORRECTED FACT that a re
 separation and it may be useful for something other than presence gating -- for instance as the
 identity/quality check the cut-in problem actually needs, where the question is "is this the same
 object" rather than "is something there".
+
+## 2026-09-08 (e) — the xStd gate run against the 10:52:55 event that inspired it. It helps by
+## 0.05 s. The longest run it creates is 0.70 s against a 0.80 s requirement -- it misses by 2 frames.
+
+The idea came from this event, so it is the fair test. First flicker was 10:52:47.51 at 119.5 m
+with xStd 9.3; the deployed gate published at 10:52:53.56 and hook 11 armed at t=192.32.
+
+  gate                              first presence     hook 11 arms      dRel at arm
+  prob>0.5 (deployed)               t=191.42          t=192.32           86.5 m
+  xStd<11 & prob>0.15 beyond 90 m   t=190.77          t=192.27           94.3 m
+  xStd<10 beyond 90 m, no prob req  t=190.77          t=192.27           94.3 m
+
+The gate does fire presence 0.65 s earlier -- but the ARM moves by only 0.05 s, one frame. It does
+arm 7.8 m farther out (94.3 vs 86.5 m), which is not nothing at 106 km/h, though most of that is
+the gap closing fast rather than a real gain in warning.
+
+WHY SO LITTLE, STATED EXACTLY. In the 6.05 s between the first flicker and publication there are
+122 frames. The deployed gate marks 1 of them present. The xStd gate marks 19. But those 19 fall
+in runs of 14, 2, 1, 1, 1 frames -- the longest is 0.70 s, and hook 11 requires 0.80 s of
+continuous presence (0.30 presence + 0.50 hot). IT MISSES BY TWO FRAMES.
+
+That is the whole story of this line of investigation in one number. The early signal is genuinely
+there -- xStd found 19 frames the confidence gate threw away, and did so 6 s before publication --
+but it arrives as speckle, and hook 11's persistence requirement is a continuity test that speckle
+cannot pass no matter how good the per-frame discriminator is. Four separate attempts now
+(sub-gate prob, gate lowering to 0.26-0.44, xStd corpus-wide, xStd far-band) have each ended at
+the same place, and this event shows the mechanism at frame resolution.
+
+TWO WAYS FORWARD, both real, neither free:
+  * Allow brief GAPS in the presence run rather than requiring strict continuity -- e.g. tolerate
+    up to N absent frames without resetting. The 14-frame run plus a 2-frame gap plus more frames
+    would then qualify. This is a change to hook 11's persistence semantics, and persistence is
+    what the SNR analysis (2026-09-04 (c)) identified as the one thing making the gate work, so it
+    would need its own false-arm validation.
+  * Accept that ~0.8 s of continuity is the price of a noise floor at SNR ~1, and stop trying to
+    buy earlier warning from the detection side.
+
+I am not recommending either without measurement. But the first is now a specific, testable
+proposal rather than a vague direction, and this event gives it a concrete target: a 2-frame gap.
