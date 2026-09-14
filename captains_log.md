@@ -7442,3 +7442,514 @@ TWO WAYS FORWARD, both real, neither free:
 
 I am not recommending either without measurement. But the first is now a specific, testable
 proposal rather than a vague direction, and this event gives it a concrete target: a 2-frame gap.
+
+
+## 2026-09-10 (a) — the 10:52 event pulled apart frame by frame. Three corrections to my own
+## earlier claims, one new tool. NO CODE CHANGE to the fork.
+
+Analysis only; nothing deployed, nothing on the car touched. comma4 was unreachable throughout.
+
+WHAT THE EVENT ACTUALLY WAS. Approach to a slow vehicle at 105.8 km/h, hook 11 armed at
+10:52:55.42 at 74.3 m, hard braking to 61.3 km/h, then the driver took the gas at 10:53:00.66 and
+went around. Lead speed 43-44 km/h by two independent methods (distance arithmetic over the clean
+pre-overtake window; a constant-lead-speed least-squares fit correcting dRel for integrated ego
+distance, 5.5 m rms). Minimum gap 20.0 m at 77.9 km/h, about 0.97 s headway -- the braking was
+defensible.
+
+THREE CORRECTIONS TO EARLIER CLAIMS OF MINE, all found by the operator pushing on them:
+
+  1. "The lead was pulling away." WRONG. dRel rose 20 -> 50 m because WE CHANGED LANES, not
+     because it accelerated. Steering steps -4 -> -8.6 deg at 10:52:59.82 and swings to +10.4 by
+     10:53:05 (the out-then-straighten pair); leadOne yRel slides -0.11 -> -1.66 m over the same
+     interval; both lead slots drop out entirely at 10:53:01.9. The operator caught this by noting
+     a lead "pulling away" from a car doing 61.3 km/h must itself exceed 61.3 km/h, which the
+     distance arithmetic forbids: a 61.3 km/h lead covers 102.4 m in those 6 s and leaves the gap
+     at 48.8 m, not the measured 20.0.
+
+  2. "41 km/h lead speed." Right ballpark, wrong method. I fitted a straight line to dRel across a
+     window in which ego shed 44 km/h, so the slope was biased. Correct answer 43-44 km/h. The fix
+     is either a centred window (the slope then estimates the derivative at the centre and carries
+     no bias) or integrating ego distance explicitly.
+
+  3. "dRel noise sigma ~ 10 m at range." WRONG, and this one matters. Measured properly (residual
+     about a centred local quadratic, whole drive, n=2643) the high-frequency error is:
+
+       0-20 m  0.63 |  20-30  0.79 |  30-40  1.29 |  40-55  1.41
+       55-70   2.08 |  70-90  2.76 |  90-110 2.77 | 110-140 1.87   (metres)
+
+     So roughly 2 m, not 10. THE MODEL'S OWN xStd OVERSTATES ITS POSITIONAL ERROR BY ~4x -- it
+     reads 8-12 m on the same frames. Either it is miscalibrated, or it includes a slow bias a
+     local quadratic absorbs; there is some evidence for the latter (the constant-speed fit left
+     5.5 m rms over 6 s). EITHER WAY: several rejected gate designs in this investigation treated
+     xStd as a metre-scale error bar. That premise was wrong. Full numbers in
+     analysis/lead_filter/NOISE_VS_RANGE.md.
+
+     Consistency check that makes me trust the 2 m figure: sigma 2.0 m with lag-1 autocorrelation
+     +0.32 predicts frame-to-frame difference sd 2.33 m, hence ~20% of frames moving >3 m. The
+     independently measured figure from 2026-09-02 was 19.8%. These agree.
+
+THE VELOCITY HEAD, ASKED AND ANSWERED AGAIN. Operator asked whether hook 11 could use
+leadsV3[0].v[0] instead of the position filter. No. Over the 126 confident frames the head reads
+-5.67 m/s mean against a true -15.64 (0.36x), and its DEFAULT STATE IS EGO SPEED: through the
+entire 7.5 s flicker period it sits at 101-109 km/h while we did 103-105. It relaxes toward truth
+over ~6 s and never arrives. Counterfactual: an arming gate on the head fires at 10:52:56.80 at
+65.1 m -- 1.25 s LATER and 21 m closer than the deployed filter, and below ARM_MIN_DIST=70 so it
+would not arm at all. Same signature as the 2026-08-25 measurement already in far_lead.py's
+docstring (-1.56 vs -8.16 m/s). Clean bias-variance split: position is unbiased and noisy
+(mean 45.0, sd 31.2 km/h), the head is precise and biased (mean 83.2, sd 17.5). Filtering rescues
+the first and cannot rescue the second.
+
+ALSO CONFIRMED, worth keeping: radard gates presence on an ASYMMETRIC filtered probability
+(radard.py:237-242) that jumps instantly up and decays with tau 0.2 s. That explains present=True
+at raw prob 0.40, and it means the stock gate CANNOT publish earlier than the first raw crossing.
+Any earlier lock has to come from lowering the threshold, not from smoothing.
+
+HOOK 11'S ACTUAL BEHAVIOUR ON THIS EVENT, by replaying the real far_lead.py frame by frame:
+hot started 10:52:54.92 at 90.5 m, held 0.50 s without a single reset (a_req 0.094 -> 0.402
+against threshold 0.088 -> 0.100, clearing on every frame but never by much), armed 10:52:55.42,
+emitted FLOOR then ramped at JERK_ARM to CAP -2.00 at 10:52:57.17. a_req kept climbing to 10.1,
+so CAP was the only thing setting the command from 10:52:57.07. logged accel tracks hook11's
+output within 1-2 frames until 10:52:57.42, when it passes -2.30 -- stock had taken over. Hook 11
+bought ~1.9 s of earlier braking. Note dRel_at_hot_start was 90.5 m, so THIS ARM DID NOT DEPEND ON
+THE ARM_MIN_DIST 80->70 CHANGE, and the distance-neutral scaling was inactive by the frames that
+mattered (dRel already under 80).
+
+NEW TOOL: ~/.claude/skills/lead-window/ (SKILL.md + scripts/lead_window.py, route_index.py,
+pull_route.sh). Give it a date and time, it writes a per-frame CSV of the event plus a .meta.json.
+Window starts 5 s before first leadOne.present and ends at lead drop / driver intervention /
+stopped. Columns include the hook-11 replay (v_filt, a_req, threshold, hot, armed, command)
+against the logged command. Verified against this event: reproduces 111.42 m first present, arm at
+10:52:55.42 / 74.3 m / v_filt -8.77, max a_req 10.099. First output saved at
+analysis/lead_filter/events/1052_20260908.csv.
+
+TWO CAVEATS ON THAT TOOL, both in SKILL.md, both real. It passes stock_min=0.0, so far_lead's
+`stock_min <= FLOOR` handoff never fires and the simulated ARMED PERIOD IS AN UPPER BOUND (arm
+time and ramp are faithful; infer the real handoff from where logged accel passes CAP). Fixing it
+needs longitudinalPlanSource, which extract_v2.py does not capture -- worth adding on the next
+extraction change. And it stubs three trivial imports (DT_MDL, should_stop, the
+LongitudinalPlanSource tag); everything that computes a number is the real deployed module.
+
+OPEN, UNCHANGED: the adjacent-lane / cut-in class still has no gate, because leadOne is an
+anonymous slot with no object identity. This event is another instance -- the lane change is only
+identifiable after the fact, from steering and yRel, not from anything hook 11 can see.
+
+
+## 2026-09-10 (b) — lead-window reworked to source drives from the Pi5 only. And a fact worth
+## keeping: logMonoTime restarts every route, so the local TSVs carry NO wall clock at all.
+
+Operator: "these drive data must be sourced on pi5 memory where previous routes were already
+downloaded before. No need to connect to comma4." Correct, and the (a) entry had the default
+backwards. Reworked.
+
+THE CONSTRAINT THAT SHAPES THIS. Measured across all 25 local TSVs: every route's first
+logMonoTime is 25.6-35.1 s. Each route is one ignition cycle and mono is process-relative, so
+(i) it is not a clock and (ii) one route's mono tells you nothing about another's. The extraction
+captures carState / radarState / modelV2 / selfdriveState / carControl -- none carry wall time.
+SO A DATE+TIME CANNOT BE RESOLVED FROM LOCAL DATA ALONE. It needs an anchor recorded once per
+route. Checked the alternatives and none work: TSV mtimes are pull dates not drive dates; the
+Lexar archive (/run/media/pi5-ubuntu/Lexar/openpilot/drives/<date>/) is date-organised but holds
+a different device's routes (0000033f+) and stops at 2026-08-25; captains_log has only two
+route-with-clock pairs.
+
+WHAT THE TOOL DOES NOW. data/route_anchors.tsv holds `route <TAB> wall_of_first_row <TAB> source`.
+build_index.py scans data/*.tsv -- route, span, far-acquisition count -- merges the anchors and
+writes data/route_index.tsv. lead_window.py --at with no --tsv resolves against that. Three paths:
+anchored route by clock; unanchored route by `--at +SECONDS` offset (wall column becomes
+t+SSS.SSS); or record the anchor once with --set-anchor and it is permanent. ONE anchor exists so
+far, 0000018d--3413d5b947 = 2026-09-08T10:49:43, the one this session validated. The other 24 TSVs
+are unanchored and the tool says so rather than guessing -- a wrong anchor would silently produce
+a correct-looking CSV of the wrong moment.
+
+`--list-events` counts FAR acquisitions (dRel >= 90 m, separated by >= 3 s), not presence
+episodes. First attempt used "presence resumed after a gap" and reported 40 events for drive_18d,
+because far-lead presence flickers on and off at 20 Hz. Tightening it to real 3 s absences then
+gave 1, because on a busy road leadOne is present almost continuously. Neither is what we want:
+the thing of interest is a lead APPEARING FAR OUT, which happens INSIDE a continuous follow.
+The range-based definition gives 14 for drive_18d, correctly including 10:52:53 at 111.4 m.
+
+comma4 is now the documented last resort for a drive never downloaded, not the default path, and
+SKILL.md marks that half as never having been run against a live device.
+
+
+## 2026-09-10 (c) — lead-window collapsed to one script. Entries (a) and (b) described a
+## four-script version that was more machinery than the job needs.
+
+Operator: "I just want you to get the same information the same way you always get it... Simple
+realy." Fair. The routine is small; I had built an index layer, a device indexer and a pull
+wrapper around it. Removed all three. What remains is SKILL.md (83 lines) and
+scripts/lead_window.py (462), which is the actual work plus --list and --set-start folded in.
+
+    python3 lead_window.py --list drive_18d.tsv        # far events in a drive
+    python3 lead_window.py --at 10:52 --date 2026-09-08
+
+data/route_anchors.tsv -> data/drive_starts.tsv; data/route_index.tsv deleted (route spans are
+scanned from the TSVs on demand, so there was nothing to cache). --out now defaults to
+events/<HHMM>_<YYYYMMDD>.csv.
+
+The one piece of knowledge worth having written down is the drive-dating procedure, now in
+SKILL.md rather than in a script: segment 0's clock is the pre-GPS RTC and reads a fixed bogus
+date, directory mtimes lie, so read wallTimeNanos from a LATER segment and subtract back to the
+TSV's first row. That is the step that is easy to get wrong and silently produces a
+correct-looking CSV of the wrong moment.
+
+
+## 2026-09-10 (d) — LEAD_TRACKER_SPEC tested as a drop-in for far_lead's _RangeRateFilter.
+## Accuracy YES, earlier arming NO, severity MARGINAL. Not recommending adoption as-is.
+
+Operator supplied a Kalman-filter spec (R = xStd^2 per frame, wide P_V0=30 reset on acquire) and
+asked whether it buys earlier arming and harder, more accurate braking. Tested with far_lead's
+real step() unmodified -- only the filter class swapped via a same-interface adapter, so gate,
+persistence, thresholds, jerk limiter and a_req are all deployed code. Per the operator's
+follow-up, fitted to the CURRENT acquire/arm method; closing_sigma reported as a diagnostic, not
+used as an arming veto. Full write-up analysis/lead_filter/tracker/FINDINGS.md.
+
+ACCURACY -- clear win, and the reason to care. On 10:52, against truth independently established
+at 44.1 km/h constant lead: RMSE 3.22 vs 4.71, median |e| 2.31 vs 3.34, max 7.27 vs 8.38 m/s.
+AT THE ARMING FRAME truth was -17.1 m/s; deployed read -8.77 (51%), tracker -14.84 (87%). That is
+the same under-reporting we measured for the model's own vRel head in (a) at 0.36x, and the spec's
+F3 predicts it.
+
+ARMING -- a wash. 14 arms each across the corpus, 12 shared, median timing -0.07 s (earlier on 6,
+later on 5, same on 1, range -1.00 to +0.80). Reason, measured: arming is floored at
+PRESENCE_PERSIST + HOT_PERSIST = 0.80 s of CONTINUOUS presence. On two events the tracker hit
+0.85 s -- the floor -- where deployed took 1.25 and 1.55 s. But it did so with closing_sigma 10.1
+and 10.8, i.e. its own sec.6 rule says "do not act on closing rate at all". The mechanism is the
+P_V0=30 wide-prior reset swinging the velocity state hard and happening to point the right way for
+0.5 s, NOT better SNR. Both those arms were confirmed real by deployed 0.4-0.7 s later.
+
+SEVERITY -- marginal. Per shared arm, tracker harder on 4/12, softer on 3/12, identical on 5/12;
+median change +0.00 m/s2. Where it shows: time from arm to CAP on 10:52 was 1.10 s vs 1.75 s, and
+on 18e t=672 the hardest command was -1.20 vs -0.49.
+
+FALSE ARMS -- none either way. The one deployed-only and one tracker-only arm are both REAL by
+constant-lead-speed fit (91.5 km/h vs ego 105.1; 45.5 vs 53.8). All four arm-producing drives are
+100% relaxed, confirmed.
+
+CORPUS IS WEAK AND I AM SAYING SO. Only 4 of 17 local drives produce any arm: 18c/18d/18e/18f, all
+2026-09-08. The other 13 have max hot_elapsed = 0.00 -- the gate never passed once -- for
+verifiable reasons: drive_161 longActive 0%, drive_15e only 244 frames beyond 70 m in 43 min,
+drive_179 longActive 25% with every disengaged/pedal frame resetting presence. Real denominator:
+14 arms, 4 drives, one day. No false-arm conclusion is supportable from this.
+
+TWO DEFECTS IN THE SPEC, both reported to the operator:
+  1. `acquired` never resets. Once True, a lead lost for 30 s and a different one acquired at
+     120 m never re-runs sec.4.5 ACQUIRE -- it coasts from a stale position. That is exactly the
+     F2 failure the spec exists to prevent. Masked here only because far_lead builds a fresh
+     filter on every fresh lock.
+  2. sec.8's convergence table is the growing-window CRLB, not this filter. A KF with SIG_A=4.0
+     has a steady-state floor, measured at 1.12/1.22/1.33 m/s for xStd 5/7/10 m, reached ~3 s
+     after ACQUIRE. The table tracks to ~1.5 s and is wrong by ~1.9x at 4 s. The sec.6 actuation
+     gate (<1.4 m/s) is therefore only just reachable, and only 2.5-4 s after ACQUIRE -- which is
+     why it cannot serve as an arming precondition.
+
+ALSO: closing_sigma is NOT a reliable accuracy indicator under ego braking. On 10:54 it worked
+(flagged frames median error 11.23 vs 1.64). On 10:52 it INVERTED -- 56/81 armed frames flagged,
+median error 1.08 on the flagged ones vs 5.08 on the "confident" ones -- because during 3.5 m/s2
+ego braking the true closing rate moves faster than the filter tracks. Converged and wrong.
+
+WHAT WAS STRUCTURALLY EXCLUDED, and is the real next experiment: fitting to the current acquire
+method means every presence gap triggers far_lead's fresh-lock reset, so sec.4.6 COAST only runs
+post-arm. The spec's biggest potential contribution to the flicker problem -- riding through 20 Hz
+dropouts without discarding the track -- is the same mechanism as the gap-tolerant persistence
+proposal open since 2026-09-08 (e), and needs hook 11's presence semantics changed to get it.
+
+DEPLOYMENT COST IF ADOPTED: radarState.leadOne carries no xStd. The whole noise-suppression
+mechanism is R = xStd^2, so this needs modelV2.leadsV3[0].xStd[0] plumbed into the planner hook --
+a new cross-service dependency, on a prebuilt branch. And note from (a) that xStd overstates real
+positional error by ~4x, so R is over-stated ~16x; the tracker wins on accuracy DESPITE that,
+which suggests retuning SIG_A or scaling xStd could beat both. UNTESTED, flagged not claimed.
+
+
+## 2026-09-10 (e) — extract_v2.py now captures leadsV3[0].vStd[0] and a[0]. Queued for the next
+## parked window; NOT executed against a live log, and here is exactly why that matters.
+
+Reason for adding them. Operator asked whether vRel exists below the lead-probability gate.
+radarState.leadOne.vRel does NOT: radard.py:159 sets lead_dict = {'present': False} and only
+overwrites it when lead_prob > 0.5. Measured on drive_18d: 21,215 not-present rows, vRel exactly
+0.0 on every one, dRel too -- struct defaults, not measurements. But modelV2.leadsV3[0].v[0] IS
+published every frame (24,112/24,112, including all 21,326 frames with prob < 0.5), so vRel is
+reconstructible at any confidence as v[0] - modelV2.velocity.x[0].
+
+That made me look at what else rides along, and cereal/log.capnp:1082 carries `vStd @8` next to
+`xStd @4`, plus `a @9`. vStd is the model's own 1-sigma on the VELOCITY head -- the direct analogue
+of the xStd that LEAD_TRACKER_SPEC builds its entire R = xStd^2 mechanism on. We have never
+extracted it. It is the one untested route into the sub-0.5 region: it would let the velocity head
+be WEIGHTED or GATED rather than discarded outright, which is what (d) showed we currently do.
+
+CHANGE: appended to the `model` row at indices 11 and 12. The row was 11 fields (0-10) and every
+consumer -- load_v2.py, eval_filters.py, harness.py, the lead-window skill -- indexes <= 10, so
+this is backward compatible; verified by feeding a synthetic 13-field row through all four.
+lead_window.py now emits vStd_ms and aRel_ms2 columns, blank for routes extracted before today.
+Regression-checked against drive_18d (an 11-field TSV): identical output, new columns empty.
+
+NOT VERIFIED, AND SAY SO. The Pi5 has no pycapnp, so this could not be executed. What was checked:
+the field numbering is identical in the sunnypilot fork's log.capnp (xStd @4, v @7, vStd @8, a @9),
+and the access pattern is the same `if len(...) else 0.0` guard already working for xStd and v on
+the device. Residual risk is confined to those two fields. Added a _check_fields() that runs on the
+FIRST model message and prints the values it read to stderr, so a wrong assumption surfaces in the
+first second instead of after a 20-minute extraction.
+
+STILL MISSING from the extractor, unchanged: longitudinalPlanSource. That is the field needed to
+fix the stock_min = 0.0 upper-bound caveat in the lead-window skill and in (d)'s hook-11 replay.
+Worth adding on the same trip if the operator wants it.
+
+
+## 2026-09-14 (a) — extract_v2.py now captures longitudinalPlan as a new `plan` row. It NARROWS
+## the stock_min gap in the hook-11 replay; it does not close it, and here is exactly why.
+
+Added on the operator's instruction, alongside the vStd/a[0] fields from (e). New ROW KIND rather
+than new columns, which cannot break anything: every consumer dispatches on column 2 and ignores
+kinds it does not recognise.
+
+  {t} {seg} plan {longitudinalPlanSource} {aTarget} {hasLead} {fcw} {shouldStop}
+
+WHAT IT SETTLES. Any frame where hook 11 is armed and longitudinalPlanSource is cruise / e2e /
+lead1 / lead2 is a frame where hook 11 was definitively NOT the binding min() candidate. So the
+real armed period ends at or before the first such frame -- a genuine upper-bound tightening on
+the figure (d) had to report.
+
+WHAT IT DOES NOT SETTLE, and I want this on the record before anyone treats the replay as exact:
+  * far_lead tags its own candidate LongitudinalPlanSource.lead0 -- the SAME tag the stock MPC
+    lead candidate uses. source == lead0 is therefore ambiguous between the two.
+  * the planner takes final = min(stock_min, hook11). Whenever hook 11 wins we learn only that
+    stock_min > hook11's value; we cannot tell whether it crossed FLOOR (-0.40), which is the
+    actual reset condition (`if stock_min <= FLOOR: self._reset()`).
+  * so the handoff frame is bounded, not located.
+THE REAL FIX is to log stock_min itself. hooks.py already owns a rotating shadow log at
+/data/media/0/grt/lead_filter.log and already receives stock_min as an argument to
+far_lead_candidates(), so it is a one-line addition to fork-owned Python -- live on a prebuilt
+branch, no scons. That is a DEVICE change needing comma4 reachable and an explicit go-ahead, so I
+have not made it.
+
+VERIFIED, unlike (e). I could not run the extractor itself (no pycapnp on the Pi5), but I did
+exercise the new parsing path end to end: synthesised 500 `plan` rows at 20 Hz into a copy of the
+10:52 window with hook 11 binding for a chosen 2 s, ran the skill over it, and confirmed
+plan_source and aTarget populate correctly and that the negative case is detectable -- 41 of 81
+armed frames came back as "not lead0", i.e. hook 11 not binding. Regression on the real 11-field
+drive_18d TSV is unchanged (arm 10:52:55.423 at 74.297 m), with the two new columns blank.
+
+lead_window.py emits plan_source and aTarget_ms2; SKILL.md caveat 1 rewritten to state precisely
+what the column can and cannot decide, rather than implying it fixes the replay.
+
+### 2026-09-14 (b) — vStd fusion tested against the new 29-route corpus: rejected
+
+Ran the LEAD_TRACKER_SPEC evaluation against the rebuilt drive archive (29 routes, now carrying
+`vStd`/`xStd`/`aStd` and `longitudinalPlanSource`), with personality read per frame instead of the
+old hardcoded `relaxed=True`. Analysis only — no change to `grt/far_lead.py`, nothing deployed.
+
+**Finding that decides it:** measured out-of-sample on 4 routes the calibration never touched
+(n=105,738), the model's velocity head reports **0.094× the true closing rate beyond 70 m** — 0.04×
+in the 90–110 m band. The residual after scaling is tight (IQR ±0.86 m/s), which means the head is
+not a noisy estimate but a *consistent near-zero*: it saturates rather than degrades. Bias
+correction is therefore impossible — recovering truth means a 10.6× gain that turns ±0.86 m/s into
+±9 m/s against a 2.78 m/s threshold.
+
+**Corpus confirmation:** deployed 171 arms / tracker 197 / tracker+vStd **17**. The vStd variant
+misses 162 of 171 deployed arms and never reaches CAP. Fusing a "zero closing" measurement carrying
+a ±1.9 m/s claimed sigma drags the state toward zero precisely where the gate must exceed −2.78 m/s.
+
+**Position-only tracker on the larger corpus — earlier, but with a severity regression:** arms
+171 → 197, median **0.127 s earlier** (the old 4-drive corpus said 0.07 s), median *hardest* command
+−0.475 vs −0.400. Two problems against that. (1) Arms reaching CAP drop **17 → 10**; pulling the 7
+lost events individually, **six are total misses** — no tracker arm within 30 s — and three of those
+six are on genuinely slower leads, including one where the lead was doing **14 km/h** against our
+50.6. (2) Of its 57 unshared arms, 43 were classifiable (14 excluded for unstable presence at the
+arm, which is exactly the acquisition-edge case); those clear the slower-lead bar at 28% against a
+47% baseline for shared arms — enriched in weak arms, though note that bar fails half of every
+variant's arms so it is strict rather than a true/false label. Judged by the lead's own speed, never
+by gap drop or ego decel.
+
+**Net:** the tracker is faster and harder on average but drops three genuine hard-braking events, so
+it is not a safe swap as it stands. All six misses lack an arm entirely, which points at the
+acquisition path rather than the severity formula — that is the open item.
+
+This retires the old FINDINGS §4 caveat (14 arms / 4 drives / one day); the denominator is now 171
+arms across 12 routes. Written up as `analysis/lead_filter/tracker/FINDINGS.md` §12.
+
+**Addendum — why the 6 hard-braking events are missed (same day).** Traced; the open item from the
+entry above is closed. All six die at `far_lead.py:475`, `dRel_at_hot_start <= ARM_MIN_DIST` (70 m),
+**not** at the filter — the tracker's closing estimate is *more* negative than deployed's on every
+one (−34.97 vs −14.91 on `000001a6`) and its hot streaks are *longer* (1.55–3.35 s vs 0.55 s). It
+goes hot and stays hot, but the single raw dRel sample anchored at its first hot frame
+(far_lead.py:467) landed below 70, which blocks the streak permanently.
+
+It goes hot 0.05–0.70 s later than deployed on these six. Anchor loss = lag × closing rate, so the
+same half-second costs 2 m on a 4 m/s bulk approach and 5–10 m on these 10–20 m/s closes — which is
+why the tracker is 0.127 s *earlier* on the median yet loses precisely the CAP tail.
+
+Cause of the lag on 3 of 6: the spec's own ACQUIRE branch (`DEBOUNCE=3`) wipes velocity to zero on
+the first three consecutive `prob>=0.5` frames, and model prob dithers across 0.5 on emerging leads
+(`000001a6`: 0.58/0.58/**0.47**/0.59/0.61/0.63), so the wipe lands mid-approach. Counterfactual:
+disabling ACQUIRE recovers 3 of 6 at full CAP −2.00; preserving tracker state across far_lead's
+`reset()` (called 113× in 12 s on `000001a6`) recovers only 1. That variant is confounded — forcing
+`acquired=True` also switches non-hot frames to COAST — so it implicates the branch, not yet the two
+wipe lines alone. **3 of 6 stay unexplained**; anchor gaps there are 12–20 m = 2–4σ of dRel noise,
+so real lag, not noise. Untested: the NIS `P[1][1] *= 4.0` gate and `P_V0`/`SIG_A`.
+
+Separately worth recording: across the 5 CAP-carrying routes, **~58% of hot streaks that already
+cleared every other gate are then killed by the anchor alone** (deployed 160/276, tracker 167/298),
+and ~12% sit within ±5 m of the 70 m line — inside dRel's own 4–6 m frame-to-frame noise. The
+tracker clears the gate *more* often than deployed (131 vs 116) and much further out (75 streaks
+anchored >90 m vs 37), so "the tracker is late" is the wrong headline; it is late specifically at
+high closing rates. Research only — no change proposed to `ARM_MIN_DIST` or its anchoring.
+
+### 2026-09-14 (c) — ACQUIRE wipe fixed and corpus rerun: better filter, still not a safe swap
+
+Follow-on to (b). Built `analysis/lead_filter/tracker/lead_tracker_fix.py`: the spec's ACQUIRE
+branch now re-seeds velocity **only** when the confirmed measurement is inconsistent with the
+running track (NIS > `NIS_MAX`), instead of unconditionally on every third consecutive
+`prob>=0.5` frame. Single-hunk diff; `lead_tracker.py` left verbatim so the comparison stays honest.
+Analysis only — `grt/far_lead.py` untouched, nothing deployed.
+
+**Worth recording: the NIS gate never fires** (77 ACQUIRE entries on `000001a6`, 0 re-seeds), so the
+conditional form is equivalent in practice to deleting the two wipe lines outright.
+
+**Corpus, all 29 routes:** deployed 171 arms / 17 CAP; tracker 197 / 10; **tracker_fix 244 / 13**.
+Arming moves from −0.127 s to −0.200 s earlier than deployed, median anchor 84.8 → 93.0 m. Deployed
+and tracker reproduced their (b) numbers exactly, so the runner is deterministic and the comparison
+holds.
+
+**But it does not fix the regression.** Only **2 of 6** missed CAP events return full-route, and the
+fix *loses* one the unfixed tracker had: at `00000197` t=5134.5 it arms three times at long range
+just before (anchors 85.6/78.5/71.8, all weak at −0.40/−0.70), releases, and cannot re-arm for the
+real close — next arm 24.9 s later. Premature long-range arming **consumes** the event. Net CAP
+matching 10/17 → **11/17** against deployed's 17.
+
+**Arm quality by the lead's own speed:** on *shared* arms the fix is the best of the three (52%
+genuinely-slower lead vs deployed 46%, tracker 48%) — where it agrees with deployed it agrees on
+better events. But its 86 unshared arms (59 classifiable) clear the bar at only **24%**, below the
+unfixed tracker's 28% and less than half the ~47% baseline. ~50 extra weak arms for +1 CAP match.
+
+**Methodology note, second time today:** the windowed (T−14 s) validation predicted 3 of 6 recovered;
+the full corpus gave 2. Filter state at window start differs. Windows diagnose mechanism; only the
+full-route corpus validates. Do not quote windowed arm outcomes as results.
+
+Conclusion: the wipe was a genuine defect and removing it is right on its own terms, but the barrier
+is not in the filter — it is far_lead's single-raw-sample `dRel_at_hot_start` against a hard
+`ARM_MIN_DIST` (per (b) addendum, ~58% of otherwise-qualified streaks die there). Four events remain
+unexplained by either the wipe or far_lead's `reset()`; untested candidates are the NIS inflate path
+(`P[1][1] *= 4.0`) and `P_V0`/`SIG_A`.
+
+### 2026-09-14 (d) — ARM_MIN_DIST anchors on the filtered range (IMPLEMENTED, not deployed)
+
+Two functional lines in `openpilot/grt/far_lead.py`: `dRel_at_hot_start` now takes `self.filt.x`
+(the alpha-beta filter's position state) instead of a single raw `dRel` sample, and `ARM_MIN_DIST`
+goes 70.0 → 73.0 as its paired compensation. Closes the anchor half of the (b)/(c) investigation.
+
+**Why:** ~58% of hot streaks that had already cleared every other gate died on the `ARM_MIN_DIST`
+test alone, ~12% of them within ±5 m of the line — inside dRel's own 4–6 m frame-to-frame noise.
+
+**It is an accuracy fix, and it is NOT bias-free** — worth stating because my first draft of the
+code comment claimed otherwise and the measurement disproved it. At 139 hot-start frames, against a
+non-causal centred ±0.5 s fit of dRel: raw sample median error **−2.14 m** (12% above reference,
+median |err| 2.28); `filt.x` **+0.93 m** (73% above, median |err| 1.26). The raw sample is biased
+LOW because hot-start is not a random frame — the streak begins exactly when `a_req` and the closing
+rate cross threshold, which happens preferentially where the sample dipped below trend. `filt.x`
+then overshoots HIGH by filter lag. Net: absolute error roughly halves, effective gate relaxes ~3 m.
+
+**Why 73.0 and not 70.0.** Uncompensated, the relaxation buys the wrong arms: at 70.0 the 39 added
+arms clear the genuinely-slower-lead bar only **29%** of the time against a 45–46% baseline; at 73.0
+the 20 added arms clear it at **44%** — as good as the arms already being taken — while keeping every
+CAP event 70.0 found. 75.0 starts losing real ones (16/17 CAP, 4 baseline arms lost). 73.0 dominates.
+
+**Corpus, 29 routes vs the pinned pre-change baseline:** arms 171 → 190, arms reaching CAP 17 → 26,
+all 17 baseline CAP events still matched, 1 non-CAP baseline arm lost.
+
+**OPEN CONCERN, deliberately not papered over:** of the 9 NEW arms reaching CAP, only 2 are on a
+genuinely slower lead (baseline CAP arms score 8/17), and they fire at 34–54 m rather than the
+baseline's 86.5 m median, where `a_req = v²/(2(d−6))` is naturally large. A false arm at `FLOOR` is
+~1.7 s of 0.04 g and cheap; a false arm at **CAP is −2.0 m/s²** and is not. This is the thing to
+watch on the road.
+
+**Verification:** 47/47 `test_far_lead.py`, 44/44 `test_hooks.py`, `test_lead_filter.py` pass against
+the real committed file (`test_schema_conformance.py` needs pycapnp, unavailable on the Pi5 —
+pre-existing, unrelated). The live `far_lead.py` was then re-run over all 31 route TSVs and
+reproduces the validated scratch variant exactly (190 arms, 26 CAP, zero differing routes). The
+harness's `deployed` baseline is now **pinned** to a copy of blob `dc1be242b` (commit `033207982`)
+so it no longer tracks the working tree — the methodology bug the plan file warns about.
+
+**NOT deployed to comma4** — awaiting go-ahead. Rollback is two lines: restore
+`self.dRel_at_hot_start = dRel` and `ARM_MIN_DIST = 70.0`.
+
+Docs updated: `GRT_MODS.md` (hook 11 row), `FAR_LEAD_PREBRAKE_PROMPT.md` (§ arming + the KNOWN LIMIT
+row, which this does NOT fix — the anchor is still captured once and never re-evaluated),
+`analysis/lead_filter/tracker/FINDINGS.md` §14.
+
+### 2026-09-14 (e) — arming faster: sub-0.5 pre-arm rejected, confidence-gated arming works
+
+Investigation only, nothing written to `grt/far_lead.py`. Full numbers in FINDINGS.md §15.
+
+**The 0.80 s floor is the smaller problem.** A 20 km/h close arms at 2.65 s, a 40 km/h close at
+1.55 s; the gates are 0.80 s in both, so filter convergence is 1.85 s / 0.75 s — at moderate closing
+rates more than twice the persistence floor.
+
+**Sub-0.5 pre-arm: rejected on measurement.** `x[0] − 1.52` IS exactly the published `dRel` and is
+populated at every probability, so the position really is there below 0.5 (radard withholds it, the
+model does not). But `vRel` is not — struct default below 0.5, and the head is dead beyond 70 m, so
+the only sub-0.5 closing signal is position-derived. Across 134 real arms the contiguous
+prob ∈ [0.2,0.5) run immediately before the present latch is **median 0.20 s** (7% reach 0.5 s), and
+the object is often not the same one: median |x[0]| step across the latch 3.17 m against ~2 m noise,
+**22% step more than 6 m**, and **26% have |yRel| > 1.5 m** (adjacent lane). A warm filter would gain
+0.2 s while carrying the wrong target one time in five. Not built.
+
+**Information floor.** With σx = 2 m and no usable velocity measurement, `σv = σx·√(12·dt/T³)` puts
+2σ separation from the 2.78 m/s threshold at 1.07 s (20 km/h), 0.68 s (30), 0.52 s (40). There is
+~1.0–1.5 s of headroom against the deployed timings, but a 20 km/h close cannot be confirmed in
+0.3 s from position alone. Worth recording so this isn't re-litigated.
+
+**What does work — confidence-gated arming** (`variants/far_lead_conf.py`): replace the fixed
+`HOT_PERSIST_S` with a test on the filter's own 1σ — require the least-closing plausible value
+(`closing + 1σ`) to still clear the threshold, and let that clear in `HOT_PERSIST_MIN_S = 0.15 s`
+instead of 0.5 s. Early in a lock σ is huge so it is STRICTLY HARDER than today's test; as σ
+collapses it converges to the point estimate. It replaces a constant with a measurement.
+
+Corpus, 29 routes, baseline `deployed+live`: arms 190 → 278, median hardest −0.400 → −0.550, CAP
+26 → 21, timing **−0.250 s** earlier, 27 baseline arms missed. Against the fixed-floor tracker
+(`tracker_fix+anchor73`: −0.151 s, 18/26 CAP, 34 missed) it is better on all five axes at the same
+new-arm quality (23% vs 22% genuinely-slower-lead; shared arms 48%). **Neither variant adds any new
+CAP arm**, so the speed is bought without new hard-braking events.
+
+**Not a swap candidate yet:** the tracker family still loses to the deployed filter on CAP (21/26)
+and misses 27 baseline arms. The structural point is that `_RangeRateFilter` publishes no variance,
+which is why the confidence gate is currently locked to the Kalman tracker — the part that is
+losing. Next step, untested: give the deployed alpha-beta filter a variance estimate (steady-state
+covariance or a running residual estimate) and run the confidence gate on the filter that is already
+winning.
+
+### 2026-09-14 (f) — _RangeRateFilter given a measured variance: honest sigma, no gate gain
+
+Follow-on to (e). `analysis/lead_filter/tracker/variants/far_lead_rrconf.py` = the live far_lead
+(anchor + ARM_MIN_DIST 73) plus a sigma on `_RangeRateFilter` plus the confidence gate. Research
+only; `grt/far_lead.py` unchanged since (d). Full numbers in FINDINGS.md §16.
+
+**The sigma is measured, not asserted.** A deterministic `sigma(n)` from the filter's fixed gains
+was tried first and REJECTED — measured RMS error does not decay, it *peaks* at n=4-8 frames
+(7.5 m/s) and plateaus 5.5-6.1 for 1-6 s; only locks older than 10 s reach 2.76, and those are a
+different population (steady following, not acquisition). Error is dominated by scenario, not by
+the filter transient, so the covariance recursion would have been another vStd. What works:
+OLS standard error of the slope over a 1.0 s ring buffer of dRel, `SIGMA_K = 1.81` calibrated on
+81,613 frames against non-causal truth. Honesty: 50.0% beyond 0.6745σ (Gaussian 50), 34.8% beyond
+1σ (32), 12.9% beyond 2σ (5) — heavier tails, but it DISCRIMINATES: median |err| rises 0.45 → 0.83
+→ 1.19 → 1.73 → 2.77 across σ quintiles. That is what vStd never did.
+
+**Corpus, 29 routes: it changes essentially nothing.** `deployed+rrconf` = 190 arms, −0.400 median,
+26 CAP, **26/26 matched, 0 extra, 0 missed, median timing +0.000 s** — 8 of 190 arms move earlier.
+
+**Why, and this is the actual result.** At the frame the hot streak starts (n=190): `v_filt` median
+−3.39 m/s, i.e. only **0.61 m/s past the −2.78 threshold**, while its honest sigma is **3.68 m/s** —
+six times that margin. `v_filt + 1σ` clears the threshold on **0 of 190**. Sigma is under 0.5 m/s at
+hot-start 1% of the time. **At the moment hook 11 arms today, its closing estimate is not
+statistically distinguishable from the threshold it is tested against.** The confidence gate cannot
+shorten the persistence because there is no confident moment to shorten — and it is right not to.
+
+That closes the loop with (e)'s information floor (a 20 km/h close needs ~1.07 s of data to separate
+from 2.78 m/s at 2σ). `HOT_PERSIST_S = 0.5` is not a conservative guess — **it is doing the
+averaging that makes the estimate significant.** Stop trying to shorten the persistence floor; this
+is the measurement that should end that line of work.
+
+The only remaining lever is CONVERGENCE, not persistence: `tracker_fix+rrconf` arms 0.300 s earlier
+on 118 of 175 shared arms because its estimate is better sooner — but still 20/26 CAP and 34 baseline
+arms missed, so still not a swap candidate. The sigma itself is worth keeping regardless: it is the
+first honest uncertainty on the deployed filter, and (d)'s open concern (new CAP arms on leads that
+are not slower) is the kind of question it could gate — arming is the wrong place to spend it,
+SEVERITY may not be.

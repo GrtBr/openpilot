@@ -286,6 +286,45 @@ REVERT PATH: this is one self-contained commit (the two formula sites, `HOT_A_RE
 this docstring/the SAFETY section's bound text -- no other file's runtime behavior changed).
 `git revert` it to restore the `2d4473136` state (old formula, `HOT_A_REQ=0.30`, `CAP=-1.2`)
 that all four prior attempts' validation converged on as the one that actually held up.
+
+ANCHOR ON FILTERED RANGE, 2026-09-14
+------------------------------------
+`dRel_at_hot_start` was a single RAW `dRel` sample. Measured across a 29-route corpus, that one
+sample decides arming far more often than it should: ~58% of hot streaks that had ALREADY cleared
+every other gate (closing rate, a_req, persistence) died on the ARM_MIN_DIST test alone, and ~12%
+of them sat within +-5 m of the line -- inside dRel's own 4-6 m frame-to-frame noise. It now
+anchors on `self.filt.x`, the same alpha-beta filter's position state.
+
+BE CLEAR ABOUT WHAT THIS BUYS -- it is an accuracy fix, and it is NOT bias-free. Measured at 139
+hot-start frames against a non-causal centred +-0.5 s fit of dRel (evaluation reference only):
+
+    raw dRel   median error -2.14 m, 12% above reference, median |err| 2.28 m
+    filt.x     median error +0.93 m, 73% above reference, median |err| 1.26 m
+
+Two effects, both pushing the same way. The raw sample is biased LOW by ~2.1 m because hot-start
+is not a random frame: the streak begins exactly when a_req and the closing rate cross threshold,
+which happens preferentially on frames where the sample dipped below trend. Removing that is a
+genuine correction. But `filt.x` then overshoots HIGH by ~0.9 m of filter lag -- the filter is
+reset on every presence re-lock, so it is seldom in steady state. Net, absolute anchor error
+roughly halves (2.28 -> 1.26 m) while the effective gate relaxes by ~3 m of true range.
+
+ARM_MIN_DIST 70.0 -> 73.0 COMPENSATES FOR THAT ~3 m. Keeping 70.0 would have silently relaxed the
+gate on top of the deliberate 80 -> 70 move of 2026-09-04, and the corpus shows that relaxation
+buys the WRONG arms: at 70.0 the 39 added arms clear the "lead genuinely slower" bar only 29% of
+the time, against a 45-46% baseline; at 73.0 the 20 added arms clear it at 44%, i.e. they are as
+good as the arms already being taken.
+
+Corpus effect, 29 routes, anchor + 73.0 vs the pre-change baseline: arms 171 -> 190, arms reaching
+CAP 17 -> 26, all 17 of the baseline's CAP events still matched, 1 non-CAP baseline arm lost.
+
+OPEN CONCERN, deliberately not papered over: of the 9 NEW arms that reach CAP, only 2 are on a
+genuinely slower lead (baseline CAP arms score 8/17). A false arm at FLOOR costs ~1.7 s of 0.04 g
+and is cheap; a false arm at CAP is -2.0 m/s^2 and is not. Watch for unexplained hard braking on
+the road and report it. ROLLBACK is two lines: restore `self.dRel_at_hot_start = dRel` and
+ARM_MIN_DIST to 70.0.
+
+DOES NOT ADDRESS the KNOWN LIMITATION above: the anchor is still captured once and frozen, so an
+encounter whose hot streak begins inside ARM_MIN_DIST still fails forever. Separate change.
 """
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalPlanSource
@@ -296,8 +335,15 @@ ALPHA = 0.10
 BETA = 0.003
 
 # ---- arming (spec section 4, amended -- see module docstring, "THIRD BUG") ----
-ARM_MIN_DIST = 70.0          # m -- dRel_at_hot_start must exceed this (anchor semantics changed,
-                             # see docstring -- this is NOT "distance at first sight" anymore).
+ARM_MIN_DIST = 73.0          # m -- dRel_at_hot_start must exceed this (anchor semantics changed,
+                             # see docstring -- this is NOT "distance at first sight" anymore, and
+                             # since 2026-09-14 it is the FILTERED range, not a raw dRel sample).
+                             #
+                             # 70 -> 73 m on 2026-09-14, PAIRED WITH the filtered-anchor change
+                             # and not independent of it: the filtered anchor reads ~3 m further
+                             # out than the raw sample it replaced, so 73.0 holds the effective
+                             # gate where 70.0 held it before. See docstring, "ANCHOR ON FILTERED
+                             # RANGE", for why the uncompensated 70.0 was measurably worse.
                              #
                              # 80 -> 70 m on 2026-09-04, OPERATOR DECISION under acknowledged
                              # measurement uncertainty. The honest position at the time: the
@@ -464,7 +510,9 @@ class FarLeadPreBrake:
           # anchor once, at the first frame the streak goes hot -- NOT at first presence
           # (removed with the absence gate) and not re-checked live every frame thereafter
           # (that reintroduces the v1 stopped-lead bug -- see module docstring)
-          self.dRel_at_hot_start = dRel
+          #
+          # FILTERED range, not the raw sample -- see docstring, "ANCHOR ON FILTERED RANGE".
+          self.dRel_at_hot_start = self.filt.x if self.filt.x is not None else dRel
         self.hot_elapsed += DT_MDL
       else:
         self.hot_elapsed = 0.0

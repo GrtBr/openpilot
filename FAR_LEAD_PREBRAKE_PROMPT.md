@@ -87,8 +87,12 @@ covers that).
 3. `radarState.leadOne.present` for **≥ 0.30 s continuously** (same idea as hook 10 `T_HOLD`;
    kills the 10:48-style flicker). No absence precondition — see amendment note above.
 4. Once continuous presence and a hot closing signal (item 6) have both held long enough,
-   capture `dRel_at_hot_start`: the dRel at the **first frame the hot signal (item 6) went
-   true**, not at first presence. This must be `> 80` (`ARM_MIN_DIST`, lowered from 100 —
+   capture `dRel_at_hot_start`: the **filtered** range (`self.filt.x`, not the raw `dRel`
+   sample — changed 2026-09-14, see the far_lead.py docstring "ANCHOR ON FILTERED RANGE";
+   the raw sample is biased low by ~2.1 m because hot-start fires preferentially on frames
+   where it dipped below trend) at the **first frame the hot signal (item 6) went
+   true**, not at first presence. This must be `> 73` (`ARM_MIN_DIST`; was 80, then 70, raised
+   to 73 on 2026-09-14 to compensate for the filtered anchor reading ~3 m further out —
    anchoring later means the anchor distance is naturally smaller for the same encounter).
    Captured once and frozen for the rest of this presence run; a fully-stopped lead first
    detected already inside ~87 m will never satisfy this (known limitation, same failure class
@@ -195,7 +199,7 @@ Add `openpilot/grt/tests/test_far_lead.py` in the same stubbed style as `test_ho
 | relaxed, 120 m, vRel_model −0.8, range-rate −8, after 0.30 s continuous presence + hot | one candidate, `a <= -0.40` |
 | same, 110 vs 100 at 150 m (`a_req ≈ 0.14`) | `[]` |
 | same, 110 vs 0 at 120 m | candidate, `a` harder than the slow-pack case, ≥ −1.2, `dRel_at_hot_start` clear of `ARM_MIN_DIST` (80 m) with margin |
-| KNOWN LIMIT: 110 vs 0, lead first seen already at 86 m | never arms (`dRel_at_hot_start` freezes below `ARM_MIN_DIST` on the first hot frame; same failure class v1 had at 100 m) |
+| KNOWN LIMIT: 110 vs 0, lead first seen already at 86 m | never arms (`dRel_at_hot_start` freezes below `ARM_MIN_DIST` on the first hot frame; same failure class v1 had at 100 m). NOT fixed by the 2026-09-14 filtered anchor — that addresses the anchor's NOISE, not the fact that it is captured once and never re-evaluated |
 | relaxed, lead present+steady (non-closing) for several seconds, then starts closing hard | arms once the hot signal starts, `dRel_at_hot_start` anchored at that later instant — not at first presence |
 | once armed, dRel falls under `ARM_MIN_DIST` | still armed (the arm-distance check is one-time, at hot-start) |
 | armed, stock candidate reaches -0.40 while dRel still > 20 m (e.g. 50 m, per the 10:49 log) | this frame still returns the candidate, `min()` picks the harder one; latch drops after |
