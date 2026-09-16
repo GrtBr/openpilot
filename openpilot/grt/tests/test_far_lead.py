@@ -12,7 +12,9 @@ first lock (stopped-lead case never armed at all, v1), the rising-edge absence g
 arming on a real 2026-08-27 drive regardless of how hot the danger signal got (removed in v2 --
 see "THIRD BUG"), and a_req alone clearing HOT_A_REQ on ordinary highway noise / tiny closing
 rates at long range, which held the floor for far longer than any real closing event lasted
-(fixed by HOT_CLOSING_RATE on both arm and release -- see "FOURTH BUG").
+(fixed by HOT_CLOSING_RATE on both arm and release -- see "FOURTH BUG"), and the lead slot
+switching objects, which the unguarded range-rate filter differentiated into tens of m/s of phantom
+closing (fixed by the object-switch guards -- see "OBJECT-SWITCH GUARDS").
 """
 import pathlib
 import sys
@@ -331,6 +333,85 @@ def main():
         "a_req = (eff_vRel_range ** 2) / (2.0 * max(eff_dRel - STOP_MARGIN, 1.0))" in _src)
   check("hot_a_req_for is used at the arming gate ONLY (def + exactly one call)",
         _src.count("hot_a_req_for(") == 2)
+
+  # ---- object-switch guards + ARM_MIN_DIST 65 (2026-09-15) ----
+  # leadOne is an anonymous slot: when radard's lead switches objects, dRel steps, and the unguarded
+  # filter differentiated that step into tens of m/s of phantom closing which a_req then squared --
+  # every CAP arm on the 2026-09-14 corpus followed such a switch. A range change that motion cannot
+  # produce must re-initialise the filter, not move v. See module docstring, "OBJECT-SWITCH GUARDS".
+  # The real-close cases pin the other side: the guards never fire on physically possible motion.
+  print("\nobject-switch guards")
+  import random as _random
+
+  def feed(samples, v_ego, vrel=-0.5, noise=0.0, seed=7, hook=None):
+    """samples: [(present, dRel)] -> (hook, per-frame (armed, v_filt, stepped, candidate a,
+    present_s, hot_elapsed, dRel_at_hot_start)). Noise, if any, is seeded: deterministic."""
+    rng = _random.Random(seed)
+    h = hook if hook is not None else new_hook()
+    res = []
+    for pres, d in samples:
+      z = d + (rng.gauss(0.0, noise) if (pres and noise) else 0.0)
+      out = h.step(pres, z, vrel, v_ego, True, True, False, 1.0)
+      res.append((h.armed, h.filt.v, h.filt.stepped, out[0][0] if out else None,
+                  h.present_s, h.hot_elapsed, h.dRel_at_hot_start))
+    return h, res
+
+  def switches(r):
+    return [i for i, x in enumerate(r) if x[2]]
+
+  _, r = feed([(True, 110.0)] * 100 + [(True, 45.0)] * 100, 30.0)
+  check("slot switch 110 -> 45 m is ONE new object, not a velocity", len(switches(r)) == 1)
+  check("...no phantom closing: v_filt stays above -5 m/s (the unguarded filter read ~-28)",
+        min(x[1] for x in r) > -5.0)
+  check("...never arms", not any(x[0] for x in r))
+  sw = switches(r)[0] if switches(r) else None
+  check("...on the switch frame, presence, hot streak and anchor restart for the new object",
+        sw is not None and abs(r[sw][4] - DT_MDL) < 1e-9 and r[sw][5] == 0.0 and r[sw][6] is None)
+
+  _, r = feed([(True, 45.0)] * 100 + [(True, 110.0)] * 100, 30.0)
+  check("reveal 45 -> 110 m (switch to a farther object): one new object, no phantom opening",
+        len(switches(r)) == 1 and max(x[1] for x in r) < 5.0)
+
+  ramp = ([(True, 92.0)] * 100 + [(True, 92.0 - 44.0 * k / 20) for k in range(1, 21)]
+          + [(True, 48.0)] * 100)
+  _, r = feed(ramp, 25.0)
+  check("ramped switch 92 -> 48 m over 1.0 s at ego 25 m/s (too gradual for STEP, faster than a "
+        "lead can close): caught by the physical bound, never arms",
+        len(switches(r)) >= 1 and not any(x[0] for x in r))
+
+  _, r = feed([(True, 90.0)] * 100 + [(True, 110.0)] + [(True, 90.0)] * 100, 30.0)
+  check("single-frame +20 m outlier is noise, not a new object", switches(r) == [])
+
+  for noise in (0.0, 2.5):
+    _, r = feed([(True, 130.0 - 33.0 * i * DT_MDL) for i in range(70)], 33.0, vrel=-3.0, noise=noise)
+    cands = [x[3] for x in r if x[3] is not None]
+    check(f"stopped car closing at exactly ego speed 33 m/s (noise {noise} m): physical bound does "
+          f"NOT fire, arms, reaches CAP",
+          switches(r) == [] and any(x[0] for x in r) and bool(cands) and min(cands) <= fl.CAP + 1e-6)
+  _, r = feed([(True, 130.0 - 20.0 * i * DT_MDL) for i in range(110)], 30.0, noise=2.5)
+  check("genuine 20 m/s close with 2.5 m dRel noise: no false switch, arms",
+        switches(r) == [] and any(x[0] for x in r))
+
+  for seed in (1, 2, 3):
+    _, r = feed([(True, 90.0)] * 2000, 30.0, noise=2.7, seed=seed)
+    check(f"steady following at 90 m for 100 s, 2.7 m noise (seed {seed}): no false switch, never arms",
+          switches(r) == [] and not any(x[0] for x in r))
+
+  h, _ = feed([(True, 120.0 - 8.0 * i * DT_MDL) for i in range(40)], 30.6, vrel=-8.0)
+  armed_before = h.armed
+  _, r = feed([(True, 40.0)] * 20, 30.6, vrel=-0.5, hook=h)
+  check("armed, then the slot switches to a 40 m object: hook releases within 3 frames",
+        armed_before and any(not x[0] for x in r[:3]))
+
+  _, r = feed([(True, 115.0)] * 100 + [(True, 85.0 - 10.0 * i * DT_MDL) for i in range(60)], 30.0)
+  first = next((i for i, x in enumerate(r) if x[0]), None)
+  need = round((fl.PRESENCE_PERSIST_S + fl.HOT_PERSIST_S) / DT_MDL)
+  check("switch to an 85 m object that IS closing at 10 m/s: re-earns the arm on its own evidence, "
+        "no sooner than presence + hot persistence after the switch",
+        bool(switches(r)) and first is not None and first - switches(r)[0] >= need)
+
+  check("ARM_MIN_DIST 65 m ships only with the guards (73 m is the guards-only rollback)",
+        fl.ARM_MIN_DIST == 65.0 and hasattr(fl._RangeRateFilter, "_switch"))
 
   print(f"\n{sum(results)}/{len(results)} passed")
   return 0 if all(results) else 1

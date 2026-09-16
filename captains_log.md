@@ -7953,3 +7953,109 @@ arms missed, so still not a swap candidate. The sigma itself is worth keeping re
 first honest uncertainty on the deployed filter, and (d)'s open concern (new CAP arms on leads that
 are not slower) is the kind of question it could gate — arming is the wrong place to spend it,
 SEVERITY may not be.
+
+### 2026-09-15 (a) — far_lead: object-switch guards on _RangeRateFilter, ARM_MIN_DIST 73 -> 65
+
+Operator instruction after the CAP-arm review: "Port Both guards, 73 m minimum lowered to 65 m to
+far_lead.py with tests". Full evidence in analysis/lead_filter/tracker/FINDINGS.md §20.
+
+**The defect (confirms (d)'s OPEN CONCERN).** `leadOne` is an anonymous slot. When radard's lead
+switches to a nearer object, dRel steps, and the alpha-beta filter differentiated the step: a 40 m
+step becomes ~-24 m/s (beta/dt x sum of decaying residuals), which `a_req` squares. All 26 arms
+that reached CAP on the 29-route corpus under the 09-14 code followed such a switch within ~1.5 s.
+By channels independent of hook 11 (post-switch step-excluded closing, lead0_v - vEgo, stock's own
+demand with the 09-04 hook's frames removed), 10 were traffic pulling away. 8 of those 10 were
+admitted by the 09-14 filtered anchor, which lagged above 73 m after the step while the raw range
+was 34-54 m. These drives predate the 09-14 deploy, so this is predicted for the car as it stands
+now, not yet observed on it.
+
+**What an external report card got wrong.** Its "stock also braked" evidence was hook 11's own
+-2.00 on the car (9 of 11). Its "20 s of unused warning" was radard reporting no lead on 93-99% of
+the window. Its reset-on->8 m-per-frame rule fires on several percent of normal frames at range
+(sd 3.8 m, p99 12.4 m). Its velocity-head clamp would block real closes: head gain is 0.10 at 60-80 m
+and it reads "not closing" on 52-69% of true fast closes beyond 60 m.
+
+**Change (openpilot/grt/far_lead.py).**
+- `_RangeRateFilter.update(z, v_ego)` gains two tests.
+  - STEP: the median of the last 3 raw samples vs the previous 3 differs by > 12 m. The first such
+    frame is coasted; the second re-initialises.
+  - PHYSICAL BOUND: over 0.8 s, two 5-sample medians show the range closing faster than ego speed,
+    or opening faster than 15 m/s, each + 8 m.
+- On either, the filter re-initialises on the new range and sets `stepped`. The hook then restarts
+  `present_s`, `hot_elapsed` and `dRel_at_hot_start`.
+- Constants: STEP_GATE_M, STEP_FRAMES, PHYS_WINDOW, PHYS_SPAN_S, PHYS_MARGIN_M, PHYS_OPEN_MPS.
+- `ARM_MIN_DIST` 73 -> 65, OPERATOR DECISION, paired with the guards.
+- New docstring section "OBJECT-SWITCH GUARDS + ARM_MIN_DIST 73 -> 65".
+- Hold-through on re-lock was tested and dropped (neutral).
+
+**Corpus replay, 31 TSVs** (relaxed; stock_min = 0 so hardest and release are upper bounds):
+
+| code | spurious CAP | real CAP | arms | real closes caught /87 | added arms not closing |
+|---|---|---|---|---|---|
+| 09-14 | 10/10 | 7/7 | 190 | 49 | — (own 43%) |
+| guards, 73 m | 0/10 | 0/7 | 161 | 46 | 4/7 |
+| **guards, 65 m (this)** | **0/10** | **1/7** | **204** | **56** | **8/25 = 32%** |
+| no guards, 65 m | 10/10 | 7/7 | 233 | 58 | 10/23 = 43% |
+
+The real events now arm softer (−0.5 to −1.0) where the honest velocity sees them. Stock was
+already braking on 4 of the 7. The two CAP events kept are the two with a genuinely near-stopped
+lead.
+
+**Verified.**
+- Replay: the committed file reproduces the validated variant
+  (`deployed+ff+set:FF_STEP=1+set:FF_PHYS=1+set:ARM_MIN_DIST=65`) arm-for-arm on all 31 routes:
+  204 arms, 4 CAP, 0 routes differ.
+- test_far_lead.py 47 -> 63 passed (16 new). The new cases fail against the pre-port file.
+- test_hooks.py 44/44. test_schema_conformance.py cannot run on the Pi5 (no pycapnp) and needs
+  none: no schema touched.
+
+**Watch on the road:**
+- No more hard braking on a car pulling away after the lead switches.
+- More FLOOR (−0.40) arms at 65-73 m. About two thirds are on a genuinely slower lead (17/25).
+
+**Rollback:** `ARM_MIN_DIST = 73.0` alone gives the guards-only row; `git revert` restores 09-14.
+
+**Correction, same day.** The "added arms not closing" figures first written here (74%, 84%,
+own 50%) came from `noise_arms.py`. It took its time origin from the first stock row WITH a lead
+present, while arm times start at the route's first stock row. On 26 of 29 routes the two differ by
+> 0.3 s, and by up to 902 s. Fixed; the table above is re-measured. The same bug is in the older
+`quality_*.py` scripts, so the "genuinely slower lead" percentages in (d)-(f) and FINDINGS §13-§16
+and §19 are unreliable. That includes the 70 -> 73 rationale in the "ANCHOR ON FILTERED RANGE"
+docstring, now superseded by 65 m. Recall, timing and CAP-event labels used the correct clock.
+
+**Non-CAP validation (operator question: "shouldn't we test on non-CAP drives as well?").** All 31
+TSVs, eligible present time 3.32 h:
+- Arms both versions make are unchanged: of 134 shared non-CAP arms, 112 have identical timing
+  (p90 +0.05 s) and 104 an identical hardest command.
+- 59 added arms: median 68.7 m, hardest median −0.40, 1 CAP.
+- 43 lost arms, 13 of them CAP. 41 of 43 follow a guard reset within 5 s: 28 a clean switch, 6 a
+  noise-like reset, 4 ambiguous.
+- Guard resets: 449, i.e. 135 per eligible lead-hour.
+  - STEP: 404 resets, 32% clean switches, 37% noise-like.
+  - Physical bound: 45 resets, 62% clean.
+- By range: 23/h under 40 m, 76/h at 40-73 m, 294/h at 73-100 m, 282/h at 100 m and beyond.
+- The STEP test's noise resets are the one soft spot; each delays a genuine arm by ≥ 0.8 s.
+  Possible tuning (untested): STEP_FRAMES 3 or a persistence check.
+
+**DEPLOYED to comma4 2026-09-16, car in park (gear park, standstill, vEgo 0, not engaged).**
+
+**Deploy incident, worth remembering: `scp` silently lost the tail of both files.** After the copy
+`md5sum` on the device matched the Pi5 exactly -- from page cache. The bytes on flash were a single
+NUL run from offset 40960 (a 4 KiB block boundary) to EOF: 5742 NULs in far_lead.py, 1353 in
+test_far_lead.py. plannerd noticed before I did, in the previous boot's swaglog:
+`SyntaxError: source code string cannot contain null bytes` at `hooks.py:674`, logged as
+"grt: far_lead construction; hook 11 disabled" -- the hook's own try/except latch did exactly its
+job and the car simply ran without hook 11. Fixed by rewriting both files over ssh with an explicit
+`os.fsync` on the file and its directory, then verifying (a) with `dd iflag=direct`, and (b) again
+after the reboot, when the page cache cannot hide anything. Only these two files were affected: a
+NUL scan of all 2472 text files in the device repo came back clean. Lesson: after any deploy, verify
+with a direct read or after a reboot, never with a checksum taken straight after the write.
+
+**On-device verification after reboot:** far_lead.py and test_far_lead.py sha256 match the Pi5, 0
+NULs; test_far_lead.py 63/63 and test_hooks.py 44/44 under /usr/local/venv; live import shows
+ARM_MIN_DIST 65.0, STEP_GATE_M 12.0, STEP_FRAMES 2, PHYS_SPAN_S 0.8, PHYS_MARGIN_M 8.0,
+PHYS_OPEN_MPS 15.0, and a 110 -> 45 m step re-initialises the filter instead of reading -28 m/s;
+manager, controlsd, selfdrived, plannerd, card and modeld all up; longitudinalPlan 500 msgs/25 s
+(source e2e, parked), radarState 500, carState 2495; onroadEvents only wrongGear / doorOpen /
+seatbeltNotLatched, all expected while parked; no `grt:` failure in any of this boot's five
+swaglogs. Personality reads relaxed, so hook 11 is live on the next drive.

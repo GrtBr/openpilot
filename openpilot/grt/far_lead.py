@@ -325,6 +325,70 @@ ARM_MIN_DIST to 70.0.
 
 DOES NOT ADDRESS the KNOWN LIMITATION above: the anchor is still captured once and frozen, so an
 encounter whose hot streak begins inside ARM_MIN_DIST still fails forever. Separate change.
+
+OBJECT-SWITCH GUARDS + ARM_MIN_DIST 73 -> 65, 2026-09-15
+--------------------------------------------------------
+THE DEFECT. `leadOne` is an anonymous slot. When radard's lead switches to a different, nearer
+object, dRel steps (single frames of 4-26 m, level shifts of 7-43 m within 0.25 s on the corpus),
+and the alpha-beta filter DIFFERENTIATED that step: a 40 m step becomes ~-24 m/s of closing
+(beta/dt * sum of the decaying residuals = 0.06 * 40/alpha), which `a_req = v^2/(2d)` then squares.
+Every one of the 26 arms that reached CAP on the 29-route corpus under the 2026-09-14 code followed
+such a switch within ~1.5 s. By channels independent of hook 11 (post-switch step-excluded closing,
+lead0_v - vEgo, stock's own demand with the hook's frames removed), 10 of those 26 were traffic
+pulling AWAY -- a -2.0 m/s^2 brake on nothing -- and 8 of the 10 were admitted by the 09-14
+filtered anchor, whose `filt.x` lagged ABOVE ARM_MIN_DIST after the step while the raw range was
+already 34-54 m. That is the "OPEN CONCERN" of the section above, confirmed. The deployed code
+caught the genuinely real ones by the same accident: phantom velocity plus a lagging anchor.
+
+THE FIX. A range change that motion cannot produce is a NEW OBJECT, not a velocity. On such a frame
+`_RangeRateFilter` re-initialises on the new range (`stepped` = True) and the hook restarts presence
+persistence, the hot streak and the anchor, so the new object must earn an arm on its own evidence.
+Two tests, in this order:
+  1. STEP: median of the last 3 raw samples vs the 3 before differs by > STEP_GATE_M (12 m). 30 m/s
+     of real closing moves 4.5 m across those frames. One such frame is COASTED (not fed to the
+     filter); STEP_FRAMES (2) consecutive frames re-initialise.
+  2. PHYSICAL BOUND, for switches that slide over several frames instead of stepping: over
+     PHYS_SPAN_S (0.8 s, two 5-sample medians) the range may not close faster than ego speed (a
+     lead cannot reverse) or open faster than PHYS_OPEN_MPS (15 m/s), each + PHYS_MARGIN_M (8 m).
+A single-frame gate was measured and rejected: at 73-100 m ordinary |frame-to-frame| dRel changes
+have sd 3.8 m and p99 12.4 m, so "> 8 m in one frame" fires on several percent of normal frames.
+Clamping v_filt with the model's velocity head was also rejected: against non-causal truth its gain
+is 0.10 at 60-80 m and 0.05 at 80-100 m, and it reads "not closing" on 52-69% of genuinely fast
+closes beyond 60 m -- it can confirm a close, never refute one.
+Holding x/v through short absences was tested and dropped (neutral on the corpus).
+
+ARM_MIN_DIST 73 -> 65, OPERATOR DECISION, PAIRED WITH THE GUARDS. With honest velocity, a real
+object that appears through a switch is first seen confidently at 55-72 m, i.e. inside 73 m, and
+hook 11 could not arm on it at all. 65 m widens hook 11's scope to part of that band. Corpus replay
+(31 TSVs, relaxed only, stock_min = 0 so hardest commands and releases are upper bounds; the
+guards-only row at 73 m for comparison):
+
+                          spurious CAP  real CAP  arms  real closes caught  added arms: slower lead / not closing
+    09-14 code (73 m)        10/10        7/7      190        49/87          (own arms: 43% not closing)
+    guards, 73 m              0/10        0/7      161        46/87           3/7  /  4/7
+    guards, 65 m  <- THIS     0/10        1/7      204        56/87          17/25  /  8/25
+    no guards, 65 m          10/10        7/7      233        58/87          13/23  / 10/23
+
+Expect: no hard braking on traffic pulling away after a lead switch; softer arms (about -0.5 to
+-1.0) on real objects that appear at 55-70 m, where stock was already braking on 4 of 7; about +7%
+arms overall, the added ones mostly FLOOR arms (median -0.40) at 65-73 m, two thirds of them on a
+genuinely slower lead -- better than the 09-14 code's own arms. One spurious event still reaches
+-1.97 in replay (not CAP). The two CAP events kept are the
+two whose lead was genuinely near-stopped (1.1 and 3.2 m/s against ego 14-16 m/s).
+"no guards, 65 m" is the row that must never ship: the guards are what make 65 m acceptable.
+
+COST ON ORDINARY DRIVING, measured over all 31 TSVs (not just CAP encounters): the guards fire ~135
+times per hour of eligible lead time (once per ~12 s at 73-100 m, once per ~48 s at 40-73 m). The
+STEP test is the noisy one: after ~37% of its resets the raw range is back within 4 m a second later
+(noise, or a sub-second switch and back); the physical bound is ~62% clean switches. A reset during
+a genuine approach restarts presence + hot persistence, so it delays that arm by >= 0.8 s. Of the 43
+arms the 09-14 code made and this code does not, 28 follow a clean switch (including the 10 spurious
+CAP arms) and 6 follow a noise-like reset. Arms both versions make are unchanged: 112/134 non-CAP
+shared arms have identical timing (p90 +0.05 s) and 104/134 an identical hardest command.
+
+ROLLBACK: ARM_MIN_DIST = 73.0 alone gives the "guards, 73 m" row. `git revert` of this commit
+restores the 2026-09-14 code. Evidence: analysis/lead_filter/tracker/FINDINGS.md §20;
+captains_log.md 2026-09-15.
 """
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalPlanSource
@@ -334,10 +398,23 @@ from openpilot.selfdrive.controls.lib.drive_helpers import should_stop
 ALPHA = 0.10
 BETA = 0.003
 
+# ---- object-switch guards (module docstring, "OBJECT-SWITCH GUARDS", 2026-09-15) ----
+STEP_GATE_M = 12.0           # m -- median-of-3 level change over 3 frames that motion cannot produce
+STEP_FRAMES = 2              # consecutive frames beyond the gate = new object (the first is coasted)
+PHYS_WINDOW = 21             # samples -- two 5-sample medians at either end of this window...
+PHYS_SPAN_S = 0.8            # s -- ...whose centres are this far apart
+PHYS_MARGIN_M = 8.0          # m -- noise margin on that median change
+PHYS_OPEN_MPS = 15.0         # m/s -- a lead does not pull away faster than this; faster = farther object
+
 # ---- arming (spec section 4, amended -- see module docstring, "THIRD BUG") ----
-ARM_MIN_DIST = 73.0          # m -- dRel_at_hot_start must exceed this (anchor semantics changed,
+ARM_MIN_DIST = 65.0          # m -- dRel_at_hot_start must exceed this (anchor semantics changed,
                              # see docstring -- this is NOT "distance at first sight" anymore, and
                              # since 2026-09-14 it is the FILTERED range, not a raw dRel sample).
+                             #
+                             # 73 -> 65 m on 2026-09-15, OPERATOR DECISION, PAIRED WITH the
+                             # object-switch guards and NOT safe without them: on the corpus, 65 m
+                             # without the guards re-admits all 10 spurious CAP arms. See docstring,
+                             # "OBJECT-SWITCH GUARDS". Rollback to the guards-only row: 73.0.
                              #
                              # 70 -> 73 m on 2026-09-14, PAIRED WITH the filtered-anchor change
                              # and not independent of it: the filtered anchor reads ~3 m further
@@ -425,6 +502,10 @@ def hot_a_req_for(dRel: float) -> float:
   return HOT_A_REQ * max(HOT_A_REQ_MIN_SCALE, THRESH_SCALE_DIST / dRel)
 
 
+def _median(a: list) -> float:
+  return sorted(a)[len(a) // 2]
+
+
 class _RangeRateFilter:
   """[x, v] filter on `leadOne.dRel`. Position measurement -- NOT radard.py's KF1D, which
   measures a Doppler velocity into a [SPEED, ACCEL] state. See module docstring."""
@@ -435,17 +516,53 @@ class _RangeRateFilter:
     self.dt = dt
     self.x = None
     self.v = 0.0
+    self.recent = []        # last 6 raw samples, STEP test
+    self.window = []        # last PHYS_WINDOW raw samples, physical-bound test
+    self.step_frames = 0
+    self.stepped = False    # True on the frame the filter re-initialised on a new object
 
   def reset(self, x0: float) -> None:
     self.x = x0
     self.v = 0.0
+    self.recent = [x0]
+    self.window = [x0]
+    self.step_frames = 0
 
-  def update(self, z: float) -> float:
-    """Feed one dRel measurement, return the filtered closing rate (m/s, negative = closing)."""
+  def _switch(self, z: float) -> float:
+    self.reset(z)
+    self.stepped = True
+    return self.v
+
+  def update(self, z: float, v_ego: float = 0.0) -> float:
+    """Feed one dRel measurement, return the filtered closing rate (m/s, negative = closing).
+
+    A range change that motion cannot produce is a new object, not a velocity: the filter
+    re-initialises on it instead of differentiating it. See module docstring, "OBJECT-SWITCH GUARDS"."""
+    self.stepped = False
     if self.x is None:
       self.reset(z)
       return self.v
     x_pred = self.x + self.v * self.dt
+
+    self.recent.append(z)
+    if len(self.recent) > 6:
+      self.recent.pop(0)
+    if len(self.recent) == 6 and abs(_median(self.recent[3:]) - _median(self.recent[:3])) > STEP_GATE_M:
+      self.step_frames += 1
+      if self.step_frames >= STEP_FRAMES:
+        return self._switch(z)
+      self.x = x_pred          # coast: do not differentiate a suspected discontinuity
+      return self.v
+    self.step_frames = 0
+
+    self.window.append(z)
+    if len(self.window) > PHYS_WINDOW:
+      self.window.pop(0)
+    if len(self.window) == PHYS_WINDOW:
+      dz = _median(self.window[-5:]) - _median(self.window[:5])
+      if dz < -(v_ego * PHYS_SPAN_S + PHYS_MARGIN_M) or dz > PHYS_OPEN_MPS * PHYS_SPAN_S + PHYS_MARGIN_M:
+        return self._switch(z)
+
     residual = z - x_pred
     self.x = x_pred + self.alpha * residual
     self.v = self.v + (self.beta / self.dt) * residual
@@ -480,7 +597,12 @@ class FarLeadPreBrake:
         self.filt.reset(dRel)          # fresh lock -- stale filter state would mislead
       self.present_s += DT_MDL
       self.absent_s = 0.0
-      v_filt = self.filt.update(dRel)
+      v_filt = self.filt.update(dRel, v_ego)
+      if self.filt.stepped:
+        # the lead slot switched objects: nothing learned about the old one applies to the new one
+        self.present_s = DT_MDL
+        self.hot_elapsed = 0.0
+        self.dRel_at_hot_start = None
     else:
       self.absent_s += DT_MDL
       self.present_s = 0.0

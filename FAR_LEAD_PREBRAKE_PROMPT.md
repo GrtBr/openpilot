@@ -91,9 +91,16 @@ covers that).
    sample — changed 2026-09-14, see the far_lead.py docstring "ANCHOR ON FILTERED RANGE";
    the raw sample is biased low by ~2.1 m because hot-start fires preferentially on frames
    where it dipped below trend) at the **first frame the hot signal (item 6) went
-   true**, not at first presence. This must be `> 73` (`ARM_MIN_DIST`; was 80, then 70, raised
-   to 73 on 2026-09-14 to compensate for the filtered anchor reading ~3 m further out —
+   true**, not at first presence. This must be `> 65` (`ARM_MIN_DIST`; was 80, then 70, raised
+   to 73 on 2026-09-14 to compensate for the filtered anchor reading ~3 m further out, lowered to
+   65 on 2026-09-15 as an operator decision PAIRED WITH the object-switch guards below —
    anchoring later means the anchor distance is naturally smaller for the same encounter).
+   **Object-switch guards (2026-09-15):** `leadOne` is an anonymous slot, so a switch to a nearer
+   object steps dRel. The range-rate filter must treat a range change that motion cannot produce
+   as a NEW OBJECT — re-initialise on it and restart presence, the hot streak and the anchor —
+   never as velocity: a step (median of last 3 vs previous 3 samples > 12 m, 2 frames) or a
+   change over 0.8 s that closes faster than ego speed or opens faster than 15 m/s (+8 m). See
+   the far_lead.py docstring "OBJECT-SWITCH GUARDS".
    Captured once and frozen for the rest of this presence run; a fully-stopped lead first
    detected already inside ~87 m will never satisfy this (known limitation, same failure class
    v1 had at 100 m — outside this hook's declared envelope, see `far_lead.py` docstring).
@@ -210,6 +217,14 @@ Add `openpilot/grt/tests/test_far_lead.py` in the same stubbed style as `test_ho
 | candidate `a > -0.20` | never (hook 10 C would eat it) |
 | FOURTH BUG regression: `a_req` hot but closing <10 km/h at 90 m | `[]`, never arms |
 | FOURTH BUG regression: armed on a fast approach, closing rate decays to -1.5 m/s (<10 km/h) without ever reaching >= 0 | released anyway, not held waiting for fully non-negative |
+| OBJECT SWITCH: lead slot steps 110 -> 45 m while present | one new object; v_filt never below -5 m/s (unguarded ~-28); never arms; presence/hot/anchor restart on the switch frame |
+| OBJECT SWITCH: reveal 45 -> 110 m | one new object, no phantom opening |
+| OBJECT SWITCH: ramp 92 -> 48 m over 1.0 s at ego 25 m/s | caught by the physical bound, never arms |
+| single-frame +20 m outlier | not a new object |
+| stopped car closing at exactly ego speed (33 m/s), with and without noise | guards do not fire; arms; reaches CAP |
+| genuine 20 m/s close with 2.5 m noise; 100 s steady following at 90 m with 2.7 m noise | no false switch; arms / never arms respectively |
+| armed, then slot switches to a 40 m object | releases within 3 frames |
+| switch to an 85 m object that is closing at 10 m/s | re-earns the arm on its own evidence, no sooner than presence + hot persistence |
 
 Run: `python3 openpilot/grt/tests/test_far_lead.py` and existing `openpilot/grt/tests/test_hooks.py`.
 
