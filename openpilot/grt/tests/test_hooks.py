@@ -286,6 +286,72 @@ def test_hook4():
   check("hook4 cannot raise into selfdrived", hooks.set_speed_alerts(broken, True) == [])
 
 
+
+def test_front_run():
+  """Hook 11c, the front-run recorder: measurement only, one line per armed span."""
+  print("\nhook 11c: front-run recorder")
+  rec = []
+  saved = hooks._lead_write
+  hooks._lead_write = rec.append
+  try:
+    LEAD = lambda d: NS(present=True, dRel=d)
+
+    def run(frames):
+      """frames: [(cand, stock_min, dRel)] -> the records written."""
+      rec.clear()
+      hooks._front_run = hooks._FrontRun()
+      t = 0.0
+      for cand, stock, d in frames:
+        out = [] if cand is None else [(cand, "lead0", False)]
+        hooks._front_run.step(None if cand is None else float(cand), float(stock), float(d), 25.0, t)
+        t += 0.05
+      return list(rec)
+
+    # hook binds for 1.0 s (20 frames) from 100 m, then stock asks for at least as much at 80 m
+    r = run([(-0.40, 0.0, 100.0 - 1.0 * i) for i in range(20)]
+            + [(-0.60, -0.60, 80.0)] + [(None, -0.60, 79.0)])
+    check("one record per armed span, written at its end", len(r) == 1 and r[0]["ev"] == "fr")
+    check("bind_s counts only frames where the hook was strictly harder than stock",
+          r and abs(r[0]["bind_s"] - 1.0) < 1e-6)
+    check("caught = stock eventually asked for as much braking", r and r[0]["caught"] is True)
+    check("gain_s is arm -> stock catching up", r and abs(r[0]["gain_s"] - 1.0) < 1e-6)
+    check("gain_m is the range covered in that time (100 -> 80 m)",
+          r and abs(r[0]["gain_m"] - 20.0) < 0.05)
+
+    # stock already at least as hard on the very first armed frame: no front-run, no distance gained
+    r = run([(-0.40, -1.00, 90.0), (-0.40, -1.00, 89.0), (None, -1.00, 88.0)])
+    check("stock already harder at the arm -> bind_s 0, gain 0",
+          r and r[0]["bind_s"] == 0.0 and r[0]["gain_s"] == 0.0 and abs(r[0]["gain_m"]) < 0.05)
+
+    # released without stock ever catching up (e.g. the lead was lost)
+    r = run([(-0.40, 0.0, 70.0 - i) for i in range(10)] + [(None, 0.0, 60.0)])
+    check("episode that ends without stock catching up is recorded as caught=False",
+          r and r[0]["caught"] is False and abs(r[0]["gain_m"] - 9.0) < 0.05)
+
+    # two spans in one drive are two records, numbered
+    r = run([(-0.40, 0.0, 100.0), (None, 0.0, 99.0), (-0.50, 0.0, 80.0), (None, 0.0, 79.0)])
+    check("each armed span is its own numbered record", len(r) == 2 and [x["n"] for x in r] == [1, 2])
+
+    # never one line per frame: 200 armed frames, still nothing until the span ends
+    rec.clear()
+    hooks._front_run = hooks._FrontRun()
+    for i in range(200):
+      hooks._front_run.step(-0.40, 0.0, 100.0 - 0.05 * i, 25.0, i * 0.05)
+    check("nothing is written while the span is open (20 Hz loop)", rec == [])
+
+    # measurement must never raise into the planner
+    hooks._front_run = hooks._FrontRun()
+    before = len(rec)
+    hooks.observe_front_run([(-0.4, "lead0", False)], float("nan"), NS(dRel=float("nan")), 25.0)
+    hooks.observe_front_run([], None, NS(dRel=None), 25.0)
+    check("observe_front_run swallows bad input instead of raising", len(rec) >= before)
+    check("hook 11c is wired into far_lead_candidates",
+          "observe_front_run(out" in (GRT / "hooks.py").read_text())
+  finally:
+    hooks._lead_write = saved
+    hooks._front_run = None
+
+
 def main():
   vc = settle(SM(hz="stop", hzd=30.))
   check("hook1 lowers v_cruise when a hazard is ahead", vc < 30.)
@@ -366,6 +432,8 @@ def main():
       f.write("0\n")
     check("file fallback: '0' -> False", get_bool_safe(FakeParams(), "SmartCruiseControlMap") is False)
   FakeParams.vals.update(saved)
+
+  test_front_run()
 
   test_hook3()
 

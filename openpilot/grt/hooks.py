@@ -705,8 +705,10 @@ def far_lead_candidates(sm, v_ego: float, stock_min: float) -> list:
     driver_input = bool(cs.gasPressed or cs.brakePressed)
     lead = sm['radarState'].leadOne
     observe_lead_filter(lead, v_ego)       # hook 11b: A/B shadow, observe-only, never returns a value
-    return fl.step(bool(lead.present), float(lead.dRel), float(lead.vRel), float(v_ego),
+    out = fl.step(bool(lead.present), float(lead.dRel), float(lead.vRel), float(v_ego),
                   relaxed, long_active, driver_input, float(stock_min))
+    observe_front_run(out, float(stock_min), lead, float(v_ego))   # hook 11c: measurement only
+    return out
   except Exception:
     _log_exception("far_lead_candidates")
     return []
@@ -882,6 +884,96 @@ def observe_lead_filter(lead, v_ego: float) -> None:
     sh.step(bool(lead.present), float(lead.dRel), float(v_ego))
   except Exception:
     _log_exception("observe_lead_filter")
+
+
+# ----------------------------------------------------------------------------------------
+# FRONT-RUN RECORDER (measurement, 2026-09-16). NOT a control path.
+# ----------------------------------------------------------------------------------------
+# Answers the two questions replay cannot: how often does hook 11 actually BIND (its candidate is
+# harder than everything else the planner built that frame), and how much earlier does braking
+# start because of it? Replay could never answer them because the harness feeds stock_min = 0.0,
+# so replayed release times are upper bounds only (captains_log 2026-09-14 (a)). Here stock_min is
+# the real one, handed to far_lead_candidates by the planner.
+#
+# Per EPISODE -- an armed span of hook 11 -- one JSON line at its end, never per frame:
+#   bind_s   seconds the hook's candidate was strictly harder than stock's best
+#   gain_s   seconds from the arm until stock itself asked for at least as much braking
+#   gain_m   metres of range covered in that time, i.e. how much sooner braking began
+#   caught   did stock ever catch up, or did the episode end another way
+# Written to the existing rotating lead_filter.log, so nothing new can fill /data.
+class _FrontRun:
+  """One armed span of hook 11 against the planner's own best candidate."""
+
+  def __init__(self):
+    self.ep = None
+    self.episodes = 0
+
+  def step(self, cand, stock_min: float, dRel: float, v_ego: float, now: float) -> None:
+    if cand is None:
+      if self.ep is not None:
+        self._close(dRel, now)
+      return
+    if self.ep is None:
+      self.ep = {"t0": now, "d0": float(dRel), "v0": float(v_ego), "bind": 0,
+                 "cmd": cand, "stock": stock_min, "catch_t": None, "catch_d": None,
+                 "last_t": now, "last_d": float(dRel)}
+    e = self.ep
+    e["last_t"] = now
+    e["last_d"] = float(dRel)
+    if cand < stock_min - 1e-6:
+      e["bind"] += 1
+    e["cmd"] = min(e["cmd"], cand)
+    e["stock"] = min(e["stock"], stock_min)
+    if e["catch_t"] is None and stock_min <= cand + 1e-6:
+      e["catch_t"] = now
+      e["catch_d"] = float(dRel)
+
+  def _close(self, dRel: float, now: float) -> None:
+    e = self.ep
+    self.ep = None
+    self.episodes += 1
+    # measured over the frames the hook was actually commanding, so the frame after release
+    # (dRel already moved on, hook no longer acting) is not counted
+    end_t, end_d = (e["catch_t"], e["catch_d"]) if e["catch_t"] is not None else (e["last_t"], e["last_d"])
+    _lead_write({"ev": "fr", "n": self.episodes, "t": round(e["t0"], 2),
+                 "dur_s": round(e["last_t"] - e["t0"], 2), "bind_s": round(e["bind"] * 0.05, 2),
+                 "gain_s": round(end_t - e["t0"], 2), "gain_m": round(e["d0"] - end_d, 1),
+                 "caught": e["catch_t"] is not None, "dRel_arm": round(e["d0"], 1),
+                 "dRel_end": round(end_d, 1), "v_ego": round(e["v0"], 2),
+                 "cmd": round(e["cmd"], 3), "stock": round(e["stock"], 3)})
+
+
+_front_run = None
+_front_run_broken = False
+
+
+def _front_run_singleton():
+  global _front_run, _front_run_broken
+  if _front_run_broken:
+    return None
+  if _front_run is None:
+    try:
+      _front_run = _FrontRun()
+    except Exception:
+      _front_run_broken = True
+      _log_exception("front_run construction; front-run logging disabled")
+      return None
+  return _front_run
+
+
+def observe_front_run(out: list, stock_min: float, lead, v_ego: float) -> None:
+  """Hook 11c. MEASUREMENT ONLY -- returns nothing and can change no command.
+
+  `out` is exactly what hook 11 just returned: [] when it is not armed, else one candidate.
+  """
+  try:
+    fr = _front_run_singleton()
+    if fr is None:
+      return
+    cand = float(out[0][0]) if out else None
+    fr.step(cand, float(stock_min), float(lead.dRel), float(v_ego), time.monotonic())
+  except Exception:
+    _log_exception("observe_front_run")
 
 
 def ramp_relaxed_accel(a_target: float, sm, long_active: bool) -> float:

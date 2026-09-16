@@ -8067,3 +8067,57 @@ manager, controlsd, selfdrived, plannerd, card and modeld all up; longitudinalPl
 (source e2e, parked), radarState 500, carState 2495; onroadEvents only wrongGear / doorOpen /
 seatbeltNotLatched, all expected while parked; no `grt:` failure in any of this boot's five
 swaglogs. Personality reads relaxed, so hook 11 is live on the next drive.
+
+
+### 2026-09-16 (a) — hook 11c: front-run recorder, so "how often did hook 11 bind, and how much earlier did braking start" becomes measurable
+
+Operator asked for the two numbers hook 11 has never been able to report: how many times it front-ran
+stock, and the mean reaction distance gained. Replay cannot answer either -- `harness.run` feeds
+`stock_min = 0.0`, so the "stock caught up" hand-off never fires and replayed armed spans are upper
+bounds (2026-09-14 (a)). The real `stock_min` only exists on the car, where the planner hands it to
+`far_lead_candidates`.
+
+**Change (openpilot/grt/hooks.py, fork-owned Python only -- no scons, prebuilt branch safe).**
+- `_FrontRun` records one ARMED SPAN of hook 11 at a time and writes ONE JSON line when it ends.
+- Wired in as `observe_front_run(out, stock_min, lead, v_ego)` immediately after `fl.step(...)` in
+  `far_lead_candidates`, so it sees exactly what hook 11 returned and the stock best of that frame.
+- Fields per span: `bind_s` (seconds the hook's candidate was strictly harder than stock's best),
+  `gain_s` and `gain_m` (time and range from the arm until stock itself asked for at least as much
+  braking), `caught` (did stock ever catch up), `dRel_arm`, `dRel_end`, `v_ego`, `cmd`, `stock`, `n`.
+- The span is measured over the frames the hook was actually COMMANDING: the frame after release is
+  not counted.
+- Writes go to the existing rotating `/data/media/0/grt/lead_filter.log` (4 MB cap, rotation
+  recorded), so nothing new can fill /data. Never one line per frame -- it is a 20 Hz loop.
+- Measurement only: own singleton, own latch, own try/except. It returns nothing and cannot change a
+  command.
+
+**Verified.** test_hooks.py 44 -> 55 (11 new checks: one record per span, bind_s counts only frames
+where the hook was strictly harder, caught/gain_s/gain_m arithmetic, the no-front-run case, the
+released-without-hand-off case, two spans are two numbered records, nothing written while a span is
+open, bad input swallowed, and that the call is actually wired into far_lead_candidates).
+test_far_lead.py 63/63 unchanged.
+
+Reader: `analysis/lead_filter/front_run_report.py` turns the `fr` lines from one drive into the two
+answers (count of binding spans, mean/median gain in seconds and metres).
+
+**DEPLOYED to comma4 2026-09-16** (car in park, standstill, not engaged; the device had been
+unreachable for a while and came back after another power cycle of its own).
+
+Deployed the way the 09-15 incident taught: written over ssh with `os.fsync` on the file and its
+directory, verified by `dd iflag=direct`, and verified again from flash after the reboot. The
+earlier far_lead.py deploy was re-checked at the same time and had survived that power cycle intact
+(NUL scan of the whole grt tree: clean).
+
+**On-device verification after reboot:** hooks.py, far_lead.py and test_hooks.py all sha256-match
+the Pi5 on a direct read; test_hooks.py 55/55 and test_far_lead.py 63/63 under /usr/local/venv;
+`observe_front_run` present and wired into `far_lead_candidates`; a synthetic span on the device
+produced exactly the expected record (bind_s 1.0, gain_s 1.0, gain_m 20.0, caught true); plannerd,
+controlsd, selfdrived and card all up; zero `grt:` failure lines in this boot's swaglogs;
+lead_filter.log heartbeating again; longitudinalPlan at 20 Hz; personality relaxed. No `fr` records
+yet, which is correct while parked -- they are written per armed span of hook 11.
+
+**Next drive answers the question:** pull `/data/media/0/grt/lead_filter.log*` and run
+`analysis/lead_filter/front_run_report.py` for the count of binding spans and the mean gain in
+seconds and metres.
+
+**Status: DEPLOYED, not committed.**
