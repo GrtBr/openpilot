@@ -8039,17 +8039,25 @@ TSVs, eligible present time 3.32 h:
 
 **DEPLOYED to comma4 2026-09-16, car in park (gear park, standstill, vEgo 0, not engaged).**
 
-**Deploy incident, worth remembering: `scp` silently lost the tail of both files.** After the copy
-`md5sum` on the device matched the Pi5 exactly -- from page cache. The bytes on flash were a single
+**Deploy incident, worth remembering: the device restarted mid-deploy and both files lost their
+tail.** OPERATOR REPORT, confirmed here: the device "went offline momentarily" right after the copy.
+The realdata timeline shows it -- route 000001ae (recording when the files were copied) ends at
+epoch 1789539625, a COMPLETE extra route 000001af then runs to 1789540009, and only then comes my
+own reboot at 1789540058 (route 000001b0). So the device power-cycled about half a minute after the
+copy, before the dirty pages reached flash, and 000001af is the boot whose swaglog carries the
+hook-11 null-byte error. After the copy `md5sum` on the device matched the Pi5 exactly -- from page
+cache, which is exactly what a restart discards. The bytes on flash were a single
 NUL run from offset 40960 (a 4 KiB block boundary) to EOF: 5742 NULs in far_lead.py, 1353 in
 test_far_lead.py. plannerd noticed before I did, in the previous boot's swaglog:
 `SyntaxError: source code string cannot contain null bytes` at `hooks.py:674`, logged as
 "grt: far_lead construction; hook 11 disabled" -- the hook's own try/except latch did exactly its
-job and the car simply ran without hook 11. Fixed by rewriting both files over ssh with an explicit
-`os.fsync` on the file and its directory, then verifying (a) with `dd iflag=direct`, and (b) again
-after the reboot, when the page cache cannot hide anything. Only these two files were affected: a
-NUL scan of all 2472 text files in the device repo came back clean. Lesson: after any deploy, verify
-with a direct read or after a reboot, never with a checksum taken straight after the write.
+job and the car simply ran without hook 11. `scp` does not fsync, so anything not yet written back was lost. Fixed by
+rewriting both files over ssh with an explicit `os.fsync` on the file and its directory, then
+verifying (a) with `dd iflag=direct`, and (b) again after the reboot, when the page cache cannot
+hide anything. Only these two files were affected: a
+NUL scan of all 2472 text files in the device repo came back clean. Lesson: this device can drop offline without warning, so after any deploy
+verify with a direct read or after a reboot, never with a checksum taken straight after the write.
+A deploy is not complete until the file has been read back from flash on a later boot.
 
 **On-device verification after reboot:** far_lead.py and test_far_lead.py sha256 match the Pi5, 0
 NULs; test_far_lead.py 63/63 and test_hooks.py 44/44 under /usr/local/venv; live import shows
