@@ -296,14 +296,15 @@ def test_front_run():
   try:
     LEAD = lambda d: NS(present=True, dRel=d)
 
-    def run(frames):
+    FLOOR = -0.40            # far_lead.FLOOR; hook 11 hands off when stock reaches it
+
+    def run(frames, floor=FLOOR):
       """frames: [(cand, stock_min, dRel)] -> the records written."""
       rec.clear()
       hooks._front_run = hooks._FrontRun()
       t = 0.0
       for cand, stock, d in frames:
-        out = [] if cand is None else [(cand, "lead0", False)]
-        hooks._front_run.step(None if cand is None else float(cand), float(stock), float(d), 25.0, t)
+        hooks._front_run.step(None if cand is None else float(cand), float(stock), float(d), 25.0, t, floor)
         t += 0.05
       return list(rec)
 
@@ -336,7 +337,7 @@ def test_front_run():
     rec.clear()
     hooks._front_run = hooks._FrontRun()
     for i in range(200):
-      hooks._front_run.step(-0.40, 0.0, 100.0 - 0.05 * i, 25.0, i * 0.05)
+      hooks._front_run.step(-0.40, 0.0, 100.0 - 0.05 * i, 25.0, i * 0.05, FLOOR)
     check("nothing is written while the span is open (20 Hz loop)", rec == [])
 
     # measurement must never raise into the planner
@@ -347,6 +348,25 @@ def test_front_run():
     check("observe_front_run swallows bad input instead of raising", len(rec) >= before)
     check("hook 11c is wired into far_lead_candidates",
           "observe_front_run(out" in (GRT / "hooks.py").read_text())
+
+    # THE HAND-OFF BAR (2026-09-16). far_lead releases on `stock_min <= FLOOR`, not on stock
+    # matching this hook's own command, so `floor_*` is the crossing that actually ends the span.
+    # On the first 8 real spans the strict bar was reached once; the FLOOR bar is the useful one.
+    r = run([(-0.80, 0.0, 100.0 - 1.0 * i) for i in range(20)]
+            + [(-0.80, -0.45, 80.0)] + [(None, -0.45, 79.0)])
+    check("hand-off recorded when stock reaches FLOOR, even though it never matched the hook's "
+          "own harder command", r and r[0]["handoff"] is True and r[0]["caught"] is False)
+    check("floor_s / floor_m measure arm -> stock reaching FLOOR",
+          r and abs(r[0]["floor_s"] - 1.0) < 1e-6 and abs(r[0]["floor_m"] - 20.0) < 0.05)
+    check("the FLOOR bar is reached no later than the hook's own command bar",
+          r and r[0]["floor_s"] <= r[0]["gain_s"])
+
+    r = run([(-0.40, 0.0, 70.0 - i) for i in range(10)] + [(None, 0.0, 60.0)])
+    check("stock never reaching FLOOR -> handoff False, measured to the last commanding frame",
+          r and r[0]["handoff"] is False and abs(r[0]["floor_m"] - 9.0) < 0.05)
+
+    check("FLOOR comes from far_lead, not a copy that could drift",
+          "from openpilot.grt.far_lead import FLOOR" in (GRT / "hooks.py").read_text())
   finally:
     hooks._lead_write = saved
     hooks._front_run = None

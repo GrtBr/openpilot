@@ -8121,3 +8121,38 @@ yet, which is correct while parked -- they are written per armed span of hook 11
 seconds and metres.
 
 **Status: DEPLOYED, not committed.**
+
+
+### 2026-09-16 (b) — hook 11c: record the FLOOR hand-off, not just the strict bar
+
+First 8 real spans (route `000001b3`, 53 min) exposed a flaw in (a)'s recorder. It marked `caught`
+only when stock matched hook 11's OWN command, which is often -0.48 to -0.80. But far_lead releases
+on `stock_min <= FLOOR` (-0.40). So the span always ended at the weaker bar while the recorder was
+still waiting for the stronger one: `caught` was false on 7 of 8 spans even though the logged
+planner reached -0.40 within 0.1 s of release, and `gain_s` could never exceed `bind_s` by
+construction.
+
+**Change (openpilot/grt/hooks.py).** `_FrontRun.step()` takes the hand-off bar as an argument and
+records the first frame `stock_min <= floor`. The record gains `floor_s`, `floor_m` and `handoff`
+alongside the existing `gain_s` / `gain_m` / `caught`, which stay so the 8 records already on the
+car remain comparable. `observe_front_run` passes `far_lead.FLOOR` itself, so the recorder cannot
+drift from the release rule; the recorder stays free of far_lead imports and unit-testable.
+
+`analysis/lead_filter/front_run_report.py` now leads with the hand-off numbers, reports the strict
+bar second, and labels pre-2026-09-16 records rather than mixing them in.
+
+**Verified.** test_hooks.py 55 -> 60 (5 new: hand-off recorded when stock reaches FLOOR though it
+never matched the hook's command; floor_s/floor_m arithmetic; the FLOOR bar is never later than the
+command bar; handoff False when stock never reaches FLOOR; and FLOOR is sourced from far_lead).
+test_far_lead.py 63/63.
+
+**DEPLOYED to comma4 2026-09-17** (car in park, standstill, not engaged), written with `os.fsync`,
+verified by `dd iflag=direct` and again from flash after the reboot. On-device: test_hooks.py 60/60,
+test_far_lead.py 63/63; `_FrontRun.step` carries the `floor` argument and `far_lead.FLOOR` reads
+-0.4; a synthetic span where stock reaches FLOOR but never matches the hook's own command records
+`floor_s` 1.0, `floor_m` 20.0, `handoff` True with `caught` False -- exactly the case that was
+invisible before. After reboot: 5 processes up, zero `grt:` failures this boot, shadow log
+heartbeating, longitudinalPlan at 20 Hz.
+
+NOTE: personality currently reads `standard`, and hook 11 is relaxed-only, so no new `fr` records
+will appear until it is back on relaxed.

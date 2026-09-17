@@ -908,7 +908,9 @@ class _FrontRun:
     self.ep = None
     self.episodes = 0
 
-  def step(self, cand, stock_min: float, dRel: float, v_ego: float, now: float) -> None:
+  def step(self, cand, stock_min: float, dRel: float, v_ego: float, now: float, floor: float) -> None:
+    """`floor` is far_lead.FLOOR, the bar hook 11 itself hands off on -- passed in rather than
+    imported here so it cannot drift from the release rule, and so this stays unit-testable."""
     if cand is None:
       if self.ep is not None:
         self._close(dRel, now)
@@ -916,6 +918,7 @@ class _FrontRun:
     if self.ep is None:
       self.ep = {"t0": now, "d0": float(dRel), "v0": float(v_ego), "bind": 0,
                  "cmd": cand, "stock": stock_min, "catch_t": None, "catch_d": None,
+                 "floor_t": None, "floor_d": None,
                  "last_t": now, "last_d": float(dRel)}
     e = self.ep
     e["last_t"] = now
@@ -927,6 +930,13 @@ class _FrontRun:
     if e["catch_t"] is None and stock_min <= cand + 1e-6:
       e["catch_t"] = now
       e["catch_d"] = float(dRel)
+    # THE HAND-OFF BAR. far_lead releases on `stock_min <= FLOOR`, not on stock matching this
+    # hook's own (harder) command, so this is the crossing that actually ends the span and the one
+    # that answers "how much earlier did braking start". `catch_*` above is the stricter bar and
+    # is nearly always never reached -- 7 of the first 8 real spans, 2026-09-16.
+    if e["floor_t"] is None and stock_min <= floor + 1e-6:
+      e["floor_t"] = now
+      e["floor_d"] = float(dRel)
 
   def _close(self, dRel: float, now: float) -> None:
     e = self.ep
@@ -935,8 +945,11 @@ class _FrontRun:
     # measured over the frames the hook was actually commanding, so the frame after release
     # (dRel already moved on, hook no longer acting) is not counted
     end_t, end_d = (e["catch_t"], e["catch_d"]) if e["catch_t"] is not None else (e["last_t"], e["last_d"])
+    f_t, f_d = (e["floor_t"], e["floor_d"]) if e["floor_t"] is not None else (e["last_t"], e["last_d"])
     _lead_write({"ev": "fr", "n": self.episodes, "t": round(e["t0"], 2),
                  "dur_s": round(e["last_t"] - e["t0"], 2), "bind_s": round(e["bind"] * 0.05, 2),
+                 "floor_s": round(f_t - e["t0"], 2), "floor_m": round(e["d0"] - f_d, 1),
+                 "handoff": e["floor_t"] is not None,
                  "gain_s": round(end_t - e["t0"], 2), "gain_m": round(e["d0"] - end_d, 1),
                  "caught": e["catch_t"] is not None, "dRel_arm": round(e["d0"], 1),
                  "dRel_end": round(end_d, 1), "v_ego": round(e["v0"], 2),
@@ -970,8 +983,9 @@ def observe_front_run(out: list, stock_min: float, lead, v_ego: float) -> None:
     fr = _front_run_singleton()
     if fr is None:
       return
+    from openpilot.grt.far_lead import FLOOR          # already imported by hook 11 itself
     cand = float(out[0][0]) if out else None
-    fr.step(cand, float(stock_min), float(lead.dRel), float(v_ego), time.monotonic())
+    fr.step(cand, float(stock_min), float(lead.dRel), float(v_ego), time.monotonic(), FLOOR)
   except Exception:
     _log_exception("observe_front_run")
 
