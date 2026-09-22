@@ -469,7 +469,8 @@ FINDINGS.md 25-26.
 ARMING IS A LEVEL TEST, 2026-09-22
 -----------------------------------
 The gate arms when the band slope is AT OR BELOW `ARM_SLOPE` with a radar lead present and the
-range above `HANDOFF_DIST`, all three holding for `ARM_CONFIRM_FRAMES` consecutive frames. It previously required a CROSSING -- a transition from
+range above `HANDOFF_DIST + ARM_MARGIN_M`, all three holding for `ARM_CONFIRM_FRAMES` consecutive
+frames. It previously required a CROSSING -- a transition from
 at-or-above ARM_SLOPE to below it.
 
 WHY. The crossing test had a real blind spot, documented when it shipped: a range series ALREADY
@@ -480,6 +481,8 @@ every gap in the model lead, and at route start. A level test cannot miss it.
 WHAT IT COST, AND THE TWO GUARDS IT NEEDED. A level test re-arms the instant its condition is true
 again, and the crossing was masking two sources of that:
 
+  * ARM_MARGIN_M -- 5 m of hysteresis on the range bar: arm above HANDOFF_DIST + 5, hand off
+    below HANDOFF_DIST. Narrower than the 10 m first tried, which closed the whole 50-60 m band.
   * ARM_CONFIRM_FRAMES -- the whole arm condition must hold for 3 consecutive frames. Without it
     the hook armed just over 50 m and released a frame or two later as the range dipped back
     under: 21 sub-2-frame spans on c7+c8+cf, 20 of them within 8 m of the bar, median arm range
@@ -610,6 +613,18 @@ HANDOFF_ACCEL = -0.40        # m/s^2 -- THE HAND-OFF BAR: hook 11 lets go once t
                              # much braking from someone else counts as "handled". FLOOR is an
                              # AUTHORITY bar: the softest command this hook may issue. Tuning the
                              # second must never drag the first. See FINDINGS.md 25.
+ARM_MARGIN_M = 5.0           # m -- arm only above HANDOFF_DIST + this; release is still at
+                             # HANDOFF_DIST, so this is hysteresis on the range bar. Operator
+                             # 2026-09-22, phrased as "margin 5 m but only if dRel < 60 m": that
+                             # qualifier is a no-op and is deliberately NOT implemented. Requiring
+                             # >55 m below 60 m and >50 m at or above 60 m is the same rule as
+                             # requiring >55 m everywhere, since anything >= 60 already clears 55.
+                             # Kept as one bar so a future reader is not hunting a branch that
+                             # cannot be taken.
+                             #
+                             # Paired with the confirmation below rather than replacing it: the
+                             # confirmation alone left 1 sub-2-frame span and 2 re-arms; together
+                             # they leave 0 and 1, at the cost of the 50-55 m band.
 ARM_CONFIRM_FRAMES = 3       # frames the WHOLE arm condition must hold before arming. Replaces
                              # a 10 m hysteresis margin on the range bar (operator, 2026-09-22),
                              # and is the better-targeted fix for the same problem: the level test
@@ -877,9 +892,11 @@ class FarLeadPreBrake:
       if self.rearm_hold_s > 0.0:
         self.arm_confirm = 0
         return []
-      if dRel <= HANDOFF_DIST:
+      if dRel <= HANDOFF_DIST + ARM_MARGIN_M:
         self.arm_confirm = 0
-        return []                                  # stock owns the near field; see HANDOFF_DIST
+        return []                                  # stock owns the near field; see HANDOFF_DIST.
+                                                   # ARM_MARGIN_M is hysteresis -- release is at
+                                                   # HANDOFF_DIST, arming needs HANDOFF_DIST+5.
       # CONFIRMATION. Every condition above must hold for ARM_CONFIRM_FRAMES consecutive frames.
       # The counter is reset by each early return above, so a single bad frame restarts it.
       self.arm_confirm += 1

@@ -308,8 +308,30 @@ def main():
   warm(h, 120.0)
   h.step(True, 120.0, -8.0, 30.6, True, True, False, 1.0, 120.0)
   out = h.step(True, fl.HANDOFF_DIST - 1.0, -8.0, 30.6, True, True, False, 1.0, 49.0)
-  check("dropping under HANDOFF_DIST mid-confirmation cancels the arm",
+  check("dropping under the arm bar mid-confirmation cancels the arm",
         out == [] and not h.armed)
+
+  # ---- ARM MARGIN: arming needs HANDOFF_DIST + ARM_MARGIN_M, release is at HANDOFF_DIST ----
+  check("the arm bar sits above the hand-off bar (hysteresis, not a second hand-off)",
+        fl.ARM_MARGIN_M > 0.0 and fl.HANDOFF_DIST + fl.ARM_MARGIN_M > fl.HANDOFF_DIST)
+  h = new_hook()
+  warm(h, fl.HANDOFF_DIST + 2.0)
+  out, _ = close(h, fl.HANDOFF_DIST + 2.0, 20.0, -8.0, 200)
+  check("a hard close entirely inside the margin band never arms", out == [] and not h.armed)
+  # ...but just above the margin it does
+  h = new_hook()
+  start = fl.HANDOFF_DIST + fl.ARM_MARGIN_M + 25.0
+  warm(h, start)
+  armed_any = False
+  d = start
+  for _ in range(400):
+    h.step(True, d, -8.0, 30.6, True, True, False, 1.0, d)
+    if h.armed:
+      armed_any = True
+      break
+    d = max(0.0, d - 8.0 * DT_MDL)
+  check("a hard close starting above the margin arms, and above the arm bar",
+        armed_any and d > fl.HANDOFF_DIST + fl.ARM_MARGIN_M)
 
   # ---- RE-ARM HOLD (only needed because arming is now a level test) ----
   # After a stock hand-off the slope is usually still past ARM_SLOPE, so without a hold the hook

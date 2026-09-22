@@ -8429,3 +8429,31 @@ armed, median span 3.20 s, 1 sub-2-frame span, mean command -0.44, hardest -1.51
 
 TESTS. test_far_lead 91 -> 94 (arms on the 3rd qualifying frame; a single bad frame restarts the
 count; dropping under HANDOFF_DIST mid-confirmation cancels). Not deployed. FINDINGS.md §29a.
+
+## 2026-09-22 (g) — final arm guard: confirm 3 frames AND a 5 m margin. Zero degenerate spans.
+
+OPERATOR: "confirm 3 frames + margin 5 m but only if dRel < 60 m."
+
+THE `< 60 m` QUALIFIER IS A NO-OP and was deliberately not implemented. Requiring >55 m below 60 m
+and >50 m at or above 60 m is the same rule as requiring >55 m everywhere, since anything at or
+above 60 already clears 55. Implemented as one bar (HANDOFF_DIST + ARM_MARGIN_M = 55 m) so nobody
+later goes looking for a branch that cannot be taken. Flagged to the operator in case a different
+behaviour above 60 m was intended.
+
+RESULT, c7+c8+cf. Against the crossing baseline / margin 10 / confirm 3 alone: arms 25 / 25 / 28 /
+25, armed 107.9 / 110.9 / 110.4 / 109.2 s, sub-2-frame spans 2 / 1 / 1 / 0, re-arms within 1 s
+1 / 1 / 2 / 1. The pair is the cleanest configuration tested -- zero degenerate spans, chatter back
+to the crossing baseline, same arm count, 1.3 s more armed time than the crossing.
+
+Both guards earn their place: the confirmation alone left 1 sub-2-frame span and 2 re-arms; the
+margin alone closed the whole 50-60 m band. Together, 0 and 1, with 2 arms kept in 55-60 m.
+
+STANDING COSTS. The confirmation still delays every arm by 0.15 s, and the 50-55 m band is now
+unreachable. Both are deliberate.
+
+FINAL STATE. Level arm test on the band slope, crossing release, ARM_CONFIRM_FRAMES = 3,
+ARM_MARGIN_M = 5.0, RE_ARM_HOLD_S = 1.0, HANDOFF_ACCEL = -0.40 decoupled from FLOOR. 25 arms
+(29.1/h) over 0.86 h, mean command -0.44, hardest -1.51, no CAP arms.
+
+TESTS. test_far_lead 94 -> 97 (the arm bar sits above the hand-off bar; a hard close entirely
+inside the margin band never arms; one starting above it does). Not deployed. FINDINGS.md §29b.
