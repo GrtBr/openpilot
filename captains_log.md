@@ -8402,3 +8402,30 @@ near-field drive could feel it.
 
 TESTS. test_far_lead 87 -> 91 (level arming, the re-arm hold, and that the release is still a
 crossing), test_hooks 66 unchanged. Not deployed. FINDINGS.md §29.
+
+## 2026-09-22 (f) — confirmation frames replace the hysteresis margin on the level arm test.
+
+OPERATOR: rather than a 10 m margin, wait 2 frames and arm on the 3rd if the range is still above
+the bar. Better-targeted than what I had committed in (e), and it wins.
+
+The margin fixed the level test's chatter by refusing to arm between 50 and 60 m at all. The
+confirmation attacks the actual failure -- the range dipping back under HANDOFF_DIST a frame or two
+after arming -- while keeping that band. Swept on c7+c8+cf: 2 frames is too few (36 arms, 8
+sub-2-frame spans, 7 re-arms within a second); 3 frames matches the margin's chatter (1 sub-2-frame
+span, 2 re-arms vs 1 and 1) and recovers 5 arms in 50-60 m; 5 frames removes chatter entirely but
+costs 0.25 s per arm and 5.7 s of armed time.
+
+WHAT THE RECOVERED ARMS ARE WORTH, HONESTLY: of the 4 the margin had discarded, one is genuine
+(51.9 m, lead 19 km/h slower, gap 51.9 -> 23.2 m in 5 s), two close real gaps (13.6 m and 15 m in
+5 s) and ONE IS FALSE (53.5 m with the lead 0.1 m/s faster). All four ran under a second before
+handing off, so the delivered value is small either way.
+
+THE COST IS 0.15 s ON EVERY ARM. For a hook whose whole value is earliness that is not free --
+about 6% of the 2.5 s the band's stdev term buys. It is the price of keeping the near-field band
+open, and it is a fair trade only because the near-field arms are cheap to lose.
+
+ADOPTED: ARM_CONFIRM_FRAMES = 3, ARM_MARGIN_M removed. Final replay: 28 arms (32.6/h), 110.4 s
+armed, median span 3.20 s, 1 sub-2-frame span, mean command -0.44, hardest -1.51, no CAP.
+
+TESTS. test_far_lead 91 -> 94 (arms on the 3rd qualifying frame; a single bad frame restarts the
+count; dropping under HANDOFF_DIST mid-confirmation cancels). Not deployed. FINDINGS.md §29a.

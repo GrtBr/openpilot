@@ -469,7 +469,7 @@ FINDINGS.md 25-26.
 ARMING IS A LEVEL TEST, 2026-09-22
 -----------------------------------
 The gate arms when the band slope is AT OR BELOW `ARM_SLOPE` with a radar lead present and the
-range above `HANDOFF_DIST + ARM_MARGIN_M`. It previously required a CROSSING -- a transition from
+range above `HANDOFF_DIST`, all three holding for `ARM_CONFIRM_FRAMES` consecutive frames. It previously required a CROSSING -- a transition from
 at-or-above ARM_SLOPE to below it.
 
 WHY. The crossing test had a real blind spot, documented when it shipped: a range series ALREADY
@@ -480,11 +480,13 @@ every gap in the model lead, and at route start. A level test cannot miss it.
 WHAT IT COST, AND THE TWO GUARDS IT NEEDED. A level test re-arms the instant its condition is true
 again, and the crossing was masking two sources of that:
 
-  * ARM_MARGIN_M -- hysteresis on the range bar. Arm above HANDOFF_DIST + 10 m, hand off below
-    HANDOFF_DIST. Without it the hook armed just over 50 m and released a frame or two later as
-    the range dipped back under: 21 sub-2-frame spans on c7+c8+cf, 20 of them within 8 m of the
-    bar, median arm range 51.0 m. Note this means the hook no longer arms at all between 50 and
-    60 m. On this corpus that cost exactly one span, which was 0.10 s long.
+  * ARM_CONFIRM_FRAMES -- the whole arm condition must hold for 3 consecutive frames. Without it
+    the hook armed just over 50 m and released a frame or two later as the range dipped back
+    under: 21 sub-2-frame spans on c7+c8+cf, 20 of them within 8 m of the bar, median arm range
+    51.0 m. A 10 m hysteresis margin was tried first and fixed the chatter by refusing to arm
+    between 50 and 60 m at all; the confirmation rejects the same chatter while keeping that band
+    (5 arms recovered there, chatter equal). It costs 0.15 s on every arm, which is not free for a
+    hook whose value is earliness.
   * RE_ARM_HOLD_S -- after a stock hand-off the slope is usually still past ARM_SLOPE, so without
     a hold the hook would re-arm next frame and oscillate for as long as stock kept braking.
 
@@ -608,13 +610,22 @@ HANDOFF_ACCEL = -0.40        # m/s^2 -- THE HAND-OFF BAR: hook 11 lets go once t
                              # much braking from someone else counts as "handled". FLOOR is an
                              # AUTHORITY bar: the softest command this hook may issue. Tuning the
                              # second must never drag the first. See FINDINGS.md 25.
-ARM_MARGIN_M = 10.0          # m -- arm only above HANDOFF_DIST + this, hand off below
-                             # HANDOFF_DIST. Hysteresis on the range bar, required once arming
-                             # became a LEVEL test (2026-09-22): without it the hook armed just
-                             # above 50 m and released a frame or two later as the range dipped
-                             # back under, 20 of 21 sub-2-frame spans on c7+c8+cf sitting within
-                             # 8 m of the bar. The crossing test used to mask this by demanding a
-                             # fresh transition before each arm.
+ARM_CONFIRM_FRAMES = 3       # frames the WHOLE arm condition must hold before arming. Replaces
+                             # a 10 m hysteresis margin on the range bar (operator, 2026-09-22),
+                             # and is the better-targeted fix for the same problem: the level test
+                             # armed just above HANDOFF_DIST and released a frame or two later as
+                             # the range dipped back under (21 sub-2-frame spans on c7+c8+cf, 20
+                             # within 8 m of the bar). A margin fixed that by refusing to arm
+                             # between 50 and 60 m at all; this rejects the same chatter while
+                             # keeping the band. Measured: chatter equal to the margin's (1
+                             # sub-2-frame span, 2 re-arms within 1 s vs 1 and 1), and 5 arms in
+                             # 50-60 m recovered.
+                             #
+                             # THE COST IS 0.15 s ON EVERY ARM. This hook exists to be early, so
+                             # that is not free -- it is ~6% of the 2.5 s the band's stdev term
+                             # buys. 2 frames was tested and is too few (8 sub-2-frame spans, 7
+                             # re-arms); 5 frames removes all chatter but costs 0.25 s and 5.7 s
+                             # of armed time over the corpus.
 RE_ARM_HOLD_S = 1.0          # s -- after a hand-off to stock, do not re-arm for this long.
                              # Only needed since arming became a LEVEL test (2026-09-22): the
                              # slope is often still past ARM_SLOPE at the moment stock takes over,
@@ -804,6 +815,7 @@ class FarLeadPreBrake:
     self.armed = False
     self.last_emitted = None
     self.rearm_hold_s = 0.0        # counts down after a hand-off; see RE_ARM_HOLD_S
+    self.arm_confirm = 0           # consecutive frames the arm condition has held
     self.last_known = None         # (dRel, vRel_range) held across a brief dropout while armed
 
   def step(self, present: bool, dRel: float, vRel_model: float, v_ego: float,
@@ -846,6 +858,7 @@ class FarLeadPreBrake:
       # slope fit ARE the persistence, and the crossing test cannot be re-triggered by noise
       # while the slope sits past the bar.
       if not present:
+        self.arm_confirm = 0
         return []                                  # the band may run on model-only frames, but
                                                    # arming needs a radar lead to command against
       # LEVEL, not crossing, 2026-09-22. This used to require `crossed_arm` -- a transition from
@@ -859,13 +872,19 @@ class FarLeadPreBrake:
       # past the bar, which the slope release itself cannot do (it fires at slope > RELEASE_SLOPE)
       # but a `stock_min` hand-off can. See RE_ARM_HOLD_S.
       if self.band.slope is None or self.band.slope > ARM_SLOPE:
+        self.arm_confirm = 0
         return []
       if self.rearm_hold_s > 0.0:
+        self.arm_confirm = 0
         return []
-      if dRel <= HANDOFF_DIST + ARM_MARGIN_M:
-        return []                                  # stock owns the near field; see HANDOFF_DIST.
-                                                   # ARM_MARGIN_M is hysteresis, not a second bar:
-                                                   # release is still at HANDOFF_DIST.
+      if dRel <= HANDOFF_DIST:
+        self.arm_confirm = 0
+        return []                                  # stock owns the near field; see HANDOFF_DIST
+      # CONFIRMATION. Every condition above must hold for ARM_CONFIRM_FRAMES consecutive frames.
+      # The counter is reset by each early return above, so a single bad frame restarts it.
+      self.arm_confirm += 1
+      if self.arm_confirm < ARM_CONFIRM_FRAMES:
+        return []
 
       # ---- ARM. First frame emits the floor, never the full formula -- see module docstring
       # on JERK_ARM: the point is that a noisy lock cannot step straight to -1.2.
