@@ -705,8 +705,22 @@ def far_lead_candidates(sm, v_ego: float, stock_min: float) -> list:
     driver_input = bool(cs.gasPressed or cs.brakePressed)
     lead = sm['radarState'].leadOne
     observe_lead_filter(lead, v_ego)       # hook 11b: A/B shadow, observe-only, never returns a value
+    # Hook 11's band-slope gate needs a CONTINUOUS range series, spanning the frames where radar
+    # reports no lead -- `radarState.leadOne.dRel` is 0.0 on those (struct default), so it cannot
+    # supply one. modelV2 publishes leadsV3 every frame, and this is the same conversion radard
+    # applies (radard.py:139). The offset lives in far_lead.MODEL_RANGE_OFFSET rather than being
+    # imported from radard: pulling a whole service module into the planner process to read one
+    # mounting constant is coupling the fork does not need.
+    # NB: `fl` above is the FarLeadPreBrake INSTANCE, not the module -- the offset has to be
+    # imported, not read off it, or this raises AttributeError and the except below silently
+    # disables hook 11 rather than crashing. Caught by test_hook11_wiring.
+    from openpilot.grt.far_lead import MODEL_RANGE_OFFSET
+    dRel_model = None
+    leads_v3 = sm['modelV2'].leadsV3
+    if len(leads_v3) > 0 and len(leads_v3[0].x) > 0:
+      dRel_model = float(leads_v3[0].x[0]) - MODEL_RANGE_OFFSET
     out = fl.step(bool(lead.present), float(lead.dRel), float(lead.vRel), float(v_ego),
-                  relaxed, long_active, driver_input, float(stock_min))
+                  relaxed, long_active, driver_input, float(stock_min), dRel_model)
     observe_front_run(out, float(stock_min), lead, float(v_ego))   # hook 11c: measurement only
     return out
   except Exception:

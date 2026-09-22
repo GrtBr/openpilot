@@ -372,7 +372,61 @@ def test_front_run():
     hooks._front_run = None
 
 
+def test_hook11_wiring():
+  """far_lead_candidates() swallows every exception and returns [] -- so a wiring mistake does not
+  crash the planner, it silently disables hook 11. Nothing else in this file actually CALLS it,
+  which is exactly how a bad modelV2 read would ship unnoticed. This drives the real function.
+  """
+  fl = _load("openpilot.grt.far_lead", str(GRT / "far_lead.py"))
+
+  class SM11:
+    def __init__(self, x=None, present=True, dRel=90.0):
+      self.x = x
+      self.present = present
+      self.dRel = dRel
+
+    def __getitem__(self, k):
+      if k == 'selfdriveState':
+        return NS(personality='relaxed')
+      if k == 'carControl':
+        return NS(longActive=True)
+      if k == 'carState':
+        return NS(gasPressed=False, brakePressed=False)
+      if k == 'radarState':
+        return NS(leadOne=NS(present=self.present, dRel=self.dRel, vRel=-8.0))
+      if k == 'modelV2':
+        leads = [] if self.x is None else [NS(x=[self.x])]
+        return NS(leadsV3=leads)
+      raise KeyError(k)
+
+  hooks._far_lead = fl.FarLeadPreBrake()
+  hooks._far_lead_broken = False
+  before = len(hooks._far_lead.band.d)
+  hooks.far_lead_candidates(SM11(x=100.0 + fl.MODEL_RANGE_OFFSET), 30.0, 0.0)
+  check("far_lead_candidates actually reaches the band (hook 11 is not silently disabled)",
+        len(hooks._far_lead.band.d) == before + 1)
+  check("...and the model range is converted by MODEL_RANGE_OFFSET, not passed raw",
+        bool(hooks._far_lead.band.d) and abs(hooks._far_lead.band.d[-1] - 100.0) < 1e-6)
+
+  # the band must keep running on frames where radar has no lead -- that is the whole reason the
+  # model range is plumbed through at all
+  n = len(hooks._far_lead.band.d)
+  hooks.far_lead_candidates(SM11(x=99.0 + fl.MODEL_RANGE_OFFSET, present=False, dRel=0.0), 30.0, 0.0)
+  check("band still fed on a frame where radar reports no lead",
+        len(hooks._far_lead.band.d) == n + 1)
+
+  # empty leadsV3 must not raise into the planner, and must not fabricate a sample
+  n = len(hooks._far_lead.band.d)
+  out = hooks.far_lead_candidates(SM11(x=None), 30.0, 0.0)
+  check("empty leadsV3 -> no candidate, no exception, no invented sample",
+        out == [] and len(hooks._far_lead.band.d) == n)
+
+  check("hook 11 reads leadsV3 and converts it", "leads_v3[0].x[0]" in (GRT / "hooks.py").read_text())
+  hooks._far_lead = None
+
+
 def main():
+  test_hook11_wiring()
   vc = settle(SM(hz="stop", hzd=30.))
   check("hook1 lowers v_cruise when a hazard is ahead", vc < 30.)
   check("hook2 inert while param OFF (default)", hooks.extra_accel_candidates(15.) == [])

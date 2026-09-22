@@ -8156,3 +8156,73 @@ heartbeating, longitudinalPlan at 20 Hz.
 
 NOTE: personality currently reads `standard`, and hook 11 is relaxed-only, so no new `fr` records
 will appear until it is back on relaxed.
+
+## 2026-09-22 — hook 11's arming gate REPLACED by a band-slope gate, plus a 50 m hand-off to stock.
+## Implemented for field testing; validated on 0.62 h of replay, NOT yet driven.
+
+WHAT CHANGED. `far_lead.py` no longer arms on presence persistence + a hot `a_req` streak +
+`ARM_MIN_DIST`. It arms when the slope of a lower Bollinger band on the model's range series
+crosses below -5 m/s, with a radar lead present and dRel above a new `HANDOFF_DIST` (50 m):
+
+    band  = mean(100) - 2*stdev(100)  of dRel_model      (BAND_N, BAND_K)
+    slope = OLS over the last 40 band samples            (SLOPE_N)
+
+and releases on that slope crossing back above 0, on range falling under `HANDOFF_DIST`, on stock
+reaching FLOOR, or on the lead being lost. No persistence timers anywhere: the 5 s mean and the
+2 s slope fit are the persistence.
+
+WHY. Measured over 29 routes and then scored on two full drives: the band's slope settles at
+exactly the true closing rate but gets there ~2.5 s sooner than the mean alone, because stdev
+grows while range is falling. Every alternative closer was tested and lost -- the UPPER band and a
+raw 40-frame slope on dRel each produced 6 premature releases out of 17-18 gates; mean-alone is
+~4 s LATE at both ends, which refuted my own earlier claim that the stdev term was what made
+release slow. The 50 m bar comes from hook 11c's own hand-off records: across 14 logged spans
+stock reached FLOOR exactly once, at 46.7 m, and on the other 13 its best command stayed within
+[-0.165, +0.192] while hook 11 was armed at 60-87 m. Above ~50 m stock is not acting. Adding the
+bar took median closure rate over the gate from +1.57 to +2.09 m/s and cut dead time at the end of
+the gate from 0.70 s to ~0.2 s. FINDINGS.md §21, §22, §22a.
+
+THE RELEASE THAT HAD TO GO, AND THE RISK THAT CREATES. `eff_vRel_range >= -HOT_CLOSING_RATE` is
+deleted. It cannot coexist with this gate: the band slope fires before the range-rate filter has
+converged -- that earliness IS the feature -- so on the frame after arming `eff_vRel_range` is
+still near zero and that test would fire immediately, collapsing every span to one or two frames.
+My offline gate scripts never caught this because they ran their own state machine and never
+routed an arm through `far_lead.step()`'s armed branch; advisor flagged it before implementation.
+The cost of removing it: a lead still genuinely closing SLOWLY no longer releases on rate, so it
+holds FLOOR (-0.40, ~0.04 g) until closing stops or range < 50 m. That is the FOURTH BUG's shape
+and it is the main thing the field test is watching. On the replay the spans did not run long
+(median 3.10 s, max 11.20 s), but that is 0.62 h on two routes.
+
+VERIFICATION. The REAL modified file driven over c7+c8 through the tracker harness produces 14
+arms at the same timestamps as the offline-validated gate (`closer_range.py`, open>50/handoff<50),
+22.6 arms/h against the old gate's 16 arms / 25.8/h on the identical data -- slightly FEWER arms,
+not a flood. Exactly 1 span is <= 2 frames (the known 1-frame hand-off at 50.3 m), not 14, which
+is what proves the v_filt release is really gone. 5 of 14 spans harden past FLOOR, hardest -0.55
+m/s^2; no span reaches CAP. Arm dRel median 79.4 m. On the four approaches both gates catch, the
+new gate arms 0.1-3.9 s earlier. Note the harness feeds `stock_min = 0.0`, so arm times are
+faithful and release times are upper bounds.
+
+A PROPERTY WORTH KNOWING. The gate arms on a CROSSING, so a series already closing faster than
+-5 m/s at the moment the slope first becomes defined never crosses the bar and never arms. Real
+approaches start from a steadier gap so this cost nothing on the corpus, but it is why every
+arming test warms the band on a steady range first. A level test was rejected: it re-arms every
+frame the slope sits past the bar.
+
+A SHIPPING BUG THE NEW TEST CAUGHT. `test_hook11_wiring` is the first test that actually CALLS
+`far_lead_candidates`. It immediately failed: at that call site `fl` is the `FarLeadPreBrake`
+INSTANCE, not the module, so reading the range offset off it raised AttributeError straight into
+the function's blanket `except` -- which does not crash the planner, it silently disables hook 11.
+That would have shipped as "hook 11 mysteriously never arms on the car" with nothing in the logs
+but an exception counter. The offset now lives in `far_lead.MODEL_RANGE_OFFSET` and is imported.
+
+RETAINED ON PURPOSE. `HOT_A_REQ`, `HOT_PERSIST_S`, `PRESENCE_PERSIST_S`, `ARM_MIN_DIST`,
+`THRESH_SCALE_DIST`, `hot_a_req_for()` are all still defined and still tested, but nothing in
+far_lead.py calls them. Hook 11b's `_ArmMirror` reads them to shadow what the OLD gate would have
+armed on -- that shadow is this field test's comparator, so deleting them would have silently
+turned the `arms_old`/`arms_new` heartbeat into noise. A test pins that the old call site is gone.
+
+TESTS. test_far_lead.py 63 -> 79, test_hooks.py 60 -> 65, all passing on the Pi5. Schema
+conformance still needs pycapnp (device-only). NOT deployed: the device has been unreachable and
+deployment is a separate explicit step.
+
+ROLLBACK. `git revert` of this commit. `108e5850e` is the last pre-change tip.

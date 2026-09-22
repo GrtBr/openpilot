@@ -389,6 +389,63 @@ shared arms have identical timing (p90 +0.05 s) and 104/134 an identical hardest
 ROLLBACK: ARM_MIN_DIST = 73.0 alone gives the "guards, 73 m" row. `git revert` of this commit
 restores the 2026-09-14 code. Evidence: analysis/lead_filter/tracker/FINDINGS.md §20;
 captains_log.md 2026-09-15.
+BAND-SLOPE GATE, 2026-09-22 -- THE ARMING GATE REPLACED
+-------------------------------------------------------
+The presence/hot-streak/ARM_MIN_DIST gate is no longer what arms this hook. It is replaced by a
+gate on the SLOPE OF A LOWER BOLLINGER BAND over the model's range series:
+
+    band  = mean(BAND_N) - BAND_K * stdev(BAND_N)   of dRel_model
+    slope = OLS fit over the last SLOPE_N band samples
+
+ARM when that slope CROSSES below ARM_SLOPE, on a frame with a radar lead present and
+dRel > HANDOFF_DIST. RELEASE when it crosses back above RELEASE_SLOPE, or eff_dRel falls under
+HANDOFF_DIST, or stock reaches FLOOR, or the lead is lost. No persistence timer on anything: the
+5.0 s mean and the 2.0 s slope fit ARE the persistence.
+
+WHY THE BAND AND NOT THE MEAN. For steady closing the band's slope settles at EXACTLY the true
+closing rate, but the -BAND_K*stdev term makes it get there ~2.5 s sooner, because stdev grows
+while range is falling. Removing the stdev term is NOT a trade of opening speed against release
+speed -- measured, it costs ~4 s at BOTH ends. After closing stops, a plain mean approaches zero
+slope asymptotically FROM BELOW and never crosses it; the stdev collapsing is the only thing that
+lifts the band slope back through zero. Alternatives measured and rejected on the same corpus:
+the UPPER band (mean + K*stdev) and a raw 40-frame slope on dRel both produced 6 premature
+releases each out of 17-18 gates. See FINDINGS.md 21.
+
+WHY A RANGE BAR. Across 14 logged hook-11 spans, stock reached FLOOR exactly once, at 46.7 m; on
+the other 13 its best command over the whole span stayed within [-0.165, +0.192] while this hook
+was armed at 60-87 m. Above ~50 m stock is not acting; below it stock owns the approach. Adding
+the bar raised median closure rate over the gate from +1.57 to +2.09 m/s and cut dead time at the
+end of the gate from 0.70 s to ~0.2 s. See FINDINGS.md 22.
+
+IT ARMS ON A CROSSING, WHICH HAS A REAL EDGE. A series that is ALREADY closing faster than
+ARM_SLOPE when the slope first becomes defined never crosses the bar, and never arms -- the gate
+needs to have seen the slope above ARM_SLOPE first. Real approaches begin from a steadier gap, so
+this did not cost an arm on the corpus, but it is the reason every arming test warms the band on
+a steady range first. A level test instead of a crossing was rejected: it re-arms on every frame
+the slope sits past the bar.
+
+THE v_filt RELEASE HAD TO GO, AND THIS IS NOT OPTIONAL. The old release
+`eff_vRel_range >= -HOT_CLOSING_RATE` cannot coexist with this gate. The whole point of the band
+slope is that it fires BEFORE the range-rate filter has converged; on the frame after arming,
+`eff_vRel_range` is still near zero, so that test would fire immediately and every span would
+collapse to one or two frames. The two are mutually exclusive by construction.
+
+RESIDUAL RISK, AND WHAT THE FIELD TEST IS WATCHING. Dropping that release means a lead still
+genuinely closing SLOWLY no longer releases on rate: it holds at FLOOR until closing stops or the
+range falls under HANDOFF_DIST. That is the FOURTH BUG's shape, and it is the main thing this
+change could get wrong. On the c7+c8 replay the spans did not run long -- median 3.10 s, max
+11.20 s, 14 arms in 0.62 h (22.6/h, against the old gate's 16 arms / 25.8/h on the same data) --
+but that is 0.62 h of evidence on two routes.
+
+THE OLD CONSTANTS ARE RETAINED ON PURPOSE. HOT_A_REQ, HOT_PERSIST_S, PRESENCE_PERSIST_S,
+ARM_MIN_DIST, THRESH_SCALE_DIST and hot_a_req_for() are all still defined and still tested, but
+NOTHING in this file calls them any more. They are read by hook 11b's `_ArmMirror` (grt/hooks.py),
+which shadows what the OLD gate would have armed on -- the comparator for this field test. Do not
+delete them without retiring 11b, and do not reintroduce them into the arming path: a test asserts
+hot_a_req_for() appears exactly once (its definition).
+
+ROLLBACK is `git revert` of this commit; 108e5850e is the last pre-change tip.
+
 """
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalPlanSource
@@ -487,6 +544,25 @@ JERK_ARM = 1.5               # m/s^3 -- rate limit on the FALLING edge only, fir
 RELEASE_DIST = 20.0          # m -- absolute backstop regardless of stock
 LEAD_LOST_S = 1.0            # s -- release if the lead itself is lost this long
 
+# ---- band-slope arming gate (2026-09-22) -- see module docstring "BAND-SLOPE GATE" ----
+BAND_N = 100                 # samples (5.0 s) in the mean/stdev window on dRel_model
+SLOPE_N = 40                 # samples (2.0 s) of band history the slope is fitted over
+BAND_K = 2.0                 # stdev multiplier; the band is mean - BAND_K*stdev
+ARM_SLOPE = -5.0             # m/s -- arm when the band slope CROSSES below this
+RELEASE_SLOPE = 0.0          # m/s -- release when it CROSSES back above this
+HANDOFF_DIST = 50.0          # m -- do not arm below this, and hand off on falling under it.
+                             # Measured: across 14 logged spans stock reached FLOOR once, at
+                             # 46.7 m; in the other 13 its best command stayed within
+                             # [-0.165, +0.192] while this hook was armed at 60-87 m. Above
+                             # ~50 m stock is not acting, below it stock owns the approach.
+MODEL_RANGE_OFFSET = 1.52    # m -- modelV2 leadsV3 x[0] is measured from the camera; radar
+                             # range is ~1.5 m further forward. Mirrors RADAR_TO_CAMERA
+                             # (selfdrive/controls/radard.py:26), which radard applies at :139 to
+                             # produce leadOne.dRel. Verified bit-identical to radar dRel over
+                             # 4,640 frames where both were present (max |diff| 0.0001 m).
+_SLOPE_XB = (SLOPE_N - 1) / 2.0
+_SLOPE_SXX = sum((i - _SLOPE_XB) ** 2 for i in range(SLOPE_N))
+
 
 def hot_a_req_for(dRel: float) -> float:
   """Effective arming threshold at this distance. See HOT_A_REQ_MIN_SCALE for the full rationale.
@@ -569,25 +645,96 @@ class _RangeRateFilter:
     return self.v
 
 
+class _BandSlope:
+  """Lower Bollinger band on the MODEL range, and the slope of that band.
+
+    band  = mean(BAND_N) - BAND_K * stdev(BAND_N)   of dRel_model
+    slope = OLS fit over the last SLOPE_N band samples, m/s
+
+  Fed on EVERY frame the model publishes a lead -- including frames where radar reports the lead
+  absent, and frames where hook 11 is not eligible at all. The buffers describe the road, not
+  this hook's state, so `FarLeadPreBrake._reset()` must never clear them: a reset costs
+  BAND_N + SLOPE_N frames (7.0 s) of warm-up, and re-warming on every personality or engagement
+  flicker would leave the gate blind exactly when it is needed.
+
+  Why the band and not the plain mean: for steady closing the band's slope settles at EXACTLY the
+  true closing rate, but the -BAND_K*stdev term makes it arrive there ~2.5 s sooner, because the
+  stdev grows while range is falling. Dropping the stdev term does not trade opening speed for
+  release speed -- measured, it costs ~4 s at BOTH ends, because after closing stops a plain mean
+  approaches zero slope asymptotically FROM BELOW and never crosses. The stdev collapsing is the
+  only thing that lifts the band slope back through zero. See FINDINGS.md 21.
+  """
+
+  def __init__(self):
+    self.d = []                 # dRel_model samples, most recent last
+    self.b = []                 # band samples, most recent last
+    self.slope = None           # current band slope, m/s (None while warming up)
+    self.prev = None            # last non-None slope, for crossing detection
+    self.crossed_arm = False
+    self.crossed_release = False
+
+  def update(self, z) -> None:
+    """Feed one model range sample, or None on a frame with no model lead.
+
+    A frame with no model lead contributes nothing and clears the crossing flags, matching the
+    offline gate this was validated against (which skipped those frames outright) -- NOT a gap
+    filled by interpolation, which would invent closing that was never measured.
+    """
+    if z is None:
+      self.crossed_arm = self.crossed_release = False
+      return
+
+    self.d.append(float(z))
+    if len(self.d) > BAND_N:
+      self.d.pop(0)
+
+    s = None
+    if len(self.d) == BAND_N:
+      m = sum(self.d) / BAND_N
+      var = sum((x - m) ** 2 for x in self.d) / BAND_N
+      self.b.append(m - BAND_K * (var ** 0.5))
+      if len(self.b) > SLOPE_N:
+        self.b.pop(0)
+      if len(self.b) == SLOPE_N:
+        bm = sum(self.b) / SLOPE_N
+        s = (sum((i - _SLOPE_XB) * (v - bm) for i, v in enumerate(self.b)) / _SLOPE_SXX) / DT_MDL
+
+    p = self.prev
+    # CROSSINGS, not levels: a level test re-arms every frame the slope stays past the bar, and
+    # would re-arm immediately after a release while the approach is still resolving.
+    self.crossed_arm = s is not None and p is not None and p >= ARM_SLOPE and s < ARM_SLOPE
+    self.crossed_release = s is not None and p is not None and p <= RELEASE_SLOPE and s > RELEASE_SLOPE
+    self.slope = s
+    if s is not None:
+      self.prev = s
+
+
 class FarLeadPreBrake:
   """One instance, owned by grt.hooks. See the module docstring for the full design."""
 
   def __init__(self):
+    # Created HERE, not in _reset(): the band is continuous history of the road and must survive
+    # every release, dropout and eligibility change. See _BandSlope.
+    self.band = _BandSlope()
     self._reset()
 
   def _reset(self) -> None:
     self.filt = _RangeRateFilter(ALPHA, BETA)
     self.present_s = 0.0
     self.absent_s = 0.0
-    self.hot_elapsed = 0.0
     self.armed = False
     self.last_emitted = None
     self.last_known = None         # (dRel, vRel_range) held across a brief dropout while armed
-    self.dRel_at_hot_start = None  # dRel at the first frame a_req_filt crossed HOT_A_REQ --
-                                    # see step() and module docstring, "THIRD BUG"
 
   def step(self, present: bool, dRel: float, vRel_model: float, v_ego: float,
-           relaxed: bool, long_active: bool, driver_input: bool, stock_min: float) -> list:
+           relaxed: bool, long_active: bool, driver_input: bool, stock_min: float,
+           dRel_model=None) -> list:
+    # FIRST, and before every early return: the band is a property of the road, not of this
+    # hook's eligibility. Feeding it only while relaxed+engaged would re-warm it for 7.0 s after
+    # each flicker. `dRel_model` is None only if the caller could not read modelV2, in which case
+    # the gate simply never reaches a crossing and this hook stays inert.
+    self.band.update(dRel_model)
+
     if not relaxed or not long_active or driver_input:
       self._reset()
       return []
@@ -599,54 +746,37 @@ class FarLeadPreBrake:
       self.absent_s = 0.0
       v_filt = self.filt.update(dRel, v_ego)
       if self.filt.stepped:
-        # the lead slot switched objects: nothing learned about the old one applies to the new one
+        # the lead slot switched objects: nothing learned about the old one applies to the new one.
+        # The BAND is deliberately not touched -- it tracks the model's range series, which is
+        # continuous across a radar slot switch, and re-warming it here would blind the gate for
+        # 7.0 s at exactly the moment a new object appeared.
         self.present_s = DT_MDL
-        self.hot_elapsed = 0.0
-        self.dRel_at_hot_start = None
     else:
       self.absent_s += DT_MDL
       self.present_s = 0.0
-      self.hot_elapsed = 0.0
-      self.dRel_at_hot_start = None
       v_filt = None
 
     if not self.armed:
-      if not present or self.present_s < PRESENCE_PERSIST_S:
-        self.hot_elapsed = 0.0
-        self.dRel_at_hot_start = None
+      # ---- ARM: the band-slope gate. 2026-09-22, replacing the presence/hot/ARM_MIN_DIST gate.
+      # See module docstring "BAND-SLOPE GATE" and FINDINGS.md 21-22a.
+      #
+      # Three conditions, no persistence timers on any of them -- the 5.0 s mean and the 2.0 s
+      # slope fit ARE the persistence, and the crossing test cannot be re-triggered by noise
+      # while the slope sits past the bar.
+      if not present:
+        return []                                  # the band may run on model-only frames, but
+                                                   # arming needs a radar lead to command against
+      if not self.band.crossed_arm:
         return []
-
-      # CORRECTED relative-motion kinematics, 2026-08-31, attempt 5 (deployed despite failing
-      # validation -- see module docstring "ATTEMPT 5, DEPLOYED DESPITE FAILING VALIDATION").
-      # `v_filt` IS the closing rate; the old `(v_ego**2 - v_lead**2)/(2d)` form (exact only for
-      # a stationary lead) is gone from this site.
-      a_req_filt = (v_filt ** 2) / (2.0 * max(dRel - STOP_MARGIN, 1.0))
-      # a_req alone can clear HOT_A_REQ on a tiny closing rate at long range -- correct for a
-      # genuine slow-pack approach, but also fires on ordinary highway measurement noise (see
-      # module docstring, "FOURTH BUG"). Require a real closing rate too.
-      # Distance-neutral threshold (2026-09-04): identical to HOT_A_REQ at/below ARM_MIN_DIST,
-      # bounded relaxation beyond it. Applied HERE ONLY -- the armed branch's severity formula
-      # must stay physically exact, since it decides how hard to brake, not whether to.
-      if a_req_filt > hot_a_req_for(dRel) and v_filt <= -HOT_CLOSING_RATE:
-        if self.hot_elapsed == 0.0:
-          # anchor once, at the first frame the streak goes hot -- NOT at first presence
-          # (removed with the absence gate) and not re-checked live every frame thereafter
-          # (that reintroduces the v1 stopped-lead bug -- see module docstring)
-          #
-          # FILTERED range, not the raw sample -- see docstring, "ANCHOR ON FILTERED RANGE".
-          self.dRel_at_hot_start = self.filt.x if self.filt.x is not None else dRel
-        self.hot_elapsed += DT_MDL
-      else:
-        self.hot_elapsed = 0.0
-        self.dRel_at_hot_start = None
-        return []
-      if self.hot_elapsed < HOT_PERSIST_S:
-        return []
-      if self.dRel_at_hot_start is None or self.dRel_at_hot_start <= ARM_MIN_DIST:
-        return []
+      if dRel <= HANDOFF_DIST:
+        return []                                  # stock owns the near field; see HANDOFF_DIST
 
       # ---- ARM. First frame emits the floor, never the full formula -- see module docstring
       # on JERK_ARM: the point is that a noisy lock cannot step straight to -1.2.
+      #
+      # Expect FLOOR to be held for ~2 s after arming: this gate fires BEFORE `v_filt` has
+      # converged (that earliness is the whole point), so the severity formula below sees a small
+      # closing rate and asks for little. It hardens as the filter catches up.
       self.armed = True
       self.last_emitted = FLOOR
       self.last_known = (dRel, min(vRel_model, v_filt))
@@ -663,13 +793,23 @@ class FarLeadPreBrake:
         return []
       eff_dRel, eff_vRel_range = self.last_known
 
-    if eff_dRel < RELEASE_DIST:
-      self._reset()
+    # `eff_dRel`, never the raw `dRel`: radarState.leadOne.dRel is 0.0 when the lead is absent
+    # (struct default), so a single dropped frame would read as 0 m and hand off instantly.
+    # eff_dRel falls back to last_known for exactly this reason.
+    if eff_dRel < HANDOFF_DIST:
+      self._reset()          # hand off to stock, which owns the approach inside HANDOFF_DIST
       return []
-    # Release once no longer closing FAST, not only once fully non-negative -- see module
-    # docstring, "FOURTH BUG". v_filt's slow dynamics mean "fully >= 0" is a much stricter bar
-    # than "the transient that triggered arming has resolved" on noisy real data.
-    if present and eff_vRel_range >= -HOT_CLOSING_RATE:
+    if eff_dRel < RELEASE_DIST:
+      self._reset()          # backstop; unreachable while RELEASE_DIST < HANDOFF_DIST, kept so
+      return []              # lowering HANDOFF_DIST cannot silently remove the absolute floor
+    # RELEASE on the band slope crossing back above RELEASE_SLOPE.
+    #
+    # The old release here was `eff_vRel_range >= -HOT_CLOSING_RATE`, and it CANNOT coexist with
+    # this gate: the band-slope gate arms ~2.5 s before `v_filt` has converged, so on the frame
+    # after arming `eff_vRel_range` is still near zero and that test fires immediately. The hook
+    # would arm and release within a frame or two, commanding nothing. The two are mutually
+    # exclusive by construction; this one replaces it.
+    if self.band.crossed_release:
       self._reset()
       return []
 
