@@ -466,6 +466,37 @@ setup exactly (FLOOR = 0.00, stock at -0.10) and asserts the hook now stays arme
 Hook 11c reads `HANDOFF_ACCEL` too, so the recorder measures the bar the hook actually releases on.
 FINDINGS.md 25-26.
 
+ARMING IS A LEVEL TEST, 2026-09-22
+-----------------------------------
+The gate arms when the band slope is AT OR BELOW `ARM_SLOPE` with a radar lead present and the
+range above `HANDOFF_DIST + ARM_MARGIN_M`. It previously required a CROSSING -- a transition from
+at-or-above ARM_SLOPE to below it.
+
+WHY. The crossing test had a real blind spot, documented when it shipped: a range series ALREADY
+closing faster than ARM_SLOPE at the moment the slope first becomes defined produces no transition
+at all, so the gate could never arm on it however hard the approach was. That is the state after
+every gap in the model lead, and at route start. A level test cannot miss it.
+
+WHAT IT COST, AND THE TWO GUARDS IT NEEDED. A level test re-arms the instant its condition is true
+again, and the crossing was masking two sources of that:
+
+  * ARM_MARGIN_M -- hysteresis on the range bar. Arm above HANDOFF_DIST + 10 m, hand off below
+    HANDOFF_DIST. Without it the hook armed just over 50 m and released a frame or two later as
+    the range dipped back under: 21 sub-2-frame spans on c7+c8+cf, 20 of them within 8 m of the
+    bar, median arm range 51.0 m. Note this means the hook no longer arms at all between 50 and
+    60 m. On this corpus that cost exactly one span, which was 0.10 s long.
+  * RE_ARM_HOLD_S -- after a stock hand-off the slope is usually still past ARM_SLOPE, so without
+    a hold the hook would re-arm next frame and oscillate for as long as stock kept braking.
+
+RELEASE STAYS A CROSSING. A level release would re-fire every frame the slope sat above
+RELEASE_SLOPE; there is no equivalent blind spot on that side, since the release condition is
+reached by the approach resolving rather than by the buffers warming up.
+
+MEASURED, c7+c8+cf (0.86 h): 25 arms both ways, same timestamps, median span 3.40 s both, armed
+time 107.9 -> 110.9 s, sub-2-frame spans 2 -> 1. So on this corpus the change is behaviour-neutral;
+its value is the blind spot it closes, which these three drives happen not to exercise.
+FINDINGS.md 29.
+
 """
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalPlanSource
@@ -577,6 +608,18 @@ HANDOFF_ACCEL = -0.40        # m/s^2 -- THE HAND-OFF BAR: hook 11 lets go once t
                              # much braking from someone else counts as "handled". FLOOR is an
                              # AUTHORITY bar: the softest command this hook may issue. Tuning the
                              # second must never drag the first. See FINDINGS.md 25.
+ARM_MARGIN_M = 10.0          # m -- arm only above HANDOFF_DIST + this, hand off below
+                             # HANDOFF_DIST. Hysteresis on the range bar, required once arming
+                             # became a LEVEL test (2026-09-22): without it the hook armed just
+                             # above 50 m and released a frame or two later as the range dipped
+                             # back under, 20 of 21 sub-2-frame spans on c7+c8+cf sitting within
+                             # 8 m of the bar. The crossing test used to mask this by demanding a
+                             # fresh transition before each arm.
+RE_ARM_HOLD_S = 1.0          # s -- after a hand-off to stock, do not re-arm for this long.
+                             # Only needed since arming became a LEVEL test (2026-09-22): the
+                             # slope is often still past ARM_SLOPE at the moment stock takes over,
+                             # so without this the hook would re-arm on the very next frame and
+                             # oscillate arm/hand-off for as long as stock kept braking.
 RELEASE_DIST = 20.0          # m -- absolute backstop regardless of stock
 LEAD_LOST_S = 1.0            # s -- release if the lead itself is lost this long
 
@@ -760,6 +803,7 @@ class FarLeadPreBrake:
     self.absent_s = 0.0
     self.armed = False
     self.last_emitted = None
+    self.rearm_hold_s = 0.0        # counts down after a hand-off; see RE_ARM_HOLD_S
     self.last_known = None         # (dRel, vRel_range) held across a brief dropout while armed
 
   def step(self, present: bool, dRel: float, vRel_model: float, v_ego: float,
@@ -770,6 +814,8 @@ class FarLeadPreBrake:
     # each flicker. `dRel_model` is None only if the caller could not read modelV2, in which case
     # the gate simply never reaches a crossing and this hook stays inert.
     self.band.update(dRel_model)
+    if self.rearm_hold_s > 0.0:
+      self.rearm_hold_s = max(0.0, self.rearm_hold_s - DT_MDL)
 
     if not relaxed or not long_active or driver_input:
       self._reset()
@@ -802,10 +848,24 @@ class FarLeadPreBrake:
       if not present:
         return []                                  # the band may run on model-only frames, but
                                                    # arming needs a radar lead to command against
-      if not self.band.crossed_arm:
+      # LEVEL, not crossing, 2026-09-22. This used to require `crossed_arm` -- a transition from
+      # at-or-above ARM_SLOPE to below it. That had a real blind spot: a range series ALREADY
+      # closing faster than ARM_SLOPE at the moment the slope first becomes defined (route start,
+      # or after any gap in the model lead) never produces a transition, so the gate never armed
+      # on it no matter how hard the approach was. A level test cannot miss that case.
+      #
+      # It cannot re-trigger while armed -- this whole branch is `if not self.armed`. The exposure
+      # a level test does add is re-arming immediately after a release that leaves the slope still
+      # past the bar, which the slope release itself cannot do (it fires at slope > RELEASE_SLOPE)
+      # but a `stock_min` hand-off can. See RE_ARM_HOLD_S.
+      if self.band.slope is None or self.band.slope > ARM_SLOPE:
         return []
-      if dRel <= HANDOFF_DIST:
-        return []                                  # stock owns the near field; see HANDOFF_DIST
+      if self.rearm_hold_s > 0.0:
+        return []
+      if dRel <= HANDOFF_DIST + ARM_MARGIN_M:
+        return []                                  # stock owns the near field; see HANDOFF_DIST.
+                                                   # ARM_MARGIN_M is hysteresis, not a second bar:
+                                                   # release is still at HANDOFF_DIST.
 
       # ---- ARM. First frame emits the floor, never the full formula -- see module docstring
       # on JERK_ARM: the point is that a noisy lock cannot step straight to -1.2.
@@ -864,4 +924,5 @@ class FarLeadPreBrake:
       self._reset()          # stock has caught up -- hand off starting next frame.
                              # HANDOFF_ACCEL, never FLOOR: see that constant for why they are
                              # separate even while they hold the same value.
+      self.rearm_hold_s = RE_ARM_HOLD_S   # set AFTER _reset, which clears it
     return cand

@@ -8361,3 +8361,44 @@ drive would then look like, since braking changes the gap and everything downstr
 move, -0.50 is the knee and it should be a deliberate operator decision like ARM_MIN_DIST was.
 
 TESTS. test_far_lead 79 -> 87, test_hooks 65 -> 66. Not deployed. FINDINGS.md §25-26.
+
+## 2026-09-22 (e) — arming is a LEVEL test on the band slope, not a crossing. Two guards were
+## needed that the crossing had been hiding.
+
+OPERATOR REQUEST: arm when slope <= -5 m/s with a lead present, not only on a transition across it.
+
+WHY IT MATTERS. The crossing test had a blind spot documented when the gate shipped: a range series
+ALREADY closing faster than ARM_SLOPE at the moment the slope first becomes defined produces no
+transition, so the gate could never arm on it however hard the approach was -- the state at route
+start and after every gap in the model lead. A unit test now pins that this case arms; it did not
+before.
+
+WHAT THE CROSSING WAS HIDING. A level test re-arms the instant its condition holds again, and the
+first replay showed exactly that: 50 arms instead of 25, median span 0.51 s instead of 3.40, 21
+spans of two frames or fewer, 21 re-arms within a second, median arm range 56.7 m instead of 87.1.
+Two guards fixed it:
+
+  ARM_MARGIN_M = 10.0 -- hysteresis on the range bar: arm above HANDOFF_DIST + 10, hand off below
+  HANDOFF_DIST. 20 of the 21 degenerate spans armed within 8 m of the bar (median 51.0 m) and
+  released a frame or two later as the range dipped back under. This is the hysteresis FINDINGS
+  §22a concluded was unnecessary -- correctly, UNDER A CROSSING TEST. The level test changes that
+  trade-off, exactly as §22a's own reasoning implied it would.
+
+  RE_ARM_HOLD_S = 1.0 -- after a stock hand-off the slope is usually still past ARM_SLOPE, so
+  without a hold the hook re-arms on the next frame and oscillates for as long as stock brakes.
+
+RELEASE STAYS A CROSSING. A level release would re-fire every frame the slope sat above
+RELEASE_SLOPE, and there is no equivalent blind spot on that side: that condition is reached by the
+approach resolving, not by buffers warming up.
+
+REPLAY, c7+c8+cf (0.86 h). 25 arms both ways at IDENTICAL timestamps, median span 3.40 s both,
+armed time 107.9 -> 110.9 s, sub-2-frame spans 2 -> 1. On cf all 11 arms reproduce exactly; the one
+difference is a 0.10 s span at 57.4 m now suppressed by the margin.
+
+HONEST READING. On this corpus the change is behaviour-neutral. Its value is the blind spot it
+closes, which these three drives happen not to exercise. The cost is real though: the hook no
+longer arms between 50 and 60 m at all. That was worth one 0.10 s span here, but a busier
+near-field drive could feel it.
+
+TESTS. test_far_lead 87 -> 91 (level arming, the re-arm hold, and that the release is still a
+crossing), test_hooks 66 unchanged. Not deployed. FINDINGS.md §29.

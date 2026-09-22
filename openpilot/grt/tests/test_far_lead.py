@@ -148,11 +148,23 @@ def main():
   # ---- BAND-SLOPE GATE (2026-09-22). Replaces the presence/hot-streak/ARM_MIN_DIST tests that
   # stood here: none of those quantities gate arming any more. See far_lead.py "BAND-SLOPE GATE".
 
-  # the gate is a CROSSING, so it cannot fire before the band slope has ever been above the bar
+  # LEVEL TEST, 2026-09-22. This case is the reason for the change: a series already closing
+  # faster than ARM_SLOPE when the slope first becomes defined produces no crossing at all. Under
+  # the old crossing test it could never arm however hard the approach was. Now it does.
+  # Checked at the frame the slope first exists, not at the end of the drive -- by then the range
+  # has fallen under HANDOFF_DIST and the hook has handed off, which would pass for the wrong
+  # reason.
   h = new_hook()
-  out, _ = close(h, 120.0, 30.6, -8.0, fl.BAND_N + fl.SLOPE_N + 60)
-  check("closing hard from the very first frame never arms (slope is past the bar before it "
-        "exists, so it never CROSSES it)", out == [] and not h.armed)
+  armed_any = False
+  d = 120.0
+  for _ in range(fl.BAND_N + fl.SLOPE_N + 40):
+    h.step(True, d, -8.0, 30.6, True, True, False, 1.0, d)
+    if h.armed:
+      armed_any = True
+      break
+    d = max(0.0, d - 8.0 * DT_MDL)
+  check("closing hard from the very first frame NOW arms (no crossing required)",
+        armed_any and d > fl.HANDOFF_DIST)
 
   # ...and warming on a steady gap first is what makes the same approach arm
   h = new_hook()
@@ -261,6 +273,25 @@ def main():
   check("stock caught up at 60 m -> still returns a candidate this frame", len(out) == 1)
   out2 = h.step(True, 59.0, -8.0, 30.6, True, True, False, -0.40)
   check("stock caught up -> latch dropped next frame", out2 == [] and not h.armed)
+
+  # ---- RE-ARM HOLD (only needed because arming is now a level test) ----
+  # After a stock hand-off the slope is usually still past ARM_SLOPE, so without a hold the hook
+  # would re-arm on the very next frame and oscillate for as long as stock kept braking.
+  h = new_hook(); _, d = arm(h, 120.0, 30.6, -8.0)
+  h.step(True, d, -8.0, 30.6, True, True, False, fl.HANDOFF_ACCEL, d)   # stock takes over
+  h.step(True, d, -8.0, 30.6, True, True, False, fl.HANDOFF_ACCEL, d)   # latch drops
+  check("handed off to stock", not h.armed)
+  re_armed = False
+  for _ in range(int(fl.RE_ARM_HOLD_S / DT_MDL) - 2):
+    h.step(True, d, -8.0, 30.6, True, True, False, 1.0, d)              # stock backs off again
+    if h.armed: re_armed = True; break
+    d = max(0.0, d - 8.0 * DT_MDL)
+  check("does NOT re-arm during the hold, even with the slope still past the bar", not re_armed)
+  for _ in range(60):
+    h.step(True, d, -8.0, 30.6, True, True, False, 1.0, d)
+    if h.armed: break
+    d = max(0.0, d - 8.0 * DT_MDL)
+  check("...and CAN arm again once the hold expires", h.armed)
 
   # ---- HAND-OFF BAR DECOUPLED FROM FLOOR, 2026-09-22 (FINDINGS.md 25) ----
   # They hold the same value today, so these pin the SEPARATION rather than a difference: the
@@ -463,8 +494,11 @@ def main():
              if "hot_a_req_for(" in ln and not ln.lstrip().startswith(("#", "def "))
              and not ln.lstrip().startswith(("ARM", "HOT", "THRESH"))
              and '"' not in ln and "'" not in ln and ln.strip().startswith(("if", "return", "self", "a_req"))])
-  check("the band-slope gate is what arms: crossed_arm is read exactly once",
-        _src.count("self.band.crossed_arm") == 1)
+  check("arming is a LEVEL test on the band slope, not a crossing",
+        "if self.band.slope is None or self.band.slope > ARM_SLOPE:" in _src
+        and "self.band.crossed_arm" not in _src)
+  check("the RELEASE is still a crossing (a level release would re-fire every frame)",
+        _src.count("self.band.crossed_release") == 1)
   check("the v_filt release is GONE from the code path (it cannot coexist with this gate)",
         "if present and eff_vRel_range >= -HOT_CLOSING_RATE:" not in _src)
 
