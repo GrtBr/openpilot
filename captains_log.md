@@ -8270,3 +8270,49 @@ dependency).
 NOT YET DRIVEN. Watch list for the first drive is in the 2026-09-22 (a) entry and FINDINGS.md §21-23;
 the single most important number is `dur_s` in the `fr` records -- any span over ~15 s is the
 slow-close FLOOR-hold risk materialising, which is the thing this change deliberately un-guarded.
+
+## 2026-09-22 (c) — FIRST FIELD TEST of the band-slope gate. 11 arms, all defensible, no change
+## recommended yet.
+
+Drive `000001cf--aaf50ab56b`, ended 13:55 SAST, 14.3 min eligible. First road data on the gate
+deployed earlier today.
+
+THE HARNESS IS VALIDATED. The deployed file replayed over the pulled TSV produces 11 arms, and the
+hook's own `fr` records from the car carry the same 11 timestamps, arm for arm. Every offline
+conclusion about this gate rests on that harness, so this matters more than any single number below.
+
+ELEVEN ARMS, ALL DEFENSIBLE. Judged on the lead's own speed (v_ego + vRel, which our own braking
+does not contaminate): 9 of 11 armed on a lead that was genuinely slower, by 1.8 to 7.8 m/s; the
+other 2 on gaps that really did collapse (38 m and 33 m in 5 s). The previous code's arms scored
+43-46% on that same bar across the 29-route corpus. Zero false arms on this drive.
+
+HAND-OFF WORKS AND THE FRONT-RUN IS REAL. 6 of 11 spans ended with stock itself reaching FLOOR,
+against 1 in 14 before this change. The distance the hook was braking before stock caught up:
+6.0, 19.5, 22.2, 30.0, 33.5 m -- median ~22 m. That is the reaction distance this hook exists to
+buy, measured on the road instead of inferred from replay.
+
+IT STAYED GENTLE. 971 armed frames (48.6 s, 5.7% of eligible time), 73% of them at FLOOR, hardest
+command -1.51 m/s^2, zero CAP arms, and the driver braked on zero frames while armed.
+
+THE 15.1 s SPAN IS THE FEATURE, NOT THE FOURTH BUG. t=797.4 ran 15.10 s, hitting the ">15 s"
+threshold I set before the drive as the signature of the risk this change deliberately took on.
+Frame by frame it is a genuine convergence: ego 120 -> 96 km/h against a lead at 113 -> 96, gap
+91 -> 65 m, FLOOR held throughout, released when the speeds matched. `stock` bottomed at -0.384
+against FLOOR -0.400 -- the hand-off missed by 0.016, which is why it ran long. A long span is not
+itself the failure; a long span on a lead that is not actually slower would be. This was not that.
+
+MISSES. Seven windows closed >10 m in 10 s beyond 50 m without arming. Five had the lead moving
+FASTER than ego, which is a slot switch rather than an approach -- correctly ignored. One sat at
+exactly 50.0 m, inside HANDOFF_DIST by design. The remaining one was a genuine but very gentle
+close, 115.7 m at ~1.1 m/s, far below the -5 m/s bar.
+
+THE ONE NEGATIVE SIGNAL. At t=1107.2 the driver pressed the gas 5 s into the arm that began at
+t=1102.2 (armed at 92 m on a lead 8 km/h slower), releasing the hook at 55.4 m. A normal overtake,
+but it is the only instance on this drive of the driver acting against the hook. Count it again on
+the next drives.
+
+ARM RATE IS THE NUMBER TO WATCH. 46.2 arms/h against the 22.6/h the c7+c8 replay predicted -- double.
+With all 11 defensible this reads as a busier drive rather than a looser gate. If the rate stays
+this high while the "genuinely slower" fraction falls, ARM_SLOPE is too loose.
+
+NO CHANGE RECOMMENDED on one drive. FINDINGS.md §24.
