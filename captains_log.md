@@ -8457,3 +8457,37 @@ ARM_MARGIN_M = 5.0, RE_ARM_HOLD_S = 1.0, HANDOFF_ACCEL = -0.40 decoupled from FL
 
 TESTS. test_far_lead 94 -> 97 (the arm bar sits above the hand-off bar; a hard close entirely
 inside the margin band never arms; one starting above it does). Not deployed. FINDINGS.md §29b.
+
+## 2026-09-22 (h) — the arm confirmation is NEAR-FIELD ONLY. Far-field arms fire 0.10 s earlier.
+
+OPERATOR: "ARM_CONFIRM_FRAMES = 3 should only be used < 55 m. Above 55 m arm immediately."
+
+As literally stated this conflicted with (g): ARM_MARGIN_M = 5.0 blocked arming below 55 m
+entirely, so a confirmation scoped below 55 could never run. Implemented as the coherent reading --
+arm immediately beyond ARM_CONFIRM_DIST, confirm 3 frames between HANDOFF_DIST and it, never arm
+below HANDOFF_DIST -- and the margin is gone.
+
+THE REASONING IS RIGHT AND FIXES A REAL COST. The chatter is a near-field phenomenon: 20 of 21
+degenerate spans armed within 8 m of the hand-off bar. Applying the guard everywhere charged
+0.15 s to every far-field arm -- the arms this hook exists for -- to fix a problem that only
+happens near the bar.
+
+BUT 55 m IS THE WRONG BOUNDARY, AND THE DATA SAYS SO. With it at 55, 4 of the 5 remaining
+degenerate spans armed in 55-60 m, the band that arms immediately (short-span ranges 50.1, 55.2,
+56.0, 57.4, 58.9). Moved to 60 m, which matches the original "within 8 m of the bar" measurement
+and halves the chatter. Flagged as a change to the operator's number.
+
+COMPARISON, c7+c8+cf. crossing / confirm3+margin5 / near-field@55 / near-field@60:
+arms 25 / 25 / 33 / 29, armed 107.9 / 109.2 / 113.7 / 112.8 s, median span 3.40 / 3.30 / 2.45 /
+3.25 s, sub-2-frame spans 2 / 0 / 5 / 2, re-arms within 1 s 1 / 1 / 5 / 2.
+
+BENEFIT CONFIRMED DIRECTLY: every far-field arm now fires 0.10 s earlier -- all ten on cf -- and
+the hook gains 4 arms and 3.6 s of armed time over the margin version.
+
+COST: 2 degenerate spans where the margin had 0. That is the same count as the ORIGINAL crossing
+gate, so not a regression against where this started, but worse than the version it replaces. Each
+costs about 0.1 s of 0.04 g.
+
+TESTS. test_far_lead 97 (far field arms on the first qualifying frame; near field does not arm
+before the confirmation completes; a hard close entirely inside HANDOFF_DIST never arms). Not
+deployed. FINDINGS.md §29c.

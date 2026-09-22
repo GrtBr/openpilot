@@ -277,8 +277,32 @@ def main():
   # ---- ARM CONFIRMATION (replaced a 10 m hysteresis margin, operator 2026-09-22) ----
   # The whole arm condition must hold for ARM_CONFIRM_FRAMES consecutive frames. A single bad
   # frame restarts the count, which is what rejects the range-bar chatter.
-  # counted from the frame the slope first QUALIFIES (<= ARM_SLOPE), not from the first closing
-  # frame -- after a steady warm-up the slope takes time to build to the bar.
+  # (the far-field "arms on the first qualifying frame" case is asserted in the near-field-only
+  # confirmation block below; this block covers the counter's reset behaviour)
+  # one non-qualifying frame restarts the count
+  # inside ARM_CONFIRM_DIST, where the confirmation actually runs
+  band_d = fl.HANDOFF_DIST + 3.0
+  h = new_hook()
+  warm(h, band_d)
+  h.step(True, band_d, -8.0, 20.0, True, True, False, 1.0, band_d)    # 1 of 3
+  h.step(False, 0.0, 0.0, 20.0, True, True, False, 1.0, band_d)       # lead drops -> restart
+  out = h.step(True, band_d, -8.0, 20.0, True, True, False, 1.0, band_d)
+  check("a single non-qualifying frame restarts the confirmation", out == [] and not h.armed)
+
+  # and the range bar is checked on every confirming frame, not only the first
+  h = new_hook()
+  warm(h, band_d)
+  h.step(True, band_d, -8.0, 20.0, True, True, False, 1.0, band_d)
+  out = h.step(True, fl.HANDOFF_DIST - 1.0, -8.0, 20.0, True, True, False, 1.0, 49.0)
+  check("dropping under HANDOFF_DIST mid-confirmation cancels the arm",
+        out == [] and not h.armed)
+
+  # ---- CONFIRMATION IS NEAR-FIELD ONLY (operator, 2026-09-22) ----
+  # Above ARM_CONFIRM_DIST the gate arms on the FIRST qualifying frame: every frame of delay in
+  # the far field is a frame of lost warning, and the chatter it guards against is a near-field
+  # phenomenon (20 of 21 degenerate spans armed within 8 m of HANDOFF_DIST).
+  check("the confirmation boundary sits above the hand-off bar",
+        fl.ARM_CONFIRM_DIST > fl.HANDOFF_DIST)
   h = new_hook()
   warm(h, 120.0)
   d = 120.0
@@ -292,46 +316,30 @@ def main():
       fired = qual
       break
     d = max(0.0, d - 8.0 * DT_MDL)
-  check(f"arms on the {fl.ARM_CONFIRM_FRAMES}rd qualifying frame, not the 1st",
-        fired == fl.ARM_CONFIRM_FRAMES)
+  check("far field: arms on the FIRST qualifying frame, no confirmation delay",
+        fired == 1 and d > fl.ARM_CONFIRM_DIST)
 
-  # one non-qualifying frame restarts the count
+  # inside the boundary the confirmation applies
   h = new_hook()
-  warm(h, 120.0)
-  h.step(True, 120.0, -8.0, 30.6, True, True, False, 1.0, 120.0)      # 1 of 3
-  h.step(False, 0.0, 0.0, 30.6, True, True, False, 1.0, 120.0)        # lead drops -> restart
-  out = h.step(True, 120.0, -8.0, 30.6, True, True, False, 1.0, 120.0)
-  check("a single non-qualifying frame restarts the confirmation", out == [] and not h.armed)
-
-  # and the range bar is checked on every confirming frame, not only the first
-  h = new_hook()
-  warm(h, 120.0)
-  h.step(True, 120.0, -8.0, 30.6, True, True, False, 1.0, 120.0)
-  out = h.step(True, fl.HANDOFF_DIST - 1.0, -8.0, 30.6, True, True, False, 1.0, 49.0)
-  check("dropping under the arm bar mid-confirmation cancels the arm",
-        out == [] and not h.armed)
-
-  # ---- ARM MARGIN: arming needs HANDOFF_DIST + ARM_MARGIN_M, release is at HANDOFF_DIST ----
-  check("the arm bar sits above the hand-off bar (hysteresis, not a second hand-off)",
-        fl.ARM_MARGIN_M > 0.0 and fl.HANDOFF_DIST + fl.ARM_MARGIN_M > fl.HANDOFF_DIST)
-  h = new_hook()
-  warm(h, fl.HANDOFF_DIST + 2.0)
-  out, _ = close(h, fl.HANDOFF_DIST + 2.0, 20.0, -8.0, 200)
-  check("a hard close entirely inside the margin band never arms", out == [] and not h.armed)
-  # ...but just above the margin it does
-  h = new_hook()
-  start = fl.HANDOFF_DIST + fl.ARM_MARGIN_M + 25.0
+  start = fl.HANDOFF_DIST + 4.0                    # between HANDOFF_DIST and ARM_CONFIRM_DIST
   warm(h, start)
-  armed_any = False
-  d = start
+  qual = 0
+  fired = None
   for _ in range(400):
-    h.step(True, d, -8.0, 30.6, True, True, False, 1.0, d)
-    if h.armed:
-      armed_any = True
+    out = h.step(True, start, -2.0, 20.0, True, True, False, 1.0, start)
+    if h.band.slope is not None and h.band.slope <= fl.ARM_SLOPE:
+      qual += 1
+    if out:
+      fired = qual
       break
-    d = max(0.0, d - 8.0 * DT_MDL)
-  check("a hard close starting above the margin arms, and above the arm bar",
-        armed_any and d > fl.HANDOFF_DIST + fl.ARM_MARGIN_M)
+  check("near field: does not arm before the confirmation completes",
+        fired is None or fired >= fl.ARM_CONFIRM_FRAMES)
+
+  # a hard close entirely below HANDOFF_DIST still never arms
+  h = new_hook()
+  warm(h, fl.HANDOFF_DIST - 4.0)
+  out, _ = close(h, fl.HANDOFF_DIST - 4.0, 20.0, -8.0, 200)
+  check("a hard close entirely inside HANDOFF_DIST never arms", out == [] and not h.armed)
 
   # ---- RE-ARM HOLD (only needed because arming is now a level test) ----
   # After a stock hand-off the slope is usually still past ARM_SLOPE, so without a hold the hook

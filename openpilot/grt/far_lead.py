@@ -469,8 +469,8 @@ FINDINGS.md 25-26.
 ARMING IS A LEVEL TEST, 2026-09-22
 -----------------------------------
 The gate arms when the band slope is AT OR BELOW `ARM_SLOPE` with a radar lead present and the
-range above `HANDOFF_DIST + ARM_MARGIN_M`, all three holding for `ARM_CONFIRM_FRAMES` consecutive
-frames. It previously required a CROSSING -- a transition from
+range above `HANDOFF_DIST`. Beyond `ARM_CONFIRM_DIST` that is enough; inside it, the conditions
+must hold for `ARM_CONFIRM_FRAMES` consecutive frames. It previously required a CROSSING -- a transition from
 at-or-above ARM_SLOPE to below it.
 
 WHY. The crossing test had a real blind spot, documented when it shipped: a range series ALREADY
@@ -481,9 +481,9 @@ every gap in the model lead, and at route start. A level test cannot miss it.
 WHAT IT COST, AND THE TWO GUARDS IT NEEDED. A level test re-arms the instant its condition is true
 again, and the crossing was masking two sources of that:
 
-  * ARM_MARGIN_M -- 5 m of hysteresis on the range bar: arm above HANDOFF_DIST + 5, hand off
-    below HANDOFF_DIST. Narrower than the 10 m first tried, which closed the whole 50-60 m band.
-  * ARM_CONFIRM_FRAMES -- the whole arm condition must hold for 3 consecutive frames. Without it
+  * ARM_CONFIRM_DIST / ARM_CONFIRM_FRAMES -- above 55 m the gate arms on the first qualifying
+    frame; between HANDOFF_DIST and 55 m the condition must hold for 3 consecutive frames. Without
+    some guard there
     the hook armed just over 50 m and released a frame or two later as the range dipped back
     under: 21 sub-2-frame spans on c7+c8+cf, 20 of them within 8 m of the bar, median arm range
     51.0 m. A 10 m hysteresis margin was tried first and fixed the chatter by refusing to arm
@@ -613,34 +613,25 @@ HANDOFF_ACCEL = -0.40        # m/s^2 -- THE HAND-OFF BAR: hook 11 lets go once t
                              # much braking from someone else counts as "handled". FLOOR is an
                              # AUTHORITY bar: the softest command this hook may issue. Tuning the
                              # second must never drag the first. See FINDINGS.md 25.
-ARM_MARGIN_M = 5.0           # m -- arm only above HANDOFF_DIST + this; release is still at
-                             # HANDOFF_DIST, so this is hysteresis on the range bar. Operator
-                             # 2026-09-22, phrased as "margin 5 m but only if dRel < 60 m": that
-                             # qualifier is a no-op and is deliberately NOT implemented. Requiring
-                             # >55 m below 60 m and >50 m at or above 60 m is the same rule as
-                             # requiring >55 m everywhere, since anything >= 60 already clears 55.
-                             # Kept as one bar so a future reader is not hunting a branch that
-                             # cannot be taken.
+ARM_CONFIRM_DIST = 60.0      # m -- boundary between "arm immediately" and "confirm first".
+                             # Above this the gate arms on the first qualifying frame; between
+                             # HANDOFF_DIST and this it must hold for ARM_CONFIRM_FRAMES frames.
+                             # Below HANDOFF_DIST it does not arm at all.
                              #
-                             # Paired with the confirmation below rather than replacing it: the
-                             # confirmation alone left 1 sub-2-frame span and 2 re-arms; together
-                             # they leave 0 and 1, at the cost of the 50-55 m band.
-ARM_CONFIRM_FRAMES = 3       # frames the WHOLE arm condition must hold before arming. Replaces
-                             # a 10 m hysteresis margin on the range bar (operator, 2026-09-22),
-                             # and is the better-targeted fix for the same problem: the level test
-                             # armed just above HANDOFF_DIST and released a frame or two later as
-                             # the range dipped back under (21 sub-2-frame spans on c7+c8+cf, 20
-                             # within 8 m of the bar). A margin fixed that by refusing to arm
-                             # between 50 and 60 m at all; this rejects the same chatter while
-                             # keeping the band. Measured: chatter equal to the margin's (1
-                             # sub-2-frame span, 2 re-arms within 1 s vs 1 and 1), and 5 arms in
-                             # 50-60 m recovered.
+                             # Operator 2026-09-22. The guard is only needed near the hand-off
+                             # bar -- that is where the level test chattered, 20 of 21 degenerate
+                             # spans arming within 8 m of it. Applying it everywhere cost 0.15 s
+                             # on EVERY arm, including the far-field arms this hook exists for,
+                             # to fix a near-field problem. Scoping it by distance keeps the far
+                             # field as early as it can be and guards only where the noise is.
                              #
-                             # THE COST IS 0.15 s ON EVERY ARM. This hook exists to be early, so
-                             # that is not free -- it is ~6% of the 2.5 s the band's stdev term
-                             # buys. 2 frames was tested and is too few (8 sub-2-frame spans, 7
-                             # re-arms); 5 frames removes all chatter but costs 0.25 s and 5.7 s
-                             # of armed time over the corpus.
+                             # 55 was tried first and is too low: with the boundary there, 4 of 5
+                             # remaining degenerate spans armed in 55-60 m, the band that arms
+                             # immediately. 60 matches the original measurement that 20 of 21
+                             # degenerate spans sat within 8 m of HANDOFF_DIST.
+ARM_CONFIRM_FRAMES = 3       # frames the whole arm condition must hold, INSIDE ARM_CONFIRM_DIST.
+                             # 2 was tested and is too few (8 sub-2-frame spans, 7 re-arms over
+                             # the corpus); 5 removes all chatter but costs 0.25 s per arm.
 RE_ARM_HOLD_S = 1.0          # s -- after a hand-off to stock, do not re-arm for this long.
                              # Only needed since arming became a LEVEL test (2026-09-22): the
                              # slope is often still past ARM_SLOPE at the moment stock takes over,
@@ -892,16 +883,21 @@ class FarLeadPreBrake:
       if self.rearm_hold_s > 0.0:
         self.arm_confirm = 0
         return []
-      if dRel <= HANDOFF_DIST + ARM_MARGIN_M:
+      if dRel <= HANDOFF_DIST:
         self.arm_confirm = 0
-        return []                                  # stock owns the near field; see HANDOFF_DIST.
-                                                   # ARM_MARGIN_M is hysteresis -- release is at
-                                                   # HANDOFF_DIST, arming needs HANDOFF_DIST+5.
-      # CONFIRMATION. Every condition above must hold for ARM_CONFIRM_FRAMES consecutive frames.
-      # The counter is reset by each early return above, so a single bad frame restarts it.
-      self.arm_confirm += 1
-      if self.arm_confirm < ARM_CONFIRM_FRAMES:
-        return []
+        return []                                  # stock owns the near field; see HANDOFF_DIST
+      # CONFIRMATION, NEAR FIELD ONLY. Beyond ARM_CONFIRM_DIST the gate arms on the first
+      # qualifying frame -- that is the far-field case this hook exists for and every frame of
+      # delay is a frame of lost warning. Inside it, the same conditions must hold for
+      # ARM_CONFIRM_FRAMES consecutive frames, because that is where the range noise sits close
+      # enough to HANDOFF_DIST to arm and release a frame or two later.
+      if dRel <= ARM_CONFIRM_DIST:
+        self.arm_confirm += 1
+        if self.arm_confirm < ARM_CONFIRM_FRAMES:
+          return []
+      else:
+        self.arm_confirm = ARM_CONFIRM_FRAMES      # far field: no delay, and do not carry a
+                                                   # part-built count down into the near field
 
       # ---- ARM. First frame emits the floor, never the full formula -- see module docstring
       # on JERK_ARM: the point is that a noisy lock cannot step straight to -1.2.
