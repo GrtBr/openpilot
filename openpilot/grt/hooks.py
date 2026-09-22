@@ -944,7 +944,7 @@ class _FrontRun:
     if e["catch_t"] is None and stock_min <= cand + 1e-6:
       e["catch_t"] = now
       e["catch_d"] = float(dRel)
-    # THE HAND-OFF BAR. far_lead releases on `stock_min <= FLOOR`, not on stock matching this
+    # THE HAND-OFF BAR. far_lead releases on `stock_min <= HANDOFF_ACCEL`, not on stock matching this
     # hook's own (harder) command, so this is the crossing that actually ends the span and the one
     # that answers "how much earlier did braking start". `catch_*` above is the stricter bar and
     # is nearly always never reached -- 7 of the first 8 real spans, 2026-09-16.
@@ -997,9 +997,9 @@ def observe_front_run(out: list, stock_min: float, lead, v_ego: float) -> None:
     fr = _front_run_singleton()
     if fr is None:
       return
-    from openpilot.grt.far_lead import FLOOR          # already imported by hook 11 itself
+    from openpilot.grt.far_lead import HANDOFF_ACCEL   # the bar far_lead actually releases on
     cand = float(out[0][0]) if out else None
-    fr.step(cand, float(stock_min), float(lead.dRel), float(v_ego), time.monotonic(), FLOOR)
+    fr.step(cand, float(stock_min), float(lead.dRel), float(v_ego), time.monotonic(), HANDOFF_ACCEL)
   except Exception:
     _log_exception("observe_front_run")
 

@@ -8316,3 +8316,48 @@ With all 11 defensible this reads as a busier drive rather than a looser gate. I
 this high while the "genuinely slower" fraction falls, ARM_SLOPE is too loose.
 
 NO CHANGE RECOMMENDED on one drive. FINDINGS.md §24.
+
+## 2026-09-22 (d) — hand-off bar decoupled from FLOOR. A no-op by construction, and the FLOOR
+## sweep it unlocks. No FLOOR change made.
+
+WHY. Operator, reading the delivered-command trace from the first field-test drive: at hand-off
+stock commands harder than hook 11, so the hook is too soft. Investigated (FINDINGS.md §25): true,
+but the gap AT hand-off is only 0.04 m/s^2 median; the -2 to -3 arrives 2-4 s later. It is not
+filter lag (v_filt over-reads closing, -7.9 vs -3.5 true) and not a starved formula (with the TRUE
+closing rate a_req is 0.08 m/s^2, in 7 of 7 takeovers softer than FLOOR already delivers). The hook
+is soft because FLOOR is where it sits -- 72% of armed frames are clamped there.
+
+The missing physics is the lead's own deceleration: on 6 of 10 spans whose delivered command later
+went below -1.0, the lead was ALREADY braking at arm time (median -1.15 m/s^2). But neither
+available input can carry it. `leadsV3[0].a[0]` has a best-fit gain of 0.026 against radar-derived
+truth and reports braking on 11% of the frames where the lead really is braking. Differentiating
+the band slope sees it better (55%) but with 3.40 m/s^2 RMS error and a 30% false-hard-braking rate
+on steady leads -- at the arm frames it reads -7.91 where truth is -0.84. Either would drive
+severity to CAP on noise. The principled fix is blocked by measurement, not design.
+
+WHAT CHANGED. `HANDOFF_ACCEL = -0.40` is now its own constant and the release reads it instead of
+`FLOOR`; hook 11c reads it too, so the recorder measures the bar the hook actually releases on. It
+is deliberately equal to FLOOR, so the commit changes no behaviour. FLOOR is an AUTHORITY bar (the
+softest command this hook may issue); HANDOFF_ACCEL is a TRUST bar (how much braking from someone
+else counts as handled). They were one constant, and that is exactly what caused the 2026-08-31
+sixth bug.
+
+PROOF IT IS A NO-OP. Replayed over c7+c8+cf: 8+6+11 = 25 arms, identical per-route counts, span
+durations and commands (hardest -1.51) to the pre-change file. IMPORTANT: the replay cannot test
+the hand-off at all -- the harness feeds stock_min = 0.0, so that branch never executes. The
+release change rests on unit tests, one of which reproduces the 2026-08-31 setup (FLOOR = 0.00,
+stock at -0.10) and asserts the hook now stays armed where it used to release.
+
+THE SWEEP (0.86 h, HANDOFF_ACCEL pinned at -0.40). Arms and armed time are IDENTICAL at every FLOOR
+value (25 arms, 107.9 s), which is the decoupling visible in the data. Frames where the command
+would be more severe than what the car actually did: 1093/2158 at -0.40, 1954 at -0.50, 2002 at
+-0.60, 2032 at -0.70, 2051 at -0.80. The knee is at -0.50: +861 frames, then +48, +30, +19. Past
+-0.50 you buy magnitude, not coverage. Extra speed commanded is modest -- 9.6 m/s over 25 spans at
+-0.50, about 1.4 km/h per arm. The hardest command never moves from -1.51; that is set by the
+severity formula, which FLOOR cannot raise.
+
+NO FLOOR CHANGE MADE. The sweep is open loop -- it says what the hook would ASK for, not what the
+drive would then look like, since braking changes the gap and everything downstream. If FLOOR is to
+move, -0.50 is the knee and it should be a deliberate operator decision like ARM_MIN_DIST was.
+
+TESTS. test_far_lead 79 -> 87, test_hooks 65 -> 66. Not deployed. FINDINGS.md §25-26.

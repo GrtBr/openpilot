@@ -262,6 +262,52 @@ def main():
   out2 = h.step(True, 59.0, -8.0, 30.6, True, True, False, -0.40)
   check("stock caught up -> latch dropped next frame", out2 == [] and not h.armed)
 
+  # ---- HAND-OFF BAR DECOUPLED FROM FLOOR, 2026-09-22 (FINDINGS.md 25) ----
+  # They hold the same value today, so these pin the SEPARATION rather than a difference: the
+  # release must follow HANDOFF_ACCEL, and must not move when FLOOR is tuned. Overloading the two
+  # is what caused the 2026-08-31 "sixth bug".
+  check("HANDOFF_ACCEL exists and currently equals FLOOR (this change is behaviour-neutral)",
+        fl.HANDOFF_ACCEL == fl.FLOOR == -0.40)
+  _fl_src = (GRT / "far_lead.py").read_text()
+  check("the release reads HANDOFF_ACCEL, not FLOOR",
+        "if stock_min <= HANDOFF_ACCEL:" in _fl_src and "if stock_min <= FLOOR:" not in _fl_src)
+
+  # stock exactly at the bar releases; a hair above it does not
+  h = new_hook(); _, d = arm(h, 120.0, 30.6, -8.0)
+  out = h.step(True, d, -8.0, 30.6, True, True, False, fl.HANDOFF_ACCEL, d)
+  check("stock reaching HANDOFF_ACCEL still returns this frame's candidate", len(out) == 1)
+  out2 = h.step(True, d, -8.0, 30.6, True, True, False, fl.HANDOFF_ACCEL, d)
+  check("...and the latch is dropped on the next frame", out2 == [] and not h.armed)
+  h = new_hook(); _, d = arm(h, 120.0, 30.6, -8.0)
+  h.step(True, d, -8.0, 30.6, True, True, False, fl.HANDOFF_ACCEL + 0.05, d)
+  check("stock a hair softer than the bar does NOT hand off", h.armed)
+
+  # THE POINT: moving FLOOR must not move the release bar. Tune the authority, keep the trust.
+  # Reproduce the 2026-08-31 SIXTH BUG's exact setup: FLOOR moved SOFTER (it was set to 0.00).
+  # Coupled, that made the release `stock_min <= 0.00` -- true whenever stock merely was not
+  # accelerating, so the hook self-released within a few frames of every arm. Decoupled, the trust
+  # bar stays at -0.40 and a barely-braking stock no longer counts as "handled".
+  _saved = fl.FLOOR
+  try:
+    fl.FLOOR = 0.00
+    h = new_hook(); _, d = arm(h, 120.0, 30.6, -8.0)
+    h.step(True, d, -8.0, 30.6, True, True, False, -0.10, d)   # stock barely braking
+    check("FLOOR at 0.00: stock at -0.10 does NOT hand off (coupled, this was the sixth bug)",
+          h.armed)
+    h2 = new_hook(); _, d2 = arm(h2, 120.0, 30.6, -8.0)
+    h2.step(True, d2, -8.0, 30.6, True, True, False, fl.HANDOFF_ACCEL, d2)
+    h2.step(True, d2, -8.0, 30.6, True, True, False, fl.HANDOFF_ACCEL, d2)
+    check("...and genuine braking at HANDOFF_ACCEL still hands off, whatever FLOOR is",
+          not h2.armed)
+    # and a HARDER floor, which is what FINDINGS 25 actually contemplates
+    fl.FLOOR = -0.80
+    h3 = new_hook(); _, d3 = arm(h3, 120.0, 30.6, -8.0)
+    h3.step(True, d3, -8.0, 30.6, True, True, False, -0.30, d3)
+    check("FLOOR at -0.80: the release bar is unmoved, stock at -0.30 does not hand off",
+          h3.armed)
+  finally:
+    fl.FLOOR = _saved
+
   # armed, then down to 21 m with stock stuck near 0. Under the band-slope gate the hook has
   # ALREADY handed off at HANDOFF_DIST (50 m) and never reaches 21 m armed -- stock owns that
   # range whether or not it is commanding anything. This replaces the old assertion that the

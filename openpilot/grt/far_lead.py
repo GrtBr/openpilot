@@ -446,6 +446,26 @@ hot_a_req_for() appears exactly once (its definition).
 
 ROLLBACK is `git revert` of this commit; 108e5850e is the last pre-change tip.
 
+HAND-OFF BAR DECOUPLED FROM FLOOR, 2026-09-22
+---------------------------------------------
+`HANDOFF_ACCEL` is now its own constant and the release reads it instead of `FLOOR`. It is
+deliberately equal to `FLOOR` (-0.40), so this change is behaviour-neutral: replayed over c7+c8+cf
+it produces the same 25 arms with the same durations and the same commands.
+
+The two are different quantities and were only ever accidentally equal. `FLOOR` is an AUTHORITY
+bar -- the softest command this hook may issue. `HANDOFF_ACCEL` is a TRUST bar -- how much braking
+from someone else counts as "handled". Overloading them is what caused the 2026-08-31 sixth bug
+(see "FLOOR EXPERIMENT"): lowering `FLOOR` to soften the command silently moved the release bar,
+so "stock is genuinely braking" degenerated into "stock isn't accelerating" and the hook released
+within frames of every arm. Tuning the authority bar must never drag the trust bar.
+
+NOTE the replay cannot test this: the tracker harness feeds `stock_min = 0.0`, so the hand-off
+never fires there. The change is covered by unit tests, one of which reproduces the 2026-08-31
+setup exactly (FLOOR = 0.00, stock at -0.10) and asserts the hook now stays armed.
+
+Hook 11c reads `HANDOFF_ACCEL` too, so the recorder measures the bar the hook actually releases on.
+FINDINGS.md 25-26.
+
 """
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalPlanSource
@@ -541,6 +561,22 @@ CAP = -2.0                   # m/s^2 -- hardest command this hook may ever issue
 JERK_ARM = 1.5               # m/s^3 -- rate limit on the FALLING edge only, first armed frames
 
 # ---- release (spec section 6, amended -- see module docstring) ----
+HANDOFF_ACCEL = -0.40        # m/s^2 -- THE HAND-OFF BAR: hook 11 lets go once the planner's own
+                             # best candidate has reached this, i.e. once stock is genuinely
+                             # braking. DECOUPLED from FLOOR 2026-09-22 and deliberately equal to
+                             # it, so this commit changes no behaviour.
+                             #
+                             # They were the same constant until now, and that overloading caused
+                             # the 2026-08-31 "sixth bug": lowering FLOOR to soften the command
+                             # silently moved this bar too, turning "stock is genuinely braking"
+                             # into "stock isn't accelerating" -- trivially true, so the hook
+                             # self-released almost immediately after every arm. See the module
+                             # docstring, "FLOOR EXPERIMENT".
+                             #
+                             # THE TWO MUST NOW MOVE INDEPENDENTLY. This one is a TRUST bar: how
+                             # much braking from someone else counts as "handled". FLOOR is an
+                             # AUTHORITY bar: the softest command this hook may issue. Tuning the
+                             # second must never drag the first. See FINDINGS.md 25.
 RELEASE_DIST = 20.0          # m -- absolute backstop regardless of stock
 LEAD_LOST_S = 1.0            # s -- release if the lead itself is lost this long
 
@@ -824,6 +860,8 @@ class FarLeadPreBrake:
     self.last_emitted = out
     cand = [(out, LongitudinalPlanSource.lead0, should_stop(v_ego, out))]
 
-    if stock_min <= FLOOR:
-      self._reset()          # stock has caught up -- hand off starting next frame
+    if stock_min <= HANDOFF_ACCEL:
+      self._reset()          # stock has caught up -- hand off starting next frame.
+                             # HANDOFF_ACCEL, never FLOOR: see that constant for why they are
+                             # separate even while they hold the same value.
     return cand

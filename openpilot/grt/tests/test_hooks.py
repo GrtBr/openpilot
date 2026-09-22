@@ -296,7 +296,7 @@ def test_front_run():
   try:
     LEAD = lambda d: NS(present=True, dRel=d)
 
-    FLOOR = -0.40            # far_lead.FLOOR; hook 11 hands off when stock reaches it
+    FLOOR = -0.40            # far_lead.HANDOFF_ACCEL; hook 11 hands off when stock reaches it
 
     def run(frames, floor=FLOOR):
       """frames: [(cand, stock_min, dRel)] -> the records written."""
@@ -365,8 +365,10 @@ def test_front_run():
     check("stock never reaching FLOOR -> handoff False, measured to the last commanding frame",
           r and r[0]["handoff"] is False and abs(r[0]["floor_m"] - 9.0) < 0.05)
 
-    check("FLOOR comes from far_lead, not a copy that could drift",
-          "from openpilot.grt.far_lead import FLOOR" in (GRT / "hooks.py").read_text())
+    check("the hand-off bar comes from far_lead, not a copy that could drift",
+          "from openpilot.grt.far_lead import HANDOFF_ACCEL" in (GRT / "hooks.py").read_text())
+    check("hook 11c measures HANDOFF_ACCEL, the bar far_lead actually releases on, not FLOOR",
+          "time.monotonic(), HANDOFF_ACCEL)" in (GRT / "hooks.py").read_text())
   finally:
     hooks._lead_write = saved
     hooks._front_run = None
