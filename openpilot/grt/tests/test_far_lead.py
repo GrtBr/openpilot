@@ -544,10 +544,33 @@ def main():
             for d in (fl.ARM_MIN_DIST + 0.1, 0.5 * (fl.ARM_MIN_DIST + fl.THRESH_SCALE_DIST),
                       fl.THRESH_SCALE_DIST)))
 
-  # the severity formula decides how HARD to brake, not WHETHER -- it must stay physically exact
+  # The severity formula decides how HARD to brake, not WHETHER. It must never pick up the
+  # ARMING gate's distance-neutralising scale (hot_a_req_for) -- that exists to make a threshold
+  # equally reachable at every range, which is meaningless for a magnitude.
   _src = (GRT / "far_lead.py").read_text()
-  check("armed-branch severity a_req is unscaled and physically exact",
-        "a_req = (eff_vRel_range ** 2) / (2.0 * max(eff_dRel - STOP_MARGIN, 1.0))" in _src)
+  check("armed-branch severity a_req uses the proportional stopping target (2026-09-22)",
+        "a_req = (eff_vRel_range ** 2) / (2.0 * max(eff_dRel * (1.0 - STOP_MARGIN_FRAC), 1.0))"
+        in _src)
+  check("...and is NOT scaled by the arming threshold's distance correction",
+        "hot_a_req_for" not in _src.split("already armed")[-1])
+
+  # STOP_MARGIN stays 6.0 for the OLD gate's math: hook 11b's _ArmMirror and hot_a_req_for
+  # reproduce what that gate would have armed on, and are the field-test comparator. If the
+  # proportional target ever leaks into them the comparison silently stops comparing.
+  check("STOP_MARGIN is unchanged for the retained old-gate math",
+        fl.STOP_MARGIN == 6.0)
+  check("the proportional target is a fraction of dRel, not a distance",
+        0.0 < fl.STOP_MARGIN_FRAC < 1.0)
+
+  # With FRAC = 0.5 the denominator is exactly dRel, so a_req = v^2/dRel. Assert the KINEMATICS
+  # rather than the algebra: the command must demand the closing rate be bled off over the
+  # remaining fraction of the gap, at every distance.
+  for d, v in ((100.0, 10.0), (60.0, 8.0), (30.0, 5.0)):
+    want = (v ** 2) / (2.0 * d * (1.0 - fl.STOP_MARGIN_FRAC))
+    got = (v ** 2) / (2.0 * max(d * (1.0 - fl.STOP_MARGIN_FRAC), 1.0))
+    check(f"a_req at {d:.0f} m closing {v:.0f} m/s is {want:.3f} m/s^2 "
+          f"(bleed off within {(1.0 - fl.STOP_MARGIN_FRAC) * d:.0f} m)",
+          abs(got - want) < 1e-9)
   # RETAINED, not deleted: hook 11b (_ArmMirror in grt/hooks.py) reads these to shadow what the
   # OLD gate would have armed on, which is the field-test comparator for this change. They are no
   # longer on the live arming path -- assert exactly that, so a future edit cannot quietly

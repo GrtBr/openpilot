@@ -582,7 +582,18 @@ HOT_CLOSING_RATE = 2.78      # m/s (~10 km/h) -- ...AND v_filt must be closing a
                              # tiny closing rates at long range, which is correct for a genuine
                              # slow-pack approach but also fires on highway measurement noise)
 HOT_PERSIST_S = 0.5          # ...continuously for this long before arming (kills noise)
-STOP_MARGIN = 6.0            # m -- same STOP_DISTANCE long_mpc.py uses
+STOP_MARGIN = 6.0            # m -- same STOP_DISTANCE long_mpc.py uses. Still read by the OLD
+                             # arming gate's math (hot_a_req_for, and hook 11b's _ArmMirror in
+                             # hooks.py, which shadows what that gate would have armed on) -- it
+                             # must NOT follow STOP_MARGIN_FRAC or the comparator stops comparing.
+STOP_MARGIN_FRAC = 0.5       # PROPORTIONAL stopping target for the ARMED command, 2026-09-22.
+                             # The severity question is "how hard to brake to bleed off the
+                             # closing rate", and the answer scales with the room available, not
+                             # with a fixed 6 m taken off it. Reaching the lead's speed within
+                             # HALF the present gap is self-similar: the same demand at 100 m as
+                             # at 60 m. With FRAC = 0.5 the denominator is exactly dRel, so
+                             # a_req = v^2/dRel -- about 1.9x the old value in the far field,
+                             # converging on it near 12 m where the old margin dominates.
 
 # ---- command while latched (spec section 6) ----
 FLOOR = -0.40                # m/s^2 -- softest command once armed; see hook 10 C (ABANDON).
@@ -1000,7 +1011,7 @@ class FarLeadPreBrake:
 
     # CORRECTED relative-motion kinematics -- see arming-gate comment above and module docstring
     # "ATTEMPT 5, DEPLOYED DESPITE FAILING VALIDATION".
-    a_req = (eff_vRel_range ** 2) / (2.0 * max(eff_dRel - STOP_MARGIN, 1.0))
+    a_req = (eff_vRel_range ** 2) / (2.0 * max(eff_dRel * (1.0 - STOP_MARGIN_FRAC), 1.0))
     target = max(CAP, min(-a_req, FLOOR))
     if target >= self.last_emitted:
       out = target                                          # rising (softer) -- immediate

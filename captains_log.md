@@ -11,6 +11,61 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-22 — hook 11: proportional stopping target (operator request)
+
+**Why.** The operator's standing complaint since the field test: at the moment hook 11 hands over,
+stock commands *more* negative than the hook did — the hook is too soft. FINDINGS §25 located the
+cause: the hook sits clamped at `FLOOR` for the large majority of armed frames, so the severity
+formula almost never gets to speak.
+
+**Change.** `STOP_MARGIN` in the ARMED-branch severity formula goes from a fixed 6.0 m to a
+proportional `STOP_MARGIN_FRAC = 0.5` of `dRel`:
+
+```
+a_req = eff_vRel_range**2 / (2 * max(eff_dRel * (1 - STOP_MARGIN_FRAC), 1.0))
+```
+
+The reasoning is that "how hard must I brake to bleed off this closing rate" scales with the room
+available, not with a fixed 6 m taken off it. Reaching the lead's speed within HALF the present
+gap is self-similar — the same demand at 100 m as at 60 m. With FRAC = 0.5 the denominator is
+exactly `dRel`, so `a_req = v²/dRel`: about 1.9× the old value in the far field, converging on the
+old number near 12 m where the fixed margin used to dominate.
+
+**Severity only — arming is untouched.** The band-slope gate does not read `a_req`, so this cannot
+change when the hook fires. Replay confirms it: **20 arms before, 20 after, identical.**
+
+**`STOP_MARGIN` stays 6.0** and is deliberately NOT following the new constant. `hot_a_req_for()`
+and hook 11b's `_ArmMirror` (`hooks.py:824`) use it to reproduce what the OLD arming gate would
+have armed on — that mirror is this field test's comparator, and if the proportional target leaked
+into it the comparison would silently stop comparing. Pinned by a new test.
+
+**Measured, c7+c8+cf (pinned-blob baseline vs the committed file):**
+
+| | frames at FLOOR | at CAP | mean | hardest |
+|---|---|---|---|---|
+| fixed 6.0 m | 84.8 % | 0 | −0.444 | −1.510 |
+| proportional 0.5 | **75.2 %** | **40** | **−0.530** | **−2.000** |
+
+470 of 1901 armed frames differ, median 0.329 m/s² harder. The effect concentrates exactly where
+the complaint was: **dRel 50–70 m (the hand-off zone), +0.343 m/s²**; 70–90 m +0.286; 90–120 m
++0.162 on only 9 frames. Mean moves −0.444 → −0.530, toward the −0.62 the range derivative was
+asking for in FINDINGS §25.
+
+**The CAP frames are both genuine.** Only two spans reach `CAP`, both on route cf, both at ~110
+km/h behind a lead **18.5 and 21.4 kph slower** — the two most severe approaches in the corpus and
+precisely what this hook exists for. 0.25 s and 1.75 s at CAP respectively. Zero false CAP. This
+is the number to watch on the next drive, since a false arm at CAP costs −2.0 m/s² where a false
+arm at FLOOR costs 0.04 g.
+
+Tests **118/118** `test_far_lead.py` (the old test pinned the previous formula as a source string;
+rewritten to assert the kinematics and that severity never picks up the arming gate's
+distance-neutralising scale), **68/68** `test_hooks.py`.
+
+**Deploy status: NOT deployed.** Rollback: `STOP_MARGIN_FRAC = 0.0` restores a fixed-margin form
+with margin 0, or revert the commit for the exact prior behaviour.
+
+---
+
 ## 2026-09-22 — hook 11: gate the band on model confidence, and re-seed on acquisition
 
 **Why.** The operator flagged an arm at 13:44:41 (route `cf`) that looked false. It was. For 3+ s
