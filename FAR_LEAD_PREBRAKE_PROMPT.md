@@ -309,5 +309,48 @@ Two consequences worth carrying into any future spec work:
    `far_lead.py` calls them. Hook 11b's `_ArmMirror` reads them to shadow what the old gate would
    have armed on.
 
+## 2026-09-22 — the band is gated on the model's own confidence
+
+The band-slope gate above reads `modelV2.leadsV3[0].x[0]`. It originally read it on EVERY frame,
+regardless of `leadsV3[0].prob`. That is wrong: below a prob of about 0.5 the model's range head
+is a regression with no target, and its wander differentiates into closing that never happened.
+
+On route cf at 13:44:41 prob sat at 0.004–0.011 for over three seconds while `x[0]` drifted
+118–133 m. Then the model acquired and `x[0]` fell 131.1 → 102.8 m in 0.26 s. The band read
+−13.26 m/s — 2.6× the arm bar — and the gate armed, while the gap was in fact OPENING and the
+lead was only ~10 kph slower than ego. Across c7+c8+cf, 11 of 29 arms were on leads the model did
+not believe in.
+
+Stock never had this problem, and not because it detects a lead "sweeping in". `radard.py:237-242`
+runs an asymmetric filter on the same prob (instant rise, RC 0.2 decay) and simply REFUSES TO
+PUBLISH a lead until that filtered prob clears 0.5. The band was the only consumer of `leadsV3` in
+this fork reading the position head unconditioned.
+
+The band now runs the same filter and feeds only while filtered prob > `PROB_GATE`. Because
+radard gates `present` on the same quantity, **`radar present` now implies `band confident` by
+construction** — there is no new failure mode where the hook is armed while the band has gone
+blind that is not already the ordinary radar-dropout path.
+
+On acquisition the window is RE-SEEDED, not warmed from empty: warming cold costs
+`BAND_N + SLOPE_N` = 7.0 s of blindness every time a lead appears, which is worse than the bug.
+Seed the stdev at `SEED_SIGMA`, never flat — a flat seed starts stdev at zero, and since
+`band = mean − BAND_K·stdev`, stdev growing back drags the band down for a full 5.0 s after every
+acquisition, manufacturing the very phantom being removed.
+
+**The cost is `SLOPE_N` and it cannot be reduced.** No statistic can differentiate a series
+shorter than its own window. Combined with the refusal to arm inside `HANDOFF_DIST`, that gives a
+hard reveal boundary:
+
+    d_acquire > HANDOFF_DIST + closing_rate × SLOPE_N × DT_MDL        (110 m at 30 m/s)
+
+Above it the gate arms at +40 frames, the floor. Below it it declines — correctly: there is no
+two seconds of evidence to be had, and stock owns everything under ~50 m.
+
+**Open, pre-existing, and deliberately not fixed here:** `_BandSlope` has no physical bound, where
+`_RangeRateFilter` has both a STEP test and a physical one. A model-range ramp faster than a lead
+can close (92 → 48 m over 1.0 s at ego 25 m/s) arms the gate — and so does the git-pinned
+pre-change file, at frame 173, once the band is warm as it always is in production. See
+FINDINGS.md §30a.
+
 See the `far_lead.py` module docstring section "BAND-SLOPE GATE", captains_log.md 2026-09-22, and
 FINDINGS.md sections 21-23.

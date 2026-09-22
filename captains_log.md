@@ -60,8 +60,11 @@ physical bound, where `_RangeRateFilter` has STEP and PHYS tests. A ramped model
 (92 → 48 m over 1.0 s at ego 25 m/s) arms the gate — and the **git-pinned pre-change file does
 too** at frame 173 when the band is warm, as it always is in production. The old test only
 "passed" because `feed()` started cold and the slope first defined mid-ramp with `prev=None`.
-The test now states this truthfully. Field evidence: c8 t_rel 666.79 and 680.34 arm at prob 0.85
-on a model range swinging 40 → 82 m. Exposure is bounded by release at `HANDOFF_DIST`.
+The test now states this truthfully. The pinned-file ramp is the proof it is pre-existing and
+stands on its own; separately this build arms twice more than the pinned base on c8 (t_rel 666.79
+and 680.34, 55–62 m, prob 0.85, model range swinging 40 → 82 m), which is that exposure made
+*visible* by a clean band rather than new evidence of it — the base's band was dirty there, so the
+counterfactual is untestable. Exposure is bounded by release at `HANDOFF_DIST`.
 
 **Deploy status: NOT deployed.** Sits on top of five commits (`4436aaa22`…`1d5887020`) that are
 also not yet on the car. The car still runs the original band-slope gate. Rollback: `108e5850e`.

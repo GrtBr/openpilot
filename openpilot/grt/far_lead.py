@@ -750,11 +750,19 @@ class _BandSlope:
     band  = mean(BAND_N) - BAND_K * stdev(BAND_N)   of dRel_model
     slope = OLS fit over the last SLOPE_N band samples, m/s
 
-  Fed on EVERY frame the model publishes a lead -- including frames where radar reports the lead
-  absent, and frames where hook 11 is not eligible at all. The buffers describe the road, not
-  this hook's state, so `FarLeadPreBrake._reset()` must never clear them: a reset costs
-  BAND_N + SLOPE_N frames (7.0 s) of warm-up, and re-warming on every personality or engagement
-  flicker would leave the gate blind exactly when it is needed.
+  Fed on every frame the model publishes a lead it BELIEVES IN -- filtered prob above PROB_GATE.
+  That includes frames where radar reports the lead absent, and frames where hook 11 is not
+  eligible at all: the buffers describe the road, not this hook's state, so
+  `FarLeadPreBrake._reset()` must never clear them. A reset costs BAND_N + SLOPE_N frames (7.0 s)
+  of warm-up, and re-warming on every personality or engagement flicker would leave the gate
+  blind exactly when it is needed.
+
+  Before 2026-09-22 it was fed on every frame FULL STOP, regardless of prob, and acquisition
+  transients differentiated into phantom closing -- see `update()` and FINDINGS.md 30. Because
+  radard publishes `present` only when ITS filtered prob clears the same 0.5 bar, and this class
+  now runs the same filter on the same stream, `radar present` implies `band confident` by
+  construction: there is no state where the hook is armed on radar while the band has gone
+  unconfident that is not already the ordinary radar-dropout path.
 
   Why the band and not the plain mean: for steady closing the band's slope settles at EXACTLY the
   true closing rate, but the -BAND_K*stdev term makes it arrive there ~2.5 s sooner, because the
@@ -787,8 +795,10 @@ class _BandSlope:
     re-seed. modelV2 always publishes leadsV3 with prob @0, so grt.hooks never produces that
     pair; anything else feeding this class must pass prob explicitly.
     """
-    # Asymmetric prob filter, identical to radard.py's lead_prob_filters: rise instantly, decay
-    # at PROB_ALPHA. Below PROB_GATE the model's range head is a regression with no target -- at
+    # Asymmetric prob filter, matching radard.py's lead_prob_filters: rise instantly, decay at
+    # PROB_ALPHA. radard's FirstOrderFilter(0.0, 0.2, DT_MDL) takes 0.2 as an RC time constant,
+    # not an alpha -- alpha = dt/(rc+dt) = 0.05/0.25 = 0.20, so the two coincide numerically ONLY
+    # at DT_MDL = 0.05. If DT_MDL ever changes, recompute PROB_ALPHA rather than assuming 0.2. Below PROB_GATE the model's range head is a regression with no target -- at
     # prob 0.006 x[0] wanders tens of metres -- and differentiating that produces pure phantom
     # closing. radard refuses to PUBLISH a lead until this same filtered prob clears 0.5; before
     # 2026-09-22 the band was the only consumer of leadsV3 that read x[0] unconditioned.
