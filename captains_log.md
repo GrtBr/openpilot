@@ -8226,3 +8226,47 @@ conformance still needs pycapnp (device-only). NOT deployed: the device has been
 deployment is a separate explicit step.
 
 ROLLBACK. `git revert` of this commit. `108e5850e` is the last pre-change tip.
+
+## 2026-09-22 (b) — band-slope gate DEPLOYED to comma4. Parked, verified pre- and post-reboot.
+
+Deployed `far_lead.py`, `hooks.py` and both test files to /data/openpilot as working-tree edits
+(the established pattern; the device's git stays at 5417a0f). Cereal files not touched. No scons.
+
+Baseline confirmed before overwriting: all four files on the device were bit-identical to
+`108e5850e`, so the rollback target is exact.
+
+Written over ssh with `os.fsync` on the file AND its directory, never scp -- the 2026-09-16
+corruption (NUL tail from offset 40960 while md5 matched from page cache, caused by the device
+power-cycling mid-copy) is why. Verified three ways: `dd iflag=direct` read back the full 55,669
+bytes, a NUL scan showed byte counts identical to the originals, and -- the check that actually
+matters -- all four md5s still matched AFTER a reboot, with the page cache gone:
+
+    far_lead.py       96a8bd4292cda91accf04242a0da848c
+    hooks.py          fb80ec3bf9d2b15a9f08fcf090aa7f81
+    test_far_lead.py  e551882dadb676f47f85e1c64ce407ce
+    test_hooks.py     b4e3a9aa67b751b7a05c94c6fb598c2a
+
+ON-DEVICE VERIFICATION (real imports, no stubs -- what the Pi5 cannot do):
+  - constants live: BAND_N=100, SLOPE_N=40, BAND_K=2.0, ARM_SLOPE=-5.0, RELEASE_SLOPE=0.0,
+    HANDOFF_DIST=50.0, MODEL_RANGE_OFFSET=1.52; `dRel_model` present in step()'s signature.
+  - test_far_lead 79/79, test_hooks 65/65, test_schema_conformance 34/34 (pycapnp is device-only,
+    so this is the first time the schema test ran against this change).
+  - post-reboot runtime: longitudinalPlan exactly 240 messages in 12 s (20 Hz), modelV2 /
+    radarState / selfdriveState all alive, no process failing that should be running.
+  - `modelV2.leadsV3` publishing 3 leads, x[0]=15.45 -- the field the gate reads exists and
+    carries data on this car.
+  - personality reads **relaxed**, so hook 11 is live (the 09-16 note that it read `standard` is
+    stale).
+  - swaglog for the current boot: 0 `grt: ... failed`, 0 ERROR lines. Hook 11 is NOT silently
+    disabled -- which was the specific risk, since `far_lead_candidates` swallows exceptions and
+    returns [] rather than crashing.
+  - hook 11b's heartbeat still being appended (4,809 frames, `present: false`, dRel 0.0 -- correct
+    for a parked car), which is positive proof the hook runs every frame.
+
+The 47,659 `grt: scc_map update failed` entries on the device are historical: the twelve newest
+swaglogs contain none, and the current boot has zero. Unrelated to this change (hook 1/2's mapd
+dependency).
+
+NOT YET DRIVEN. Watch list for the first drive is in the 2026-09-22 (a) entry and FINDINGS.md §21-23;
+the single most important number is `dur_s` in the `fr` records -- any span over ~15 s is the
+slow-close FLOOR-hold risk materialising, which is the thing this change deliberately un-guarded.
