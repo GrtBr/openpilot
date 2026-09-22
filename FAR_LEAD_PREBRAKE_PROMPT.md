@@ -285,3 +285,29 @@ self-contained commit; `git revert` restores this spec's original formula and co
 `far_lead.py`'s module docstring, "ATTEMPT 5, DEPLOYED DESPITE FAILING VALIDATION," and
 `captains_log.md` 2026-08-31 for the full record. Do not treat §4/§6/§8 above as describing the
 currently-running code until this section says otherwise.
+
+## 2026-09-22 — the arming gate replaced by a band-slope gate
+
+Sections above describing arming by presence persistence, a hot `a_req` streak and `ARM_MIN_DIST`
+describe the gate as it stood until 2026-09-22 and are kept for history. They are no longer how
+the hook arms.
+
+Hook 11 now arms when the slope of a lower Bollinger band on the model's range series
+(`mean(BAND_N) - BAND_K*stdev(BAND_N)` of `dRel_model`, slope fitted over `SLOPE_N` band samples)
+CROSSES below `ARM_SLOPE`, on a frame with a radar lead present and `dRel > HANDOFF_DIST`. It
+releases on that slope crossing back above `RELEASE_SLOPE`, on range falling under `HANDOFF_DIST`,
+on stock reaching `FLOOR`, or on the lead being lost. There are no persistence timers: the 5 s
+mean and the 2 s slope fit are the persistence.
+
+Two consequences worth carrying into any future spec work:
+
+1. The old `eff_vRel_range >= -HOT_CLOSING_RATE` release is deleted and cannot be reinstated
+   alongside this gate — the gate fires before the range-rate filter converges, so that test would
+   fire on the frame after arming.
+2. The old constants (`HOT_A_REQ`, `HOT_PERSIST_S`, `PRESENCE_PERSIST_S`, `ARM_MIN_DIST`,
+   `THRESH_SCALE_DIST`, `hot_a_req_for()`) are retained and still tested, but nothing in
+   `far_lead.py` calls them. Hook 11b's `_ArmMirror` reads them to shadow what the old gate would
+   have armed on.
+
+See the `far_lead.py` module docstring section "BAND-SLOPE GATE", captains_log.md 2026-09-22, and
+FINDINGS.md sections 21-23.
