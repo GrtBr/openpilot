@@ -716,11 +716,16 @@ def far_lead_candidates(sm, v_ego: float, stock_min: float) -> list:
     # disables hook 11 rather than crashing. Caught by test_hook11_wiring.
     from openpilot.grt.far_lead import MODEL_RANGE_OFFSET
     dRel_model = None
+    prob_model = None
     leads_v3 = sm['modelV2'].leadsV3
     if len(leads_v3) > 0 and len(leads_v3[0].x) > 0:
       dRel_model = float(leads_v3[0].x[0]) - MODEL_RANGE_OFFSET
+      # prob MUST travel with the range: below PROB_GATE the range head has no target and its
+      # wander differentiates into phantom closing. Dropping this argument leaves the band
+      # ungated (prob=None reads as always-confident) -- the 2026-09-22 bug. See far_lead.
+      prob_model = float(leads_v3[0].prob)
     out = fl.step(bool(lead.present), float(lead.dRel), float(lead.vRel), float(v_ego),
-                  relaxed, long_active, driver_input, float(stock_min), dRel_model)
+                  relaxed, long_active, driver_input, float(stock_min), dRel_model, prob_model)
     observe_front_run(out, float(stock_min), lead, float(v_ego))   # hook 11c: measurement only
     return out
   except Exception:

@@ -651,6 +651,9 @@ HANDOFF_DIST = 50.0          # m -- do not arm below this, and hand off on falli
                              # 46.7 m; in the other 13 its best command stayed within
                              # [-0.165, +0.192] while this hook was armed at 60-87 m. Above
                              # ~50 m stock is not acting, below it stock owns the approach.
+SEED_SIGMA = 3.0             # m -- stdev a re-seeded band window starts at; see _BandSlope
+PROB_GATE = 0.5              # feed the band only while the FILTERED model lead prob exceeds this
+PROB_ALPHA = 0.2             # asymmetric filter on that prob: instant rise, this alpha on decay
 MODEL_RANGE_OFFSET = 1.52    # m -- modelV2 leadsV3 x[0] is measured from the camera; radar
                              # range is ~1.5 m further forward. Mirrors RADAR_TO_CAMERA
                              # (selfdrive/controls/radard.py:26), which radard applies at :139 to
@@ -768,15 +771,59 @@ class _BandSlope:
     self.prev = None            # last non-None slope, for crossing detection
     self.crossed_arm = False
     self.crossed_release = False
+    self.pf = 0.0               # asymmetric-filtered model lead prob, mirroring radard
+    self.confident = False      # latched: is pf currently above PROB_GATE
 
-  def update(self, z) -> None:
+  def update(self, z, prob=None) -> None:
     """Feed one model range sample, or None on a frame with no model lead.
 
     A frame with no model lead contributes nothing and clears the crossing flags, matching the
     offline gate this was validated against (which skipped those frames outright) -- NOT a gap
     filled by interpolation, which would invent closing that was never measured.
+
+    KNOWN SHARP EDGE: prob=None means "caller supplied no probability" and reads as CONFIDENT, so
+    that pre-2026-09-22 callers and the unit tests keep their old meaning. A frame with BOTH
+    z=None and prob=None therefore leaves `confident` True and would mask the next acquisition's
+    re-seed. modelV2 always publishes leadsV3 with prob @0, so grt.hooks never produces that
+    pair; anything else feeding this class must pass prob explicitly.
     """
-    if z is None:
+    # Asymmetric prob filter, identical to radard.py's lead_prob_filters: rise instantly, decay
+    # at PROB_ALPHA. Below PROB_GATE the model's range head is a regression with no target -- at
+    # prob 0.006 x[0] wanders tens of metres -- and differentiating that produces pure phantom
+    # closing. radard refuses to PUBLISH a lead until this same filtered prob clears 0.5; before
+    # 2026-09-22 the band was the only consumer of leadsV3 that read x[0] unconditioned.
+    if prob is not None:
+      p_in = float(prob)
+      self.pf = p_in if p_in > self.pf else self.pf + PROB_ALPHA * (p_in - self.pf)
+
+    was_confident = self.confident
+    self.confident = (prob is None) or (self.pf > PROB_GATE)
+
+    if z is None or not self.confident:
+      self.crossed_arm = self.crossed_release = False
+      return
+
+    if not was_confident:
+      # ACQUISITION. Re-seed rather than warm from empty: a cold start costs BAND_N + SLOPE_N
+      # frames (7.0 s) of blindness after every lead appears, which is worse than the bug. Filling
+      # d with the acquisition range settles the mean instantly and starts stdev at zero, so the
+      # band tracks z from now on and the slope becomes defined SLOPE_N frames (2.0 s) later --
+      # measuring the NEW lead's motion, never the step that brought it into view. That 2.0 s is
+      # the floor: no statistic can differentiate a series shorter than its own window.
+      #
+      # Seeded at SEED_SIGMA, NOT at a flat z. A flat seed starts stdev at zero, and since
+      # band = mean - BAND_K*stdev, stdev growing back to its true value drags the band down for
+      # a full BAND_N (5.0 s) after EVERY acquisition -- manufacturing exactly the phantom closing
+      # this change exists to remove. Measured on synthetics it reaches -2.8 m/s, over half the
+      # arm bar, and on route c8 (213 re-seeds) it added 4 arms on leads that were not closing.
+      # Alternating +/- SEED_SIGMA gives mean exactly z and pstdev exactly SEED_SIGMA (BAND_N is
+      # even), so the band starts where a warm window would sit and only drifts by the gap between
+      # SEED_SIGMA and the truth. See FINDINGS.md 30.
+      z = float(z)
+      self.d = [z + (SEED_SIGMA if i % 2 else -SEED_SIGMA) for i in range(BAND_N)]
+      self.b = []
+      self.prev = None
+      self.slope = None
       self.crossed_arm = self.crossed_release = False
       return
 
@@ -826,12 +873,12 @@ class FarLeadPreBrake:
 
   def step(self, present: bool, dRel: float, vRel_model: float, v_ego: float,
            relaxed: bool, long_active: bool, driver_input: bool, stock_min: float,
-           dRel_model=None) -> list:
+           dRel_model=None, prob_model=None) -> list:
     # FIRST, and before every early return: the band is a property of the road, not of this
     # hook's eligibility. Feeding it only while relaxed+engaged would re-warm it for 7.0 s after
     # each flicker. `dRel_model` is None only if the caller could not read modelV2, in which case
     # the gate simply never reaches a crossing and this hook stays inert.
-    self.band.update(dRel_model)
+    self.band.update(dRel_model, prob_model)
     if self.rearm_hold_s > 0.0:
       self.rearm_hold_s = max(0.0, self.rearm_hold_s - DT_MDL)
 

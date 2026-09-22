@@ -11,6 +11,63 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-22 — hook 11: gate the band on model confidence, and re-seed on acquisition
+
+**Why.** The operator flagged an arm at 13:44:41 (route `cf`) that looked false. It was. For 3+ s
+beforehand `leadsV3[0].prob` was **0.004–0.011** — no lead at all — while `x[0]` wandered
+118–133 m. Then `x[0]` fell **131.1 → 102.8 m in 0.26 s** as the model acquired, and the band
+differentiated that step into **−13.26 m/s** of closing, 2.6× the −5.0 arm bar. The gap was
+actually *opening* (101 → 113 m over the next 2.3 s) and the lead was only ~10 kph slower.
+
+`_BandSlope` was fed `leadsV3[0].x[0]` **regardless of prob**. Every other consumer of leadsV3
+goes through radard's gate (`radard.py:237-242` — asymmetric filter, instant rise / α 0.2 decay,
+publish only when `lead_prob > .5`). The band was the sole unconditioned reader, and unlike
+`_RangeRateFilter` it had no guards at all. Across c7+c8+cf, **11 of 29 arms** were below
+radard's own 0.5 bar.
+
+**What changed.**
+- `far_lead.py`: `_BandSlope.update(z, prob)` now runs the same asymmetric prob filter and only
+  feeds the window while filtered prob > `PROB_GATE` (0.5). On acquisition it **re-seeds** the
+  window instead of warming cold — a cold start would blind the gate for 7.0 s after every lead
+  appears, which is worse than the bug. New constants `PROB_GATE`, `PROB_ALPHA`, `SEED_SIGMA`.
+- `hooks.py`: passes `leadsV3[0].prob` as the 10th argument. `prob_model=None` reads as
+  always-confident, so omitting it silently replays the bug.
+- `tracker/harness.py`: `_guard_step` now demands the 10th argument, same pattern as the
+  `dRel_model` guard.
+
+**One false start, caught by the routes.** The first version seeded the window flat at the
+acquisition range. Flat means stdev starts at **zero**, and since `band = mean − K·stdev`, stdev
+growing back drags the band down for a full 5.0 s after *every* acquisition — manufacturing the
+very phantom being removed (**−2.8 m/s** on synthetics). Route c8 re-seeds **213 times** and
+gained 4 arms on leads that were not closing. Fixed with `SEED_SIGMA = 3.0` m — the measured
+median 100-sample stdev over 23727 confident windows — seeded as alternating ±σ so mean is
+exactly `z` and pstdev exactly `SEED_SIGMA`. Worst manufactured slope: **−1.38 m/s** at 4 m noise.
+
+**Verified.** c7+c8+cf replay: **29 arms → 20, 11 unconfident → 0**, armed time 113 s → 95 s;
+counting only arms the model believed in, 18 → 20 (junk removed, genuine coverage slightly up).
+Tests **112/112** `test_far_lead.py`, **68/68** `test_hooks.py`. Synthetics: constant range at
+2/3/4 m noise never arms; an opening gap never arms; a lead revealed at 140 m closing 30 m/s arms
+at exactly +40 frames (`SLOPE_N`, the floor) and never on the acquisition step.
+
+**Known cost, irreducible.** No statistic can differentiate a series shorter than its own window,
+so with the gate also refusing to arm inside `HANDOFF_DIST` the reveal boundary is exactly
+`d_acquire > HANDOFF_DIST + closing × SLOPE_N × DT_MDL` — 110 m at 30 m/s. Below it the hook
+declines. That is correct: there is no 2 s of evidence to be had, and stock owns everything under
+~50 m.
+
+**Pre-existing gap exposed, deliberately NOT fixed here (FINDINGS.md 30a).** `_BandSlope` has no
+physical bound, where `_RangeRateFilter` has STEP and PHYS tests. A ramped model-range switch
+(92 → 48 m over 1.0 s at ego 25 m/s) arms the gate — and the **git-pinned pre-change file does
+too** at frame 173 when the band is warm, as it always is in production. The old test only
+"passed" because `feed()` started cold and the slope first defined mid-ramp with `prev=None`.
+The test now states this truthfully. Field evidence: c8 t_rel 666.79 and 680.34 arm at prob 0.85
+on a model range swinging 40 → 82 m. Exposure is bounded by release at `HANDOFF_DIST`.
+
+**Deploy status: NOT deployed.** Sits on top of five commits (`4436aaa22`…`1d5887020`) that are
+also not yet on the car. The car still runs the original band-slope gate. Rollback: `108e5850e`.
+
+---
+
 ## 2026-08-26 — T-junction validation on-device: reject a false T from mapd's own path geometry
 
 The T-Junction flag in the tiles is decided by TOPOLOGY ALONE — `_t_junction_road_key`
