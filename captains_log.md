@@ -11,6 +11,50 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-23 — field test of `f239205be`: route 000001d7, four bookmarks
+
+Analysis only; no code changed. 13:45–16:07 SAST, 143 min, 77.9 min eligible. **45 armed spans
+on the car** (hook 11c `fr` records), 36 in the replay, 35 matched; the other 10 are one-frame
+re-arms (below). Full write-up: FINDINGS.md §31. Report page and per-approach CSVs in
+`drives/approaches_20260923/`.
+
+**Held.** 0 of 36 arms after a model prob below 0.5. No arm sooner than 2.0 s after acquisition.
+22 of 36 arms on a lead more than 3 km/h slower.
+
+**Operator bookmarks.**
+1. 14:38:32 — town driving, no confident lead; hook 11 not involved.
+2. 14:39:40 — follows a FALSE arm at 14:39:31: the model range was still settling onto a newly
+   acquired car (91 → 73 m in 1 s) after prob crossed 0.5. Lead 4 km/h faster; hook binding 2.5 s.
+3. 14:48:10 — real emergency. Armed correctly at 101 m; the lead then braked hard (~90 → 42 km/h
+   in 3 s). Hook capped at −0.40 to −0.54 because nothing carries lead deceleration (FINDINGS §25).
+   Driver braked 1.8 s after the arm.
+4. 15:48:27 — release blind spot (below). Held −0.40 for 9.3 s while the gap opened; driver gas.
+
+**New defects.**
+- **Release blind spot.** A prob dip while armed re-seeds the band; the slope is undefined for
+  `SLOPE_N` frames and, with prob flickering, stays undefined, so the slope-above-0 release can never
+  fire. 15:48:14 (lost 14 km/h) and 15:54:13 (lost 12 km/h); both ended by the driver's gas.
+- **Acquisition settling.** The prob gate does not cover the ~1 s the model range keeps converging
+  after prob passes 0.5 (bookmark 2).
+
+**Proportional target.** Hand-over reversed: in all 9 hand-overs the hook was harder than stock at
+release (7 by > 0.6 m/s²); braking steps down when release fires at `HANDOFF_ACCEL`. The one CAP
+(14:58:51) was a real approach but reached −2.0 because `min(vRel_model, v_filt)` took `v_filt`
+(~−11 m/s off a collapsing camera-only range) over the model's −0.3 m/s; stock wanted −0.7 to −1.2.
+
+**Known items, measured.** One-frame re-arms after `RE_ARM_HOLD_S` (10, never binding) are the
+2026-08-31 fifth finding. The missing physical bound (FINDINGS §30a) caused no false arm, but four
+outward jumps while armed held the slope down; one held FLOOR 3.6 s while the gap opened 52 → 88 m.
+
+**Methodology correction.** The 2026-09-22 evaluation read `brakePressed`/`gasPressed` swapped; its
+"0 driver brake events" counted gas. Corrected: the driver braked in 2 of those 11 approaches. The
+09-22 page carries a correction note.
+
+**Verdict.** Driveable: every hook-11 defect on this drive is ≤ 0.2 g, and the driver ended the two
+long holds with the gas. Nothing changed on the car; fixes are research until the operator decides.
+
+---
+
 ## 2026-09-23 — DEPLOYED to comma4: hook 11 through `f239205be`
 
 Car parked, offroad. Deployed over ssh as a file copy (the device repo stays at `5417a0f` with
