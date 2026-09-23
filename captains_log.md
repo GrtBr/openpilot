@@ -11,6 +11,50 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-23 — DEPLOYED to comma4: hook 11 through `f239205be`
+
+Car parked, offroad. Deployed over ssh as a file copy (the device repo stays at `5417a0f` with
+the grt files modified in place, same shape as the previous deploy). Only four files differ from
+what the car ran, none of them cereal: `grt/far_lead.py`, `grt/hooks.py` and their two tests.
+
+This takes the car from the original band-slope gate (field-tested 2026-09-22) to `f239205be`,
+i.e. everything logged below it on 2026-09-22: `HANDOFF_ACCEL` decoupled from FLOOR, level-test
+arming with near-field-only confirmation (`ARM_CONFIRM_DIST` 60 m, 3 frames, `RE_ARM_HOLD_S`
+1.0 s), the band gated on model confidence with σ-seeded re-seed on acquisition, and the
+proportional stopping target (`STOP_MARGIN_FRAC` 0.5).
+
+**Procedure and verification.**
+- Backup of the device's previous four files: `/data/grt_backup_20260923_pre_f239205/`
+  (md5 far_lead `96a8bd42…`, hooks `fb80ec3b…`). Restore = copy back + reboot.
+- Each file written via ssh to a temp path, `fsync` on file and directory, atomic rename.
+- On-device tests before reboot: `test_far_lead.py` 118/118, `test_hooks.py` 68/68,
+  `test_schema_conformance.py` 34/34 against the real pycapnp.
+- Rebooted. **After boot**, read back from flash: all four md5 match local `HEAD`
+  (far_lead `588dc6f4…`, hooks `78a72e55…`, test_far_lead `0c9b66fb…`, test_hooks `1145b255…`),
+  **0 NUL bytes** in each — the 2026-09-16 page-cache failure mode is excluded.
+- Live import: `PROB_GATE` 0.5, `PROB_ALPHA` 0.2, `SEED_SIGMA` 3.0, `STOP_MARGIN` 6.0,
+  `STOP_MARGIN_FRAC` 0.5, `ARM_CONFIRM_DIST` 60, `ARM_CONFIRM_FRAMES` 3, `HANDOFF_ACCEL` −0.4;
+  `step()` ends `(dRel_model, prob_model)`.
+- Processes up (manager, plannerd, radard, modeld, controlsd, selfdrived); plannerd one PID,
+  steady. swaglog since boot: no tracebacks and nothing from hook 11. One unrelated uploader
+  `upload_failed KeyError('url')` (cloud upload, INFO level).
+
+**What to watch on the next drive.**
+1. **CAP.** First build since the object-switch guards that can reach −2.0. Replay put it on two
+   genuine approaches only (leads 18–21 kph slower at ~110 km/h). Any CAP on a lead that is not
+   clearly slower is the finding to chase.
+2. **Hand-off softness.** The reason for the proportional target: does stock still command
+   noticeably harder than the hook at the moment it takes over, in the 50–70 m zone?
+3. **Acquisition arms.** No arm should now follow a low-confidence model lead. An arm within ~2 s
+   of a lead appearing would contradict the `SLOPE_N` floor.
+4. **Known open gap (FINDINGS §30a):** the band still has no physical bound. A ramped
+   model-range switch can arm it; exposure ends at `HANDOFF_DIST`.
+
+Rollback: restore the backup above and reboot, or copy the four files from `a60148b61`
+(the previous field-test state) or `108e5850e` (pre-band-slope).
+
+---
+
 ## 2026-09-22 — hook 11: proportional stopping target (operator request)
 
 **Why.** The operator's standing complaint since the field test: at the moment hook 11 hands over,
