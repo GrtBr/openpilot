@@ -25,9 +25,10 @@ re-arms (below). Full write-up: FINDINGS.md §31. Report page and per-approach C
 1. 14:38:32 — town driving, no confident lead; hook 11 not involved.
 2. 14:39:40 — follows a FALSE arm at 14:39:31: the model range was still settling onto a newly
    acquired car (91 → 73 m in 1 s) after prob crossed 0.5. Lead 4 km/h faster; hook binding 2.5 s.
-3. 14:48:10 — real emergency. Armed correctly at 101 m; the lead then braked hard (~90 → 42 km/h
-   in 3 s). Hook capped at −0.40 to −0.54 because nothing carries lead deceleration (FINDINGS §25).
-   Driver braked 1.8 s after the arm.
+3. 14:48:10 — real hazard: a delivery van slowing to turn right across the oncoming lane (road video,
+   FINDINGS §32). Hook armed at 98 m but the camera read the van as only 2 m/s slower; it held
+   −0.40, firmed to −0.54 and handed off to stock at 14:48:12.52. Driver braked 0.2 s later.
+   (Corrected 2026-09-23: "lead braked 90 → 42 km/h" was the camera velocity head's overshoot.)
 4. 15:48:27 — release blind spot (below). Held −0.40 for 9.3 s while the gap opened; driver gas.
 
 **New defects.**
@@ -49,6 +50,11 @@ outward jumps while armed held the slope down; one held FLOOR 3.6 s while the ga
 **Methodology correction.** The 2026-09-22 evaluation read `brakePressed`/`gasPressed` swapped; its
 "0 driver brake events" counted gas. Corrected: the driver braked in 2 of those 11 approaches. The
 09-22 page carries a correction note.
+
+**THIS CAR HAS NO RADAR (found analysing bookmark 3).** Openpilot runs the Staria camera-only
+(`radarUnavailable`; `leadOne.radar` False on 0 of 114,232 lead frames). Every "radar dRel/vRel" in
+`far_lead.py`, GRT_MODS and FINDINGS is radard's vision fallback, and `min(vRel, v_filt)` is two
+derivatives of one camera. The code is correct; its rationale text is not. Docs pass owed.
 
 **Verdict.** Driveable: every hook-11 defect on this drive is ≤ 0.2 g, and the driver ended the two
 long holds with the gas. Nothing changed on the car; fixes are research until the operator decides.
