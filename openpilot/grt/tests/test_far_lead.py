@@ -364,8 +364,18 @@ def main():
   # They hold the same value today, so these pin the SEPARATION rather than a difference: the
   # release must follow HANDOFF_ACCEL, and must not move when FLOOR is tuned. Overloading the two
   # is what caused the 2026-08-31 "sixth bug".
-  check("HANDOFF_ACCEL exists and currently equals FLOOR (this change is behaviour-neutral)",
-        fl.HANDOFF_ACCEL == fl.FLOOR == -0.40)
+  # They were equal (-0.40) from 2026-09-22 until 09-24, when FLOOR alone moved to -0.20. The hand-off
+  # bar stays at -0.40: stock must be genuinely braking before the hook lets go, and a hand-off bar
+  # softer than the hook's own floor would release on stock merely matching it.
+  check("HANDOFF_ACCEL is -0.40 and is at least as hard as FLOOR",
+        fl.HANDOFF_ACCEL == -0.40 and fl.HANDOFF_ACCEL <= fl.FLOOR)
+  # Hook 10 (grt/throttle_hold.py) passes a request at or below ABANDON through unfiltered and may
+  # hold back or clip anything milder -- so the hook's softest command must never be milder.
+  _th_src = (GRT / "throttle_hold.py").read_text()
+  import re as _re
+  _abandon = float(_re.search(r"^ABANDON = (-?[0-9.]+)", _th_src, _re.M).group(1))
+  check(f"FLOOR ({fl.FLOOR}) is never softer than hook 10's ABANDON ({_abandon})",
+        fl.FLOOR <= _abandon)
   _fl_src = (GRT / "far_lead.py").read_text()
   check("the release reads HANDOFF_ACCEL, not FLOOR",
         "if stock_min <= HANDOFF_ACCEL:" in _fl_src and "if stock_min <= FLOOR:" not in _fl_src)

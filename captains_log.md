@@ -11,6 +11,26 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-24 — hook 11: FLOOR −0.40 → −0.20, operator decision
+
+**Change.** `far_lead.py` `FLOOR` −0.40 → −0.20. `HANDOFF_ACCEL` stays −0.40 (decoupled since 09-22, so
+the 08-31 sixth bug cannot recur). −0.20 equals hook 10's `ABANDON`, the softest request hook 10
+passes unfiltered; a test now asserts `FLOOR <= ABANDON`. Stale recorder docstring in `hooks.py`
+corrected (it hands off on `HANDOFF_ACCEL`, not `FLOOR`).
+
+**Measured (c7+c8+cf+d7, latest code; FINDINGS §38).** Arms unchanged (70). Mean armed command
+−0.60 → −0.45; commanded speed shed −24 %; time at ≤ −1.0 28.4 → 25.4 s. False arms held at the floor
+cost half (0.02 g); bookmark 2 still reaches CAP (not a floor effect). Real arms soften early too:
+bookmark 3's first 1.5 s −0.42 → −0.23.
+
+**Tests.** `test_far_lead.py` 129 → 130 (the 09-22 "HANDOFF_ACCEL equals FLOOR" test restated as
+"HANDOFF_ACCEL −0.40 and at least as hard as FLOOR"; new FLOOR ≤ ABANDON). `test_hooks.py` 68/68.
+
+**Deploy status: NOT deployed.** Undeployed on top of the car's `69f19ec86`: band every frame
+(`94c95234a`), filter gains (`4408a9758`), and this.
+
+---
+
 ## 2026-09-24 — hook 11: range-rate filter gains 0.10/0.003 → 0.20/0.0222, operator decision
 
 **Why.** `v_filt` took 1.8 s to reach 63% of a clean close. The operator asked for the gain sweep, then

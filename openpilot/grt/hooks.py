@@ -928,8 +928,9 @@ class _FrontRun:
     self.episodes = 0
 
   def step(self, cand, stock_min: float, dRel: float, v_ego: float, now: float, floor: float) -> None:
-    """`floor` is far_lead.FLOOR, the bar hook 11 itself hands off on -- passed in rather than
-    imported here so it cannot drift from the release rule, and so this stays unit-testable."""
+    """`floor` is far_lead.HANDOFF_ACCEL, the bar hook 11 itself hands off on (NOT far_lead.FLOOR --
+    the two have differed since 2026-09-24) -- passed in rather than imported here so it cannot
+    drift from the release rule, and so this stays unit-testable."""
     if cand is None:
       if self.ep is not None:
         self._close(dRel, now)

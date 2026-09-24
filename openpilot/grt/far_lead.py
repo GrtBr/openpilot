@@ -174,8 +174,9 @@ Returns `[]` (inert) unless armed. Once armed, the candidate is clamped to `[CAP
 still well inside the real vehicle-level clamp `ACCEL_MIN=-3.5` in `opendbc/car/interfaces.py`,
 and hook 2's own `HAZARD_ACCEL_MIN=-1.5` in `grt/scc_map.py` is existing fork precedent for a
 harder-than-old-CAP bound) and only ever competes inside the planner's `min()`, so it can never
-make braking weaker than stock. `FLOOR` is -0.40, not something softer, because hook 10 layer C
-(`ABANDON = -0.20` in `grt/throttle_hold.py`) would otherwise eat a milder request. Every gate
+make braking weaker than stock. `FLOOR` is -0.20 (was -0.40 until 2026-09-24) and must never be
+softer than hook 10's `ABANDON = -0.20` (`grt/throttle_hold.py`): hook 10 passes a request at or
+below ABANDON straight through, but may hold back or clip a milder one. Every gate
 (personality, `longActive`, driver input) is re-checked every frame and any exception drops
 straight to `[]`, so a wedged state cannot outlive one bad frame's inputs.
 
@@ -616,7 +617,11 @@ STOP_MARGIN_FRAC = 0.5       # PROPORTIONAL stopping target for the ARMED comman
                              # converging on it near 12 m where the old margin dominates.
 
 # ---- command while latched (spec section 6) ----
-FLOOR = -0.40                # m/s^2 -- softest command once armed; see hook 10 C (ABANDON).
+FLOOR = -0.20                # m/s^2 -- softest command once armed; see hook 10 C (ABANDON).
+                             # 2026-09-24, operator: -0.40 -> -0.20. -0.20 is exactly hook 10's ABANDON
+                             # (grt/throttle_hold.py), the softest request hook 10 passes through
+                             # unfiltered; anything milder it may hold back 0.3 s or clip to zero.
+                             # Never set this softer than ABANDON -- a test pins it. FINDINGS 38.
                              # Reverted here 2026-08-31 after a 0.00 experiment caused a real
                              # self-release failure on a live drive -- see module docstring
                              # "FLOOR EXPERIMENT" for the full story before changing this again
