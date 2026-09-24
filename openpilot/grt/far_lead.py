@@ -674,8 +674,7 @@ HANDOFF_DIST = 50.0          # m -- do not arm below this, and hand off on falli
                              # 46.7 m; in the other 13 its best command stayed within
                              # [-0.165, +0.192] while this hook was armed at 60-87 m. Above
                              # ~50 m stock is not acting, below it stock owns the approach.
-SEED_SIGMA = 3.0             # m -- stdev a re-seeded band window starts at; see _BandSlope
-PROB_GATE = 0.5              # feed the band only while the FILTERED model lead prob exceeds this
+PROB_GATE = 0.5              # the FILTERED model lead prob a lead must exceed to count as believed
 PROB_ALPHA = 0.2             # asymmetric filter on that prob: instant rise, this alpha on decay
 MODEL_RANGE_OFFSET = 1.52    # m -- modelV2 leadsV3 x[0] is measured from the camera; radar
                              # range is ~1.5 m further forward. Mirrors RADAR_TO_CAMERA
@@ -760,19 +759,18 @@ class _BandSlope:
     band  = mean(BAND_N) - BAND_K * stdev(BAND_N)   of dRel_model
     slope = OLS fit over the last SLOPE_N band samples, m/s
 
-  Fed on every frame the model publishes a lead it BELIEVES IN -- filtered prob above PROB_GATE.
-  That includes frames where radar reports the lead absent, and frames where hook 11 is not
-  eligible at all: the buffers describe the road, not this hook's state, so
+  Fed on EVERY frame the model publishes a lead (2026-09-24; between 09-22 and 09-24 only while
+  its filtered prob exceeded PROB_GATE). That includes frames where no lead is present and frames
+  where hook 11 is not eligible at all: the buffers describe the road, not this hook's state, so
   `FarLeadPreBrake._reset()` must never clear them. A reset costs BAND_N + SLOPE_N frames (7.0 s)
   of warm-up, and re-warming on every personality or engagement flicker would leave the gate
   blind exactly when it is needed.
 
-  Before 2026-09-22 it was fed on every frame FULL STOP, regardless of prob, and acquisition
-  transients differentiated into phantom closing -- see `update()` and FINDINGS.md 30. Because
-  radard publishes `present` only when ITS filtered prob clears the same 0.5 bar, and this class
-  now runs the same filter on the same stream, `radar present` implies `band confident` by
-  construction: there is no state where the hook is armed on radar while the band has gone
-  unconfident that is not already the ordinary radar-dropout path.
+  Model confidence no longer gates anything here (`pf` / `confident` are still computed, for
+  information). Gating the input (09-22) kept acquisition transients out but made the slope
+  undefined after every prob dip, including while armed, which blocked release (FINDINGS 31a).
+  Operator decision 2026-09-24: sample always, arm as before. Accepted cost: low-confidence model
+  ranges reach the band, so acquisition steps can arm again (FINDINGS 30, 36).
 
   Why the band and not the plain mean: for steady closing the band's slope settles at EXACTLY the
   true closing rate, but the -BAND_K*stdev term makes it arrive there ~2.5 s sooner, because the
@@ -799,11 +797,8 @@ class _BandSlope:
     offline gate this was validated against (which skipped those frames outright) -- NOT a gap
     filled by interpolation, which would invent closing that was never measured.
 
-    KNOWN SHARP EDGE: prob=None means "caller supplied no probability" and reads as CONFIDENT, so
-    that pre-2026-09-22 callers and the unit tests keep their old meaning. A frame with BOTH
-    z=None and prob=None therefore leaves `confident` True and would mask the next acquisition's
-    re-seed. modelV2 always publishes leadsV3 with prob @0, so grt.hooks never produces that
-    pair; anything else feeding this class must pass prob explicitly.
+    prob=None means "caller supplied no probability" and reads as CONFIDENT, so callers that pass
+    no prob (the unit tests, pre-2026-09-22 scripts) can still arm. grt.hooks always passes it.
     """
     # Asymmetric prob filter, matching radard.py's lead_prob_filters: rise instantly, decay at
     # PROB_ALPHA. radard's FirstOrderFilter(0.0, 0.2, DT_MDL) takes 0.2 as an RC time constant,
@@ -816,34 +811,18 @@ class _BandSlope:
       p_in = float(prob)
       self.pf = p_in if p_in > self.pf else self.pf + PROB_ALPHA * (p_in - self.pf)
 
-    was_confident = self.confident
     self.confident = (prob is None) or (self.pf > PROB_GATE)
 
-    if z is None or not self.confident:
-      self.crossed_arm = self.crossed_release = False
-      return
-
-    if not was_confident:
-      # ACQUISITION. Re-seed rather than warm from empty: a cold start costs BAND_N + SLOPE_N
-      # frames (7.0 s) of blindness after every lead appears, which is worse than the bug. Filling
-      # d with the acquisition range settles the mean instantly and starts stdev at zero, so the
-      # band tracks z from now on and the slope becomes defined SLOPE_N frames (2.0 s) later --
-      # measuring the NEW lead's motion, never the step that brought it into view. That 2.0 s is
-      # the floor: no statistic can differentiate a series shorter than its own window.
-      #
-      # Seeded at SEED_SIGMA, NOT at a flat z. A flat seed starts stdev at zero, and since
-      # band = mean - BAND_K*stdev, stdev growing back to its true value drags the band down for
-      # a full BAND_N (5.0 s) after EVERY acquisition -- manufacturing exactly the phantom closing
-      # this change exists to remove. Measured on synthetics it reaches -2.8 m/s, over half the
-      # arm bar, and on route c8 (213 re-seeds) it added 4 arms on leads that were not closing.
-      # Alternating +/- SEED_SIGMA gives mean exactly z and pstdev exactly SEED_SIGMA (BAND_N is
-      # even), so the band starts where a warm window would sit and only drifts by the gap between
-      # SEED_SIGMA and the truth. See FINDINGS.md 30.
-      z = float(z)
-      self.d = [z + (SEED_SIGMA if i % 2 else -SEED_SIGMA) for i in range(BAND_N)]
-      self.b = []
-      self.prev = None
-      self.slope = None
+    # SAMPLE EVERY FRAME (operator, 2026-09-24). From 2026-09-22 to 09-24 this returned early while
+    # unconfident and re-seeded the window when confidence came back. That kept acquisition
+    # transients out of the band, but a prob flicker WHILE ARMED re-seeded it too, leaving the slope
+    # undefined -- and release needs the slope to cross back above 0, so the hook could not release
+    # (route 000001d7: 9.3 s and 8.7 s at FLOOR on opening gaps, both ended by the driver's gas).
+    # Now the band always has a slope once warm, so release always works. ARMING is unchanged:
+    # slope <= ARM_SLOPE with a lead present (plus the HANDOFF_DIST / near-field confirmation /
+    # re-arm-hold guards). The cost is back: low-confidence model ranges reach the band again, and
+    # an acquisition step can arm (the 2026-09-22 13:44:41 case) -- measured, FINDINGS 36.
+    if z is None:
       self.crossed_arm = self.crossed_release = False
       return
 

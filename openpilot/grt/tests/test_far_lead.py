@@ -621,6 +621,10 @@ def main():
     which is also what a real approach looks like."""
     return [(True, d)] * (n if n is not None else fl.BAND_N + fl.SLOPE_N + 20)
 
+  def STEADY_P(d, n=None):
+    """STEADY() for feedp(): a confident, present, flat lead-in that warms the band."""
+    return [(True, d, 0.9)] * (n if n is not None else fl.BAND_N + fl.SLOPE_N + 20)
+
   def switches(r):
     return [i for i, x in enumerate(r) if x[2]]
 
@@ -705,80 +709,66 @@ def main():
   check("...and the physical bound still registers the jump as a new object",
         bool(switches(r)))
 
-  # ---------------------------------------------------------------- prob gate + re-seed (09-22)
-  def feedp(samples, v_ego, vrel=-0.5, noise=0.0, seed=7):
-    """Like feed(), but each sample is (present, dRel, prob) so the band's prob gate is live."""
+  # ---------------------------------------------------------------- band samples every frame (09-24)
+  # Operator, 2026-09-24: the band must take a sample all the time; arming unchanged (slope <=
+  # ARM_SLOPE with a lead present, plus the existing guards). Between 09-22 and 09-24 the band
+  # skipped low-confidence frames and re-seeded on acquisition; that is gone (FINDINGS 36).
+  def feedp(samples, v_ego, vrel=-0.5, noise=0.0, seed=7, hook=None):
+    """Like feed(), but each sample is (present, dRel, prob); the model range is always fed."""
     rng = _random.Random(seed)
-    h = new_hook()
+    h = hook if hook is not None else new_hook()
     res = []
     for pres, d, pr in samples:
-      z = d + (rng.gauss(0.0, noise) if (pres and noise) else 0.0)
-      h.step(pres, z, vrel, v_ego, True, True, False, 1.0, z if pres else None, pr)
+      z = d + (rng.gauss(0.0, noise) if noise else 0.0)
+      h.step(pres, z, vrel, v_ego, True, True, False, 1.0, z, pr)
       res.append((h.armed, h.band.slope))
     return h, res
 
-  # An unconfident stretch must not reach the band at all: at prob ~0.01 leadsV3[0].x[0] is a
-  # regression head with no target, and differentiating its wander is what armed the gate at
-  # 13:44:41 on 2026-09-22 (model range 131 -> 103 m in 0.26 s, band slope -13.3 m/s, while the
-  # gap was actually OPENING and the lead was 10 kph slower than ego).
-  h, r = feedp([(True, 120.0 + (k % 7) * 4.0, 0.01) for k in range(60)], 30.0)
-  check("prob 0.01 never reaches the band, however much the range head wanders",
-        not h.band.d and not h.band.confident and not any(x[0] for x in r))
-
-  # Acquisition re-seeds rather than warming cold: mean lands on the acquisition range at once,
-  # stdev starts at SEED_SIGMA (NOT zero -- a flat seed manufactures up to -2.8 m/s of slope as
-  # stdev grows back, which on route c8's 213 re-seeds added 4 arms on leads that were not closing).
+  h, _ = feedp([(False, 120.0 + (k % 7) * 4.0, 0.01) for k in range(60)], 30.0)
+  check("the band samples a low-confidence model range (prob 0.01) too",
+        len(h.band.d) == 60)
   h, _ = feedp([(True, 120.0, 0.01)] * 60 + [(True, 100.0, 0.9)], 30.0)
-  d = h.band.d
-  mean = sum(d) / len(d)
-  sd = (sum((x - mean) ** 2 for x in d) / len(d)) ** 0.5
-  check("acquisition re-seeds the whole window to BAND_N samples",
-        len(d) == fl.BAND_N)
-  check("...centred on the acquisition range, so the mean is right immediately",
-        abs(mean - 100.0) < 1e-9)
-  check("...with stdev seeded at SEED_SIGMA, not zero",
-        abs(sd - fl.SEED_SIGMA) < 1e-9)
-  check("...and no slope yet: it cannot be defined until SLOPE_N band samples exist",
-        h.band.slope is None)
+  check("no re-seed on acquisition: the window just gains one sample",
+        len(h.band.d) == 61 and h.band.d[-1] == 100.0)
 
-  # The price of the re-seed is exactly SLOPE_N frames, and no more. That sets a hard reveal
-  # boundary, because the gate also refuses to arm inside HANDOFF_DIST: a lead must stay beyond
-  # 50 m for the full 2.0 s it takes to measure it, i.e.
-  #     d_acquire > HANDOFF_DIST + closing_rate * SLOPE_N * DT_MDL
-  # At 30 m/s that is 110 m. Below it the hook declines rather than guessing -- and declining is
-  # right: there is no 2 s of evidence to be had, and stock owns everything under ~50 m anyway.
-  # Before this change the gate WOULD have armed on such a reveal, but only by reading the
-  # PREVIOUS object's band history, which is the bug this whole section exists to remove.
-  def reveal(d_acq, closing, v_ego):
-    acq = [(True, 125.0, 0.01)] * 60
-    app = [(True, max(d_acq - closing * k * DT_MDL, 3.0), 0.9) for k in range(1, 201)]
-    h, r = feedp(acq + app, v_ego)
-    return next((i - len(acq) for i, x in enumerate(r) if x[0]), None)
+  # THE REASON FOR THE CHANGE. Armed on a real close, then the model's confidence flickers around
+  # 0.5 for 5 s (route 000001d7 15:48:14). The gated band re-seeded on every return and its slope
+  # stayed undefined, so the slope-above-0 release could never fire. Now the slope always exists.
+  closing = [(True, 110.0 - 8.0 * k * DT_MDL, 0.9) for k in range(40)]
+  h, r = feedp(STEADY_P(110.0) + closing, 30.0)
+  armed_at = next((i for i, x in enumerate(r) if x[0]), None)
+  d_end = 110.0 - 8.0 * 40 * DT_MDL
+  # 8-frame dips: long enough to pull the FILTERED prob below 0.5 (a 3-frame dip is not -- it
+  # decays at PROB_ALPHA). On the pre-09-24 file this leaves the slope undefined on 92/100 frames
+  # and the hook still armed at the end; that is the fault this test pins.
+  flick = [(True, d_end + 6.0 * k * DT_MDL, 0.9 if (k // 8) % 2 else 0.2) for k in range(100)]
+  h, r2 = feedp(flick, 30.0, hook=h)
+  check("armed on a real close", armed_at is not None)
+  check("...then prob flickers around 0.5 while the gap opens: the slope stays defined every frame",
+        all(x[1] is not None for x in r2))
+  check("...so the hook can release (the release blind spot is gone)",
+        not r2[-1][0])
 
-  boundary = fl.HANDOFF_DIST + 30.0 * fl.SLOPE_N * DT_MDL
-  check(f"stopped lead revealed at 140 m, ego 30 m/s (clear of the {boundary:.0f} m boundary): arms",
-        reveal(140.0, 30.0, 30.0) is not None)
-  check("...exactly SLOPE_N frames after acquisition, never on the step itself",
-        reveal(140.0, 30.0, 30.0) in (fl.SLOPE_N, fl.SLOPE_N + 1, fl.SLOPE_N + 2))
-  check("...and at 160 m too, at the same floor (the latency is fixed, not distance-dependent)",
-        reveal(160.0, 30.0, 30.0) in (fl.SLOPE_N, fl.SLOPE_N + 1, fl.SLOPE_N + 2))
-  check("revealed at 100 m at 30 m/s it declines: only 1.7 s above HANDOFF_DIST, less than the "
-        "2.0 s needed to measure a slope at all",
-        reveal(100.0, 30.0, 30.0) is None)
+  # THE ACCEPTED COST, stated so nobody mistakes it for a pass. A model range wandering at prob
+  # ~0.01 and then stepping ~25 m onto a newly believed lead (the 2026-09-22 13:44:41 shape) feeds
+  # the step straight into the band. Nothing between the band and the arm checks confidence, so
+  # once a lead is present the step can arm.
+  wander = [(False, 130.0 + (k % 5) * 1.5, 0.01) for k in range(fl.BAND_N + fl.SLOPE_N + 20)]
+  acq = [(True, 103.0 + ((-1) ** k) * 1.0, 0.9) for k in range(60)]
+  h, r = feedp(wander + acq, 36.0)
+  check("KNOWN COST: an acquisition step onto a newly believed lead can arm again (FINDINGS 36)",
+        any(x[0] for x in r))
 
-  # The re-seed transient must not arm on its own. A constant range at the noisiest level the
-  # routes show (p90 stdev ~ 7.5 m; 4 m is comfortably typical) must stay clear of ARM_SLOPE.
+  # What sampling every frame must NOT do: arm on a lead that is simply there.
   for nz in (2.0, 3.0, 4.0):
-    h, r = feedp([(True, 125.0, 0.01)] * 60 + [(True, 100.0, 0.9)] * 200, 30.0, noise=nz)
+    h, r = feedp(STEADY_P(100.0) + [(True, 100.0, 0.9)] * 200, 30.0, noise=nz)
     worst = min((x[1] for x in r if x[1] is not None), default=0.0)
-    check(f"constant 100 m range, {nz:.0f} m noise: re-seed transient stays off the bar "
+    check(f"constant 100 m range, {nz:.0f} m noise, warm band: never arms "
           f"(worst slope {worst:.2f} vs ARM_SLOPE {fl.ARM_SLOPE})",
           not any(x[0] for x in r))
-
-  h, r = feedp([(True, 125.0, 0.01)] * 60
-               + [(True, 100.0 + 3.0 * k * DT_MDL, 0.9) for k in range(1, 201)], 30.0, noise=3.0)
-  check("an OPENING gap after acquisition never arms",
-        not any(x[0] for x in r))
+  h, r = feedp(STEADY_P(100.0) + [(True, 100.0 + 3.0 * k * DT_MDL, 0.9) for k in range(1, 201)],
+               30.0, noise=3.0)
+  check("an OPENING gap never arms", not any(x[0] for x in r))
 
   # ---------------------------------------------------------------- physical-bound span (09-24)
   # Shortened 0.8 -> 0.45 s on operator decision (FINDINGS 35): the smallest span that still clears

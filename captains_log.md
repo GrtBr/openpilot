@@ -11,6 +11,31 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-24 — hook 11: the band samples every frame again, operator decision
+
+**Why.** Operator: "The band must take a sample all the time", arming unchanged (slope ≤ −5 with a
+lead present, plus the existing guards). The 09-22 prob gate skipped low-confidence frames and
+re-seeded on acquisition; a prob flicker while armed left the slope undefined and blocked release
+(FINDINGS 31a — bookmark 4, and the 15:54:13 hold, both ended by the driver's gas).
+
+**Change.** `far_lead.py`: `_BandSlope.update` samples every frame with a model range; no skip, no
+re-seed; `SEED_SIGMA` removed. `pf` / `confident` still computed, for information only. Arming code
+untouched.
+
+**Measured (replay c7+c8+cf+d7 vs `69f19ec86`).** Blind spot gone: armed without a slope 28.2 → 0 s,
+long blind holds 5 → 0. Cost: arms 56 → 70, arms on low-confidence leads 0 → 20, time at ≤ −1.0
+24.3 → 30.4 s, CAP 5.7 → 6.5 s — the section-30 acquisition false arms are back. A measured
+alternative (also require 2 s of model confidence to arm) had 0 low-confidence arms and no blind spot;
+not adopted, arming kept as it was. FINDINGS §36.
+
+**Tests.** `test_far_lead.py` 128 → 125 (re-seed tests replaced: samples at prob 0.01; no re-seed;
+blind-spot regression with 8-frame prob dips — slope undefined 92/100 frames on the old file, 0 now,
+and the hook releases; the acquisition-step arm stated as a KNOWN COST). `test_hooks.py` 68/68.
+
+**Deploy status: NOT deployed.** The car runs `69f19ec86`.
+
+---
+
 ## 2026-09-24 — DEPLOYED to comma4: hook 11 through `69f19ec86` (physical-bound span 0.45 s)
 
 Car parked, offroad; deployed over ssh (write + fsync + atomic rename). Takes the car from `758a4de57`

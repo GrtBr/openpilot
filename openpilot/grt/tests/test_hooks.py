@@ -404,14 +404,14 @@ def test_hook11_wiring():
 
   hooks._far_lead = fl.FarLeadPreBrake()
   hooks._far_lead_broken = False
-  # First confident frame is an ACQUISITION: it re-seeds the window to BAND_N samples centred on
-  # the model range, rather than appending one. A hook that never reaches the band leaves d empty.
+  # Since 2026-09-24 the band samples EVERY frame and never re-seeds: one call, one sample.
+  # A hook that never reaches the band leaves d empty.
   hooks.far_lead_candidates(SM11(x=100.0 + fl.MODEL_RANGE_OFFSET), 30.0, 0.0)
   d = hooks._far_lead.band.d
   check("far_lead_candidates actually reaches the band (hook 11 is not silently disabled)",
-        len(d) == fl.BAND_N)
+        len(d) == 1)
   check("...and the model range is converted by MODEL_RANGE_OFFSET, not passed raw",
-        bool(d) and abs(sum(d) / len(d) - 100.0) < 1e-6)
+        bool(d) and abs(d[-1] - 100.0) < 1e-6)
 
   # the band must keep running on frames where radar has no lead -- that is the whole reason the
   # model range is plumbed through at all
@@ -426,8 +426,8 @@ def test_hook11_wiring():
   hooks._far_lead = fl.FarLeadPreBrake()
   for _ in range(20):
     hooks.far_lead_candidates(SM11(x=120.0 + fl.MODEL_RANGE_OFFSET, prob=0.01), 30.0, 0.0)
-  check("a lead the model is not confident in never reaches the band",
-        not hooks._far_lead.band.d and not hooks._far_lead.band.confident)
+  check("a lead the model is not confident in STILL reaches the band (samples every frame, 09-24)",
+        len(hooks._far_lead.band.d) == 20 and not hooks._far_lead.band.confident)
 
   # empty leadsV3 must not raise into the planner, and must not fabricate a sample
   n = len(hooks._far_lead.band.d)
