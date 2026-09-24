@@ -626,8 +626,13 @@ def main():
 
   _h_sw, r = feed([(True, 110.0)] * 100 + [(True, 45.0)] * 100, 30.0)
   check("slot switch 110 -> 45 m is ONE new object, not a velocity", len(switches(r)) == 1)
-  check("...no phantom closing: v_filt stays above -5 m/s (the unguarded filter read ~-28)",
-        min(x[1] for x in r) > -5.0)
+  # STEP guard REMOVED 2026-09-24 (operator). The physical bound still catches a 65 m inward jump,
+  # but two frames late, so v_filt differentiates those two frames: about -7.4 m/s of phantom
+  # closing, bounded, instead of 0 with the guard or ~-28 with no guard at all.
+  check("...without the STEP guard the physical bound catches it within 3 frames",
+        bool(switches(r)) and switches(r)[0] - 100 <= 3)
+  check("...so phantom closing is brief and bounded: v_filt stays above -10 m/s",
+        min(x[1] for x in r) > -10.0)
   check("...never arms", not any(x[0] for x in r))
   sw = switches(r)[0] if switches(r) else None
   check("...on the switch frame, presence restarts for the new object",
@@ -639,8 +644,9 @@ def main():
         sw is not None and len(_h_sw.band.d) == fl.BAND_N and _h_sw.band.slope is not None)
 
   _, r = feed([(True, 45.0)] * 100 + [(True, 110.0)] * 100, 30.0)
-  check("reveal 45 -> 110 m (switch to a farther object): one new object, no phantom opening",
-        len(switches(r)) == 1 and max(x[1] for x in r) < 5.0)
+  check("reveal 45 -> 110 m (switch to a farther object): one new object, phantom opening bounded "
+        "(< +10 m/s; STEP guard removed 2026-09-24, the physical bound catches it)",
+        len(switches(r)) == 1 and max(x[1] for x in r) < 10.0)
 
   # 2026-09-22. This case USED to assert "never arms", and passed -- but only because feed()
   # started the band cold, so the slope first became defined mid-ramp with prev=None and the
@@ -690,10 +696,14 @@ def main():
 
   _, r = feed(STEADY(115.0) + [(True, 85.0 - 10.0 * i * DT_MDL) for i in range(60)], 30.0)
   first = next((i for i, x in enumerate(r) if x[0]), None)
-  need = 1
-  check("switch to an 85 m object that IS closing at 10 m/s: re-earns the arm on its own evidence, "
-        "no sooner than presence + hot persistence after the switch",
-        bool(switches(r)) and first is not None and first - switches(r)[0] >= need)
+  # STEP guard REMOVED 2026-09-24 (operator). A 30 m inward jump is now differentiated as closing
+  # until the physical bound fires 7 frames later; the band arms on the jump itself (it always
+  # could -- the band has no physical bound, FINDINGS 30a). On a REAL approach, which is what this
+  # is, that means braking starts on the jump instead of after re-earning the arm.
+  check("jump to an 85 m object that IS closing at 10 m/s: arms, and brakes past FLOOR",
+        first is not None and min((x[3] for x in r if x[3] is not None), default=0.0) < fl.FLOOR)
+  check("...and the physical bound still registers the jump as a new object",
+        bool(switches(r)))
 
   # ---------------------------------------------------------------- prob gate + re-seed (09-22)
   def feedp(samples, v_ego, vrel=-0.5, noise=0.0, seed=7):

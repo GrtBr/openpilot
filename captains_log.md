@@ -11,6 +11,35 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-24 — hook 11: STEP (jump) guard removed, operator decision
+
+**Why.** Operator: "Remove the jump guard. It needs refinement and I'll work on it later." At
+bookmark 3 the camera range jumped 119 → 102 m in two frames just before a real approach; the STEP
+guard correctly reset the closing-speed filter, which left the hook blind to the closing for the
+first second and holding FLOOR.
+
+**Change.** `far_lead.py`: the STEP test in `_RangeRateFilter.update` and its constants
+`STEP_GATE_M` / `STEP_FRAMES` are deleted. The **physical bound stays** and is now the only
+object-switch re-init. Restore from `7997662e0`.
+
+**Measured (replay c7+c8+cf+d7, pinned file vs this).** Arming unchanged — 56 arms either way (the
+band-slope gate never read `v_filt`). Severity: time at −1.0 or harder 16.6 → 23.6 s, at CAP
+4.1 → 5.8 s, mean −0.535 → −0.573. On d7 the arms that got harder all followed a camera jump before
+a real approach: bookmark 3's first 1.5 s −0.42 → −0.80; 15:26:46 −0.42 → −1.13; 15:38:29
+−0.40 → −1.01. The 14:39:31 false arm is unchanged.
+
+**Exposure accepted.** A jump to a nearer, *different* object that stays inside the physical bound is
+now read as closing and can reach CAP — the 2026-09-15 failure the guard was built for. A 65 m jump
+is still caught by the bound within 2 frames (phantom −7.4 m/s, bounded, no arm).
+
+**Tests.** `test_far_lead.py` 118 → 120: the three cases that asserted the guard's behaviour now
+state what happens without it (bound catches within 3 frames; phantom < ±10 m/s; a jump onto a real
+10 m/s close arms and brakes past FLOOR). `test_hooks.py` 68/68. FINDINGS §33.
+
+**Deploy status: NOT deployed.** The car runs `f239205be` (guard present).
+
+---
+
 ## 2026-09-23 — field test of `f239205be`: route 000001d7, four bookmarks
 
 Analysis only; no code changed. 13:45–16:07 SAST, 143 min, 77.9 min eligible. **45 armed spans

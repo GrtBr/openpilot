@@ -343,8 +343,17 @@ caught the genuinely real ones by the same accident: phantom velocity plus a lag
 THE FIX. A range change that motion cannot produce is a NEW OBJECT, not a velocity. On such a frame
 `_RangeRateFilter` re-initialises on the new range (`stepped` = True) and the hook restarts presence
 persistence, the hot streak and the anchor, so the new object must earn an arm on its own evidence.
-Two tests, in this order:
-  1. STEP: median of the last 3 raw samples vs the 3 before differs by > STEP_GATE_M (12 m). 30 m/s
+STEP GUARD REMOVED 2026-09-24, OPERATOR DECISION -- "it needs refinement and I'll work on it
+later". Only test 2 (the physical bound) is live. Restore from `7997662e0` (far_lead.py, the STEP block
+in `_RangeRateFilter.update` and the STEP_GATE_M / STEP_FRAMES constants). What removing it does,
+replayed on c7+c8+cf+d7 (FINDINGS 33): arming unchanged (56 arms either way, since the band-slope
+gate does not read v_filt); time at -1.0 or harder 16.6 -> 23.6 s, at CAP 4.1 -> 5.8 s. On d7 every
+arm that got harder followed a camera range jump that preceded a REAL approach (bookmark 3's first
+1.5 s -0.42 -> -0.80). The exposure is the case this was built for: a jump to a nearer, DIFFERENT
+object is differentiated into phantom closing and squared by a_req, up to CAP. On this car there
+is no radar -- every jump is a camera range jump.
+Originally two tests, in this order:
+  1. STEP (REMOVED): median of the last 3 raw samples vs the 3 before differs by > STEP_GATE_M (12 m). 30 m/s
      of real closing moves 4.5 m across those frames. One such frame is COASTED (not fed to the
      filter); STEP_FRAMES (2) consecutive frames re-initialise.
   2. PHYSICAL BOUND, for switches that slide over several frames instead of stepping: over
@@ -512,8 +521,6 @@ ALPHA = 0.10
 BETA = 0.003
 
 # ---- object-switch guards (module docstring, "OBJECT-SWITCH GUARDS", 2026-09-15) ----
-STEP_GATE_M = 12.0           # m -- median-of-3 level change over 3 frames that motion cannot produce
-STEP_FRAMES = 2              # consecutive frames beyond the gate = new object (the first is coasted)
 PHYS_WINDOW = 21             # samples -- two 5-sample medians at either end of this window...
 PHYS_SPAN_S = 0.8            # s -- ...whose centres are this far apart
 PHYS_MARGIN_M = 8.0          # m -- noise margin on that median change
@@ -702,17 +709,13 @@ class _RangeRateFilter:
     self.dt = dt
     self.x = None
     self.v = 0.0
-    self.recent = []        # last 6 raw samples, STEP test
     self.window = []        # last PHYS_WINDOW raw samples, physical-bound test
-    self.step_frames = 0
     self.stepped = False    # True on the frame the filter re-initialised on a new object
 
   def reset(self, x0: float) -> None:
     self.x = x0
     self.v = 0.0
-    self.recent = [x0]
     self.window = [x0]
-    self.step_frames = 0
 
   def _switch(self, z: float) -> float:
     self.reset(z)
@@ -730,17 +733,8 @@ class _RangeRateFilter:
       return self.v
     x_pred = self.x + self.v * self.dt
 
-    self.recent.append(z)
-    if len(self.recent) > 6:
-      self.recent.pop(0)
-    if len(self.recent) == 6 and abs(_median(self.recent[3:]) - _median(self.recent[:3])) > STEP_GATE_M:
-      self.step_frames += 1
-      if self.step_frames >= STEP_FRAMES:
-        return self._switch(z)
-      self.x = x_pred          # coast: do not differentiate a suspected discontinuity
-      return self.v
-    self.step_frames = 0
-
+    # STEP guard REMOVED 2026-09-24 (operator): see module docstring, "OBJECT-SWITCH GUARDS". Only
+    # the physical bound below re-initialises the filter now.
     self.window.append(z)
     if len(self.window) > PHYS_WINDOW:
       self.window.pop(0)
