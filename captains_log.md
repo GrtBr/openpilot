@@ -11,6 +11,26 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-24 — hook 11: physical-bound span 0.8 → 0.45 s, operator decision
+
+**Why.** Operator asked how short the physical check can be and still clear the arming events on
+route 000001d7, then chose 0.45 s. Sweep (FINDINGS §35): 0.45 s is the smallest span before closing
+trips hit genuine arms; at 0.40 s it trips on bookmark 3's 119 → 102 m camera step 0.3 s before the
+arm, resetting `v_filt` and undoing the jump-guard removal.
+
+**Change.** `far_lead.py`: `PHYS_WINDOW` 21 → 14, `PHYS_SPAN_S` 0.8 → 0.45 (two 5-sample medians,
+centres 9 frames apart). Margin (8 m) and open rate (15 m/s) unchanged.
+
+**Measured.** Trips with a lead > 50 m while moving: 0.70 → 1.19 per min on d7. Replay
+c7+c8+cf+d7 vs `758a4de57`: arms identical (56), time at ≤ −1.0 24.2 → 24.3 s, CAP unchanged.
+
+**Tests.** `test_far_lead.py` 125 → 128: span equals the median-centre separation; bookmark 3's real
+camera samples clear at 0.45 s and trip at 0.40 s. `test_hooks.py` 68/68.
+
+**Deploy status: NOT deployed.** The car runs `758a4de57` (0.8 s).
+
+---
+
 ## 2026-09-24 — DEPLOYED to comma4: hook 11 through `758a4de57`
 
 Car parked, offroad; deployed over ssh (file write + fsync + atomic rename). Takes the car from

@@ -780,6 +780,45 @@ def main():
   check("an OPENING gap after acquisition never arms",
         not any(x[0] for x in r))
 
+  # ---------------------------------------------------------------- physical-bound span (09-24)
+  # Shortened 0.8 -> 0.45 s on operator decision (FINDINGS 35): the smallest span that still clears
+  # the genuine arms on route 000001d7. The bound multiplies v_ego by PHYS_SPAN_S, so the constant
+  # must equal the real distance between the two 5-sample median centres.
+  check("PHYS_SPAN_S equals the median-centre separation of PHYS_WINDOW",
+        abs(fl.PHYS_SPAN_S - (fl.PHYS_WINDOW - 5) * DT_MDL) < 1e-9)
+  # Bookmark 3 (2026-09-23 14:48:08-11, route 000001d7): REAL camera range (m) and v_ego (m/s) at
+  # 20 Hz across the ~119 -> 102 m step just before a real approach. A synthetic step does NOT
+  # discriminate -- only the real noise does: 0.40 s trips on this and resets v_filt 0.3 s before
+  # the arm; 0.45 s must clear it.
+  BM3 = [(121.6, 27.5), (119.96, 27.5), (113.66, 27.5), (110.76, 27.47), (112.46, 27.47), 
+         (123.02, 27.47), (120.3, 27.47), (118.46, 27.48), (117.18, 27.47), (121.07, 27.48), 
+         (124.39, 27.49), (125.13, 27.49), (119.66, 27.49), (116.38, 27.5), (112.72, 27.48), 
+         (119.66, 27.48), (122.54, 27.48), (119.99, 27.48), (119.97, 27.48), (119.88, 27.49), 
+         (124.7, 27.51), (119.59, 27.52), (115.29, 27.51), (111.12, 27.51), (112.5, 27.5), 
+         (116.34, 27.49), (120.67, 27.48), (122.74, 27.49), (120.22, 27.48), (119.57, 27.49), 
+         (114.73, 27.49), (119.17, 27.49), (116.76, 27.49), (118.63, 27.48), (121.07, 27.47), 
+         (119.97, 27.47), (118.08, 27.47), (119.37, 27.49), (120.38, 27.49), (119.19, 27.49), 
+         (119.1, 27.51), (112.71, 27.51), (102.18, 27.51), (104.57, 27.51), (103.32, 27.5), 
+         (101.68, 27.49), (99.01, 27.47), (96.76, 27.44), (101.59, 27.44), (99.99, 27.44), 
+         (102.07, 27.44), (105.73, 27.46), (103.42, 27.47), (102.92, 27.49), (98.04, 27.51), 
+         (100.83, 27.51), (98.15, 27.51), (95.46, 27.53), (97.66, 27.49), (96.83, 27.47)]
+  def trips_on_bm3():
+    f = fl._RangeRateFilter(fl.ALPHA, fl.BETA)
+    hit = False
+    for z, v in BM3:
+      f.update(z, v)
+      hit = hit or f.stepped
+    return hit
+  check("bookmark 3's real camera step does not trip the physical bound at the shipped span",
+        not trips_on_bm3())
+  saved = (fl.PHYS_WINDOW, fl.PHYS_SPAN_S)
+  try:
+    fl.PHYS_WINDOW, fl.PHYS_SPAN_S = 13, 0.40
+    check("...whereas one frame shorter (0.40 s) it does -- 0.45 s is the floor on this drive",
+          trips_on_bm3())
+  finally:
+    fl.PHYS_WINDOW, fl.PHYS_SPAN_S = saved
+
   # ---------------------------------------------------------------- continuous v_filt (09-24)
   # Operator, 2026-09-24: v_filt must have a reading on every frame, not only while a lead is
   # present. The filter now runs at the top of step() like the band: fed dRel while present and the

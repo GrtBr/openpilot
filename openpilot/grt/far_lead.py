@@ -357,7 +357,7 @@ Originally two tests, in this order:
      of real closing moves 4.5 m across those frames. One such frame is COASTED (not fed to the
      filter); STEP_FRAMES (2) consecutive frames re-initialise.
   2. PHYSICAL BOUND, for switches that slide over several frames instead of stepping: over
-     PHYS_SPAN_S (0.8 s, two 5-sample medians) the range may not close faster than ego speed (a
+     PHYS_SPAN_S (0.8 s then, 0.45 s since 2026-09-24; two 5-sample medians) the range may not close faster than ego speed (a
      lead cannot reverse) or open faster than PHYS_OPEN_MPS (15 m/s), each + PHYS_MARGIN_M (8 m).
 A single-frame gate was measured and rejected: at 73-100 m ordinary |frame-to-frame| dRel changes
 have sd 3.8 m and p99 12.4 m, so "> 8 m in one frame" fires on several percent of normal frames.
@@ -521,8 +521,13 @@ ALPHA = 0.10
 BETA = 0.003
 
 # ---- object-switch guards (module docstring, "OBJECT-SWITCH GUARDS", 2026-09-15) ----
-PHYS_WINDOW = 21             # samples -- two 5-sample medians at either end of this window...
-PHYS_SPAN_S = 0.8            # s -- ...whose centres are this far apart
+PHYS_WINDOW = 14             # samples -- two 5-sample medians at either end of this window...
+PHYS_SPAN_S = 0.45           # s -- ...whose centres are this far apart: (PHYS_WINDOW - 5) * DT_MDL.
+                             # Was 21 / 0.8 s until 2026-09-24; shortened on operator decision to the
+                             # smallest span that still clears the genuine arms on route 000001d7
+                             # (FINDINGS 35). 0.40 s trips on bookmark 3's 119 -> 102 m jump 0.3 s
+                             # before the arm and would undo the STEP-guard removal. Keep the two in
+                             # step: the bound is v_ego * PHYS_SPAN_S, so a mismatch misjudges speed.
 PHYS_MARGIN_M = 8.0          # m -- noise margin on that median change
 PHYS_OPEN_MPS = 15.0         # m/s -- a lead does not pull away faster than this; faster = farther object
 
