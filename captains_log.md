@@ -11,6 +11,29 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-24 — hook 11: v_filt runs on every frame, operator decision
+
+**Why.** Operator: v_filt must always have a reading, not only while a lead is present.
+
+**Change.** `far_lead.py`: `_RangeRateFilter` is created once in `__init__` (like the band), updated at
+the top of `step()` before every early return, fed `dRel` when a lead is present and the model range
+(`dRel_model`) otherwise — never the absent frame's `dRel` = 0.0 struct default; with neither, it
+coasts. The fresh-lock `filt.reset()` is gone (it would discard exactly that history). `self.v_filt`
+is always a float.
+
+**Measured (replay c7+c8+cf+d7 vs `9770a62ed`).** Arming identical (56 arms). Near-neutral severity:
+time at ≤ −1.0 23.6 → 24.2 s, at CAP 5.8 → 5.7 s (`BETA` 0.003 is slow). With no lead the reading
+sits near zero (median +0.15, p5–p95 −3.9..+4.5 m/s). Per arm, small and both ways: bookmark 3
+slightly firmer (first 1.5 s −0.80 → −0.85); the 14:39:31 false arm harder (−0.73 → −1.05) because
+the filter now integrates the model range settling onto a new car. FINDINGS §34.
+
+**Tests.** `test_far_lead.py` 120 → 125 (reading on absent frames; fed from model range; absent 0.0
+never fed; survives `_reset()`; coasts with no input). `test_hooks.py` 68/68.
+
+**Deploy status: NOT deployed.** The car runs `f239205be`.
+
+---
+
 ## 2026-09-24 — hook 11: STEP (jump) guard removed, operator decision
 
 **Why.** Operator: "Remove the jump guard. It needs refinement and I'll work on it later." At

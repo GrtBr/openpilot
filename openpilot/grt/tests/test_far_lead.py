@@ -780,6 +780,36 @@ def main():
   check("an OPENING gap after acquisition never arms",
         not any(x[0] for x in r))
 
+  # ---------------------------------------------------------------- continuous v_filt (09-24)
+  # Operator, 2026-09-24: v_filt must have a reading on every frame, not only while a lead is
+  # present. The filter now runs at the top of step() like the band: fed dRel while present and the
+  # model range otherwise, created once, never reset by _reset().
+  h = new_hook()
+  for i in range(200):                     # a lead closing at 6 m/s, radar-present throughout
+    d = 110.0 - 6.0 * i * DT_MDL
+    h.step(True, d, -6.0, 30.0, True, True, False, 1.0, d, 0.9)
+  v_before = h.v_filt
+  d = 110.0 - 6.0 * 200 * DT_MDL
+  for i in range(20):                      # lead absent for 1 s: dRel is the 0.0 struct default
+    d -= 6.0 * DT_MDL
+    h.step(False, 0.0, 0.0, 30.0, True, True, False, 1.0, d, 0.9)
+  check("v_filt has a reading on frames with no lead present",
+        isinstance(h.v_filt, float))
+  check("...fed from the model range, so it keeps tracking the closing through the gap",
+        -8.0 < h.v_filt < -4.0 and abs(h.v_filt - v_before) < 2.0)
+  check("...and the absent frame's dRel 0.0 is never fed (no 100 m phantom collapse)",
+        h.v_filt > -10.0)
+
+  f0 = h.filt
+  h.step(True, d, -6.0, 30.0, True, True, True, 1.0, d, 0.9)     # driver input -> _reset()
+  check("the filter survives _reset(): same object, history kept across an eligibility flicker",
+        h.filt is f0 and abs(h.v_filt - v_before) < 2.0)
+
+  v0 = h.v_filt
+  h.step(False, 0.0, 0.0, 30.0, True, True, False, 1.0, None, None)
+  check("no lead and no model range: the filter coasts, v_filt unchanged",
+        h.v_filt == v0)
+
   check("ARM_MIN_DIST 65 m ships only with the guards (73 m is the guards-only rollback)",
         fl.ARM_MIN_DIST == 65.0 and hasattr(fl._RangeRateFilter, "_switch"))
 

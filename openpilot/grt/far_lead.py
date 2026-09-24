@@ -874,10 +874,13 @@ class FarLeadPreBrake:
     # Created HERE, not in _reset(): the band is continuous history of the road and must survive
     # every release, dropout and eligibility change. See _BandSlope.
     self.band = _BandSlope()
+    # Also HERE, not in _reset(), since 2026-09-24 (operator): the range-rate filter now runs on
+    # EVERY frame, so v_filt always has a reading. See the top of step().
+    self.filt = _RangeRateFilter(ALPHA, BETA)
+    self.v_filt = 0.0
     self._reset()
 
   def _reset(self) -> None:
-    self.filt = _RangeRateFilter(ALPHA, BETA)
     self.present_s = 0.0
     self.absent_s = 0.0
     self.armed = False
@@ -894,6 +897,15 @@ class FarLeadPreBrake:
     # each flicker. `dRel_model` is None only if the caller could not read modelV2, in which case
     # the gate simply never reaches a crossing and this hook stays inert.
     self.band.update(dRel_model, prob_model)
+    # The range-rate filter, likewise on EVERY frame and before every early return (operator,
+    # 2026-09-24: "v_filt ... have a reading not only if lead is present"). It is fed the lead's
+    # dRel while one is present, and the model's own range otherwise -- NEVER the absent frame's
+    # dRel, which is the struct default 0.0 and would read as a 100 m collapse. On this car the two
+    # are the same camera estimate (leadOne is radard's vision fallback; there is no radar), so the
+    # series is continuous across presence changes. No model range either: coast, keep v.
+    z = dRel if present else dRel_model
+    if z is not None:
+      self.v_filt = self.filt.update(z, v_ego)
     if self.rearm_hold_s > 0.0:
       self.rearm_hold_s = max(0.0, self.rearm_hold_s - DT_MDL)
 
@@ -901,12 +913,12 @@ class FarLeadPreBrake:
       self._reset()
       return []
 
+    v_filt = self.v_filt             # always a reading now; see the top of step()
     if present:
-      if self.present_s == 0.0 and not self.armed:
-        self.filt.reset(dRel)          # fresh lock -- stale filter state would mislead
+      # No fresh-lock reset any more: the filter has been running on the model range the whole
+      # time, and resetting it here would throw exactly that history away.
       self.present_s += DT_MDL
       self.absent_s = 0.0
-      v_filt = self.filt.update(dRel, v_ego)
       if self.filt.stepped:
         # the lead slot switched objects: nothing learned about the old one applies to the new one.
         # The BAND is deliberately not touched -- it tracks the model's range series, which is
@@ -916,7 +928,6 @@ class FarLeadPreBrake:
     else:
       self.absent_s += DT_MDL
       self.present_s = 0.0
-      v_filt = None
 
     if not self.armed:
       # ---- ARM: the band-slope gate. 2026-09-22, replacing the presence/hot/ARM_MIN_DIST gate.
