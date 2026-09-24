@@ -11,6 +11,26 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-24 — DEPLOYED to comma4: hook 11 through `69f19ec86` (physical-bound span 0.45 s)
+
+Car parked, offroad; deployed over ssh (write + fsync + atomic rename). Takes the car from `758a4de57`
+to `69f19ec86`: `PHYS_WINDOW` 21 → 14, `PHYS_SPAN_S` 0.8 → 0.45. Only `grt/far_lead.py` and
+`grt/tests/test_far_lead.py` differ; no cereal.
+
+- Backup: `/data/grt_backup_20260924_pre_69f19ec86/` (= `758a4de57`: far_lead `3af700cf…`,
+  test_far_lead `fc35a102…`). Restore = copy back + reboot.
+- On device before reboot: `test_far_lead` 128/128, `test_hooks` 68/68, schema 34/34.
+- After reboot, read back from flash: far_lead `669a12ba…`, test_far_lead `463e5ba4…` = local HEAD,
+  0 NUL bytes. Live import: `PHYS_WINDOW` 14, `PHYS_SPAN_S` 0.45 (consistent), STEP guard absent,
+  `v_filt` a float.
+- plannerd steady on one PID; swaglog since boot: 0 error / traceback / hook-11 lines.
+
+**Watch on the next drive.** The check now trips about 70% more often with a lead beyond 50 m
+(0.70 → 1.19/min on 09-23). Replay says no command changes; the 0.45 s choice rests on one drive,
+so re-run `phys_sweep.py` on the next one.
+
+---
+
 ## 2026-09-24 — hook 11: physical-bound span 0.8 → 0.45 s, operator decision
 
 **Why.** Operator asked how short the physical check can be and still clear the arming events on
