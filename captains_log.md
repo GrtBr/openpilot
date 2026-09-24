@@ -11,6 +11,29 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-24 — DEPLOYED to comma4: hook 11 through `758a4de57`
+
+Car parked, offroad; deployed over ssh (file write + fsync + atomic rename). Takes the car from
+`f239205be` to `758a4de57`: the STEP (jump) guard removed, and the range-rate filter running on every
+frame. Only `grt/far_lead.py` and `grt/tests/test_far_lead.py` differ; no cereal.
+
+- Backup: `/data/grt_backup_20260924_pre_758a4de57/` (far_lead `588dc6f4…`, test_far_lead `0c9b66fb…`
+  — i.e. `f239205be`). Restore = copy back + reboot.
+- On device before reboot: `test_far_lead` 125/125, `test_hooks` 68/68, schema 34/34.
+- After reboot, read back from flash: far_lead `3af700cf…`, test_far_lead `fc35a102…` = local HEAD,
+  0 NUL bytes.
+- Live import: STEP constants gone, physical bound kept (21 / 15.0); `v_filt` is a float from
+  construction; the filter survives `_reset()`; `STOP_MARGIN_FRAC` 0.5, `PROB_GATE` 0.5, `SEED_SIGMA` 3.0.
+- plannerd steady on one PID; swaglog since boot: no tracebacks, nothing from hook 11 (one unrelated
+  uploader `KeyError('url')`).
+
+**Watch on the next drive.** Firmer braking after camera range jumps (replay: time at ≤ −1.0
+16.6 → 24.2 s across four drives). Good when the jump precedes a real approach (bookmark 3 first
+1.5 s −0.42 → −0.85); the cost is a jump onto a nearer DIFFERENT object reading as closing, up to
+CAP, and false arms like 14:39:31 going harder (−0.73 → −1.05).
+
+---
+
 ## 2026-09-24 — hook 11: v_filt runs on every frame, operator decision
 
 **Why.** Operator: v_filt must always have a reading, not only while a lead is present.
