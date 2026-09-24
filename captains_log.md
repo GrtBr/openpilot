@@ -11,6 +11,31 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-24 — hook 11: range-rate filter gains 0.10/0.003 → 0.20/0.0222, operator decision
+
+**Why.** `v_filt` took 1.8 s to reach 63% of a clean close. The operator asked for the gain sweep, then
+for α 0.20 on the other three drives, then to adopt it.
+
+**Change.** `far_lead.py`: `ALPHA` 0.10 → 0.20, `BETA` 0.003 → 0.0222 (Benedict–Bordner pair).
+
+**Measured (c7+c8+cf+d7, FINDINGS §37).** Sustained closing read 0.7–1.5 s sooner (median lag
+0.1–0.4 s; 62/62 episodes within 2 s vs 50/62). Time at ≤ −1.0 30.4 → 28.3 s; at CAP 6.5 → 2.8 s —
+a fast filter follows camera settling transients instead of integrating them (bookmark 2's false CAP
+0.85 → 0.35 s). Cost: false closing on steady following 2–4× more often (d7 4.4 → 16.7%).
+
+**Accepted exposures.** A 65 m jump spikes `v_filt` to ±51 m/s (was ±7.4) for 2 frames before the
+physical bound resets it; the command only follows at `JERK_ARM` (≤ 0.15 dip, pinned by test). If the
+lead drops out on exactly such a frame, `last_known` holds the spike up to 1 s and the command walks
+to CAP (was −1.64): pre-existing, now worse, rare, not fixed.
+
+**Tests.** `test_far_lead.py` 125 → 129 (gain pair; 63% in ≤ 0.6 s; spike bounded by `JERK_ARM` and
+back to FLOOR; two jump tests restated). `test_hooks.py` 68/68.
+
+**Deploy status: NOT deployed.** The car runs `69f19ec86`; `94c95234a` (band every frame) is also
+still undeployed.
+
+---
+
 ## 2026-09-24 — hook 11: the band samples every frame again, operator decision
 
 **Why.** Operator: "The band must take a sample all the time", arming unchanged (slope ≤ −5 with a

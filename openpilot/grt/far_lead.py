@@ -517,8 +517,16 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import Longi
 from openpilot.selfdrive.controls.lib.drive_helpers import should_stop
 
 # ---- filter tuning (see module docstring for how these were chosen) ----
-ALPHA = 0.10
-BETA = 0.003
+# 2026-09-24, operator decision (FINDINGS 37): 0.10 / 0.003 -> 0.20 / 0.0222, a Benedict-Bordner pair
+# (BETA = ALPHA**2 / (2 - ALPHA)). The old pair sat below that line and took 1.8 s to reach 63% of
+# a clean close. Swept over routes c7, c8, cf and d7: sustained closing read 0.7-1.5 s sooner
+# (median lag 0.1-0.4 s, 62/62 episodes within 2 s vs 50/62), time at <= -1.0 30.4 -> 28.3 s and at
+# CAP 6.5 -> 2.8 s -- a fast filter follows a camera-range settling transient and recovers with it
+# instead of integrating it into a long, large reading. Cost: v_filt reads false closing faster than
+# 3 m/s on 2-4x more steady-following frames (4.4 -> 16.7% on d7); arming never reads v_filt and
+# JERK_ARM absorbs short spikes. 0.15 drove two c8 arms to CAP that 0.20 did not.
+ALPHA = 0.20
+BETA = 0.0222
 
 # ---- object-switch guards (module docstring, "OBJECT-SWITCH GUARDS", 2026-09-15) ----
 PHYS_WINDOW = 14             # samples -- two 5-sample medians at either end of this window...

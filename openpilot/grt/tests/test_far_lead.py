@@ -635,8 +635,10 @@ def main():
   # closing, bounded, instead of 0 with the guard or ~-28 with no guard at all.
   check("...without the STEP guard the physical bound catches it within 3 frames",
         bool(switches(r)) and switches(r)[0] - 100 <= 3)
-  check("...so phantom closing is brief and bounded: v_filt stays above -10 m/s",
-        min(x[1] for x in r) > -10.0)
+  # With ALPHA/BETA 0.20/0.0222 (2026-09-24, FINDINGS 37) those two frames read a LARGE phantom --
+  # about -51 m/s on this 65 m jump, against -7.4 with the old 0.10/0.003 -- but only for them.
+  check("...so the phantom lasts at most 2 frames before v_filt is reset",
+        all(x[1] == 0.0 for x in r[switches(r)[0]:switches(r)[0] + 3]) if switches(r) else False)
   check("...never arms", not any(x[0] for x in r))
   sw = switches(r)[0] if switches(r) else None
   check("...on the switch frame, presence restarts for the new object",
@@ -648,9 +650,9 @@ def main():
         sw is not None and len(_h_sw.band.d) == fl.BAND_N and _h_sw.band.slope is not None)
 
   _, r = feed([(True, 45.0)] * 100 + [(True, 110.0)] * 100, 30.0)
-  check("reveal 45 -> 110 m (switch to a farther object): one new object, phantom opening bounded "
-        "(< +10 m/s; STEP guard removed 2026-09-24, the physical bound catches it)",
-        len(switches(r)) == 1 and max(x[1] for x in r) < 10.0)
+  check("reveal 45 -> 110 m (switch to a farther object): one new object, caught by the physical "
+        "bound within 3 frames (STEP guard removed 2026-09-24)",
+        len(switches(r)) == 1 and switches(r)[0] - 100 <= 3)
 
   # 2026-09-22. This case USED to assert "never arms", and passed -- but only because feed()
   # started the band cold, so the slope first became defined mid-ramp with prev=None and the
@@ -808,6 +810,35 @@ def main():
           trips_on_bm3())
   finally:
     fl.PHYS_WINDOW, fl.PHYS_SPAN_S = saved
+
+  # ---------------------------------------------------------------- filter gains (09-24)
+  # ALPHA/BETA 0.20/0.0222 (FINDINGS 37): a Benedict-Bordner pair, much faster than 0.10/0.003.
+  check("filter gains are the Benedict-Bordner pair BETA = ALPHA^2 / (2 - ALPHA)",
+        abs(fl.BETA - fl.ALPHA ** 2 / (2 - fl.ALPHA)) < 1e-3)
+  f = fl._RangeRateFilter(fl.ALPHA, fl.BETA)
+  for _ in range(200):
+    f.update(120.0, 27.5)
+  t63 = next((k * DT_MDL for k in range(1, 400) if f.update(120.0 - 10.0 * k * DT_MDL, 27.5) <= -6.3), None)
+  check(f"a clean 10 m/s close reaches 63% within 0.6 s (was 1.8 s with 0.10/0.003; now {t63} s)",
+        t63 is not None and t63 <= 0.6)
+  # A faster filter spikes harder on a jump before the physical bound resets it. What must stay
+  # true is that the COMMAND can only follow at JERK_ARM, so a 2-frame spike moves it by <= 0.15.
+  h = new_hook()
+  for i in range(fl.BAND_N + fl.SLOPE_N + 20):
+    h.step(True, 120.0, -2.0, 30.0, True, True, False, 0.0, 120.0, 0.9)
+  for k in range(60):
+    d = 120.0 - 8.0 * k * DT_MDL
+    h.step(True, d, -2.0, 30.0, True, True, False, 0.0, d, 0.9)
+  before = h.last_emitted
+  cm = []
+  for k in range(20):                       # 30 m inward jump onto a nearer object
+    o = h.step(True, d - 30.0, -2.0, 30.0, True, True, False, 0.0, d - 30.0, 0.9)
+    if o:
+      cm.append(o[0][0])
+  check("armed, then a 30 m inward jump: the spike moves the command by at most 2 x JERK_ARM x DT",
+        h.armed is not None and cm and min(cm) >= before - 2 * fl.JERK_ARM * DT_MDL - 1e-6)
+  check("...and once the physical bound resets v_filt the command returns to FLOOR",
+        cm and abs(cm[-1] - fl.FLOOR) < 1e-9)
 
   # ---------------------------------------------------------------- continuous v_filt (09-24)
   # Operator, 2026-09-24: v_filt must have a reading on every frame, not only while a lead is
