@@ -11,6 +11,30 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-25 — hook 11: gains reverted, lead-lost 0.5 s, AND slope gate (operator decision)
+
+**Changes (`far_lead.py`).**
+1. `ALPHA`/`BETA` 0.20/0.0222 → **0.10/0.003** (revert of `4408a9758`). On route 000001e4 the fast pair
+   made the command pulse FLOOR → −0.7…−1.9 → FLOOR (10 pulses vs 3); rescored by needed deceleration
+   it also braked more on unnecessary arms and less on extreme ones (FINDINGS §39–40).
+2. `LEAD_LOST_S` 1.0 → **0.5**: release if the lead is gone longer than 0.5 s.
+3. **AND gate**: arming needs both the band slope and the raw 40-sample OLS slope of the model range
+   ≤ `ARM_SLOPE`. `_BandSlope` gains `slope_raw`. The raw slope cannot read an outward jump or a
+   flickering lead as closing.
+
+**Measured (needed-deceleration scorecard, c7+c8+cf+d7+e4, `3b7299117` vs this).** Arms 77 → 69;
+unnecessary arms 24 → 20; braking on them −116 → −101 km/h (99.7 → 90.8 s); needed approaches 17/17
+and extreme 4/4 covered by both; mean command on extreme arms −0.95 → −1.11. Today's bookmark 4 22 s
+hold is removed by the AND gate (0.5 s lead-lost alone would not have: its longest gap was 0.50 s).
+
+**Tests.** `test_far_lead.py` 130 → 136: gain pair and ~1.8 s lag pinned; AND gate — an outward
+45 → 110 m jump no longer arms (the deployed file arms at frame 204), a genuine close still arms;
+lead-lost — 0.45 s dropout keeps the arm, 0.6 s releases. `test_hooks.py` 68/68.
+
+**Deploy status: NOT deployed.** The car runs `3b7299117`.
+
+---
+
 ## 2026-09-25 — DEPLOYED to comma4: hook 11 through `3b7299117`
 
 Car parked, offroad; deployed over ssh (write + fsync + atomic rename). Takes the car from `69f19ec86`

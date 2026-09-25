@@ -594,8 +594,9 @@ def main():
              if "hot_a_req_for(" in ln and not ln.lstrip().startswith(("#", "def "))
              and not ln.lstrip().startswith(("ARM", "HOT", "THRESH"))
              and '"' not in ln and "'" not in ln and ln.strip().startswith(("if", "return", "self", "a_req"))])
-  check("arming is a LEVEL test on the band slope, not a crossing",
-        "if self.band.slope is None or self.band.slope > ARM_SLOPE:" in _src
+  check("arming is a LEVEL test on BOTH the band slope and the raw slope (AND gate), not a crossing",
+        "self.band.slope is None or self.band.slope > ARM_SLOPE" in _src
+        and "self.band.slope_raw is None or self.band.slope_raw > ARM_SLOPE" in _src
         and "self.band.crossed_arm" not in _src)
   check("the RELEASE is still a crossing (a level release would re-fire every frame)",
         _src.count("self.band.crossed_release") == 1)
@@ -821,16 +822,17 @@ def main():
   finally:
     fl.PHYS_WINDOW, fl.PHYS_SPAN_S = saved
 
-  # ---------------------------------------------------------------- filter gains (09-24)
-  # ALPHA/BETA 0.20/0.0222 (FINDINGS 37): a Benedict-Bordner pair, much faster than 0.10/0.003.
-  check("filter gains are the Benedict-Bordner pair BETA = ALPHA^2 / (2 - ALPHA)",
-        abs(fl.BETA - fl.ALPHA ** 2 / (2 - fl.ALPHA)) < 1e-3)
+  # ---------------------------------------------------------------- filter gains
+  # 0.20/0.0222 (09-24) was reverted to 0.10/0.003 on 09-25 (FINDINGS 39-41): the fast pair made the
+  # command pulse. Pin the pair and its lag, so a future retune is a deliberate, visible change.
+  check("filter gains are ALPHA 0.10 / BETA 0.003 (reverted 2026-09-25)",
+        fl.ALPHA == 0.10 and fl.BETA == 0.003)
   f = fl._RangeRateFilter(fl.ALPHA, fl.BETA)
   for _ in range(200):
     f.update(120.0, 27.5)
   t63 = next((k * DT_MDL for k in range(1, 400) if f.update(120.0 - 10.0 * k * DT_MDL, 27.5) <= -6.3), None)
-  check(f"a clean 10 m/s close reaches 63% within 0.6 s (was 1.8 s with 0.10/0.003; now {t63} s)",
-        t63 is not None and t63 <= 0.6)
+  check(f"a clean 10 m/s close reaches 63% in about 1.8 s with these gains (now {t63} s)",
+        t63 is not None and 1.5 <= t63 <= 2.1)
   # A faster filter spikes harder on a jump before the physical bound resets it. What must stay
   # true is that the COMMAND can only follow at JERK_ARM, so a 2-frame spike moves it by <= 0.15.
   h = new_hook()
@@ -849,6 +851,43 @@ def main():
         h.armed is not None and cm and min(cm) >= before - 2 * fl.JERK_ARM * DT_MDL - 1e-6)
   check("...and once the physical bound resets v_filt the command returns to FLOOR",
         cm and abs(cm[-1] - fl.FLOOR) < 1e-9)
+
+  # ---------------------------------------------------------------- AND gate + lead lost (09-25)
+  # An OUTWARD jump inflates the band's stdev, so band = mean - 2 stdev falls and its slope goes below
+  # ARM_SLOPE while the range is actually opening. The pre-09-25 single-slope gate armed on this at
+  # frame 105 (FINDINGS 30a); the raw slope is positive, so the AND gate must not.
+  h = new_hook(); armed_any = False
+  for i, d in enumerate([45.0] * 200 + [110.0] * 150):
+    h.step(True, d, -0.5, 30.0, True, True, False, 1.0, d, 0.9)
+    armed_any = armed_any or h.armed
+  check("AND gate: an outward range jump (45 -> 110 m) does not arm, though the band slope dips below -5",
+        not armed_any)
+  # ...while a genuine close, where both slopes fall, still arms.
+  h = new_hook(); armed_at = None
+  seq = [120.0] * (fl.BAND_N + fl.SLOPE_N + 20) + [120.0 - 10.0 * k * DT_MDL for k in range(80)]
+  for i, d in enumerate(seq):
+    h.step(True, d, -10.0, 30.0, True, True, False, 1.0, d, 0.9)
+    if h.armed and armed_at is None:
+      armed_at = i
+  check("AND gate: a genuine 10 m/s close still arms", armed_at is not None)
+  check("...and the raw slope was at or below ARM_SLOPE when it did",
+        armed_at is not None and h.band.slope_raw is not None and h.band.slope_raw <= fl.ARM_SLOPE)
+
+  # LEAD_LOST_S 0.5 (was 1.0): an armed hook rides a short dropout on last_known, but not a long one.
+  def armed_then_gap(gap_frames):
+    h = new_hook()
+    for d in seq:
+      h.step(True, d, -10.0, 30.0, True, True, False, 1.0, d, 0.9)
+    was = h.armed
+    dz = seq[-1]
+    for k in range(gap_frames):
+      h.step(False, 0.0, 0.0, 30.0, True, True, False, 1.0, dz, 0.9)
+    return was, h.armed
+  check("LEAD_LOST_S is 0.5 s", fl.LEAD_LOST_S == 0.5)
+  w, a = armed_then_gap(9)
+  check("a 0.45 s lead dropout while armed does not release", w and a)
+  w, a = armed_then_gap(12)
+  check("a 0.6 s lead dropout while armed releases", w and not a)
 
   # ---------------------------------------------------------------- continuous v_filt (09-24)
   # Operator, 2026-09-24: v_filt must have a reading on every frame, not only while a lead is

@@ -518,16 +518,14 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import Longi
 from openpilot.selfdrive.controls.lib.drive_helpers import should_stop
 
 # ---- filter tuning (see module docstring for how these were chosen) ----
-# 2026-09-24, operator decision (FINDINGS 37): 0.10 / 0.003 -> 0.20 / 0.0222, a Benedict-Bordner pair
-# (BETA = ALPHA**2 / (2 - ALPHA)). The old pair sat below that line and took 1.8 s to reach 63% of
-# a clean close. Swept over routes c7, c8, cf and d7: sustained closing read 0.7-1.5 s sooner
-# (median lag 0.1-0.4 s, 62/62 episodes within 2 s vs 50/62), time at <= -1.0 30.4 -> 28.3 s and at
-# CAP 6.5 -> 2.8 s -- a fast filter follows a camera-range settling transient and recovers with it
-# instead of integrating it into a long, large reading. Cost: v_filt reads false closing faster than
-# 3 m/s on 2-4x more steady-following frames (4.4 -> 16.7% on d7); arming never reads v_filt and
-# JERK_ARM absorbs short spikes. 0.15 drove two c8 arms to CAP that 0.20 did not.
-ALPHA = 0.20
-BETA = 0.0222
+# 0.20 / 0.0222 from 2026-09-24 to 09-25 (FINDINGS 37), REVERTED here on operator decision. On the
+# first drive with it (route 000001e4) the fast filter followed the camera's range noise and the
+# command pulsed FLOOR -> -0.7..-1.9 -> FLOOR: 10 pulses vs 3 with 0.10/0.003 over the same armed
+# time (FINDINGS 39). Rescored by the deceleration each arm needed (FINDINGS 40), the old pair also
+# braked less on unnecessary arms (-109 vs -116 km/h commanded) and harder on extreme ones (mean
+# -1.11 vs -0.95). The cost is lag: 1.8 s to reach 63% of a clean close.
+ALPHA = 0.10
+BETA = 0.003
 
 # ---- object-switch guards (module docstring, "OBJECT-SWITCH GUARDS", 2026-09-15) ----
 PHYS_WINDOW = 14             # samples -- two 5-sample medians at either end of this window...
@@ -674,7 +672,9 @@ RE_ARM_HOLD_S = 1.0          # s -- after a hand-off to stock, do not re-arm for
                              # so without this the hook would re-arm on the very next frame and
                              # oscillate arm/hand-off for as long as stock kept braking.
 RELEASE_DIST = 20.0          # m -- absolute backstop regardless of stock
-LEAD_LOST_S = 1.0            # s -- release if the lead itself is lost this long
+LEAD_LOST_S = 0.5            # s -- release if the lead itself is lost longer than this. 1.0 until
+                             # 2026-09-25 (operator): an armed hook rode dropouts on frozen last_known
+                             # values; lead gaps while armed are median 0.15-0.25 s. FINDINGS 41.
 
 # ---- band-slope arming gate (2026-09-22) -- see module docstring "BAND-SLOPE GATE" ----
 BAND_N = 100                 # samples (5.0 s) in the mean/stdev window on dRel_model
@@ -797,6 +797,7 @@ class _BandSlope:
     self.d = []                 # dRel_model samples, most recent last
     self.b = []                 # band samples, most recent last
     self.slope = None           # current band slope, m/s (None while warming up)
+    self.slope_raw = None       # OLS slope of the last SLOPE_N raw model ranges, m/s (the AND gate)
     self.prev = None            # last non-None slope, for crossing detection
     self.crossed_arm = False
     self.crossed_release = False
@@ -853,6 +854,13 @@ class _BandSlope:
       if len(self.b) == SLOPE_N:
         bm = sum(self.b) / SLOPE_N
         s = (sum((i - _SLOPE_XB) * (v - bm) for i, v in enumerate(self.b)) / _SLOPE_SXX) / DT_MDL
+        # The AND gate's second slope: the same OLS over the same SLOPE_N window, but on the RAW
+        # model ranges rather than the band. The band's -BAND_K*stdev term reacts to the MAGNITUDE
+        # of a range change, not its direction, so an outward jump or a flickering lead can drive the
+        # band slope below ARM_SLOPE while the range is steady or opening; the raw slope cannot.
+        raw = self.d[-SLOPE_N:]
+        rm = sum(raw) / SLOPE_N
+        self.slope_raw = (sum((i - _SLOPE_XB) * (x - rm) for i, x in enumerate(raw)) / _SLOPE_SXX) / DT_MDL
 
     p = self.prev
     # CROSSINGS, not levels: a level test re-arms every frame the slope stays past the bar, and
@@ -947,7 +955,13 @@ class FarLeadPreBrake:
       # a level test does add is re-arming immediately after a release that leaves the slope still
       # past the bar, which the slope release itself cannot do (it fires at slope > RELEASE_SLOPE)
       # but a `stock_min` hand-off can. See RE_ARM_HOLD_S.
-      if self.band.slope is None or self.band.slope > ARM_SLOPE:
+      # AND GATE (2026-09-25, operator; FINDINGS 41): BOTH the band slope and the raw range slope must
+      # be at or below ARM_SLOPE. The band arms early (its stdev term anticipates a close); the raw
+      # slope confirms the range itself is falling. Replayed over five drives it removed 10 of 77
+      # arms -- 7 junk (outward jumps, faster leads, a flickering lead) and 3 mild real ones -- and
+      # delayed none of the 67 it kept.
+      if (self.band.slope is None or self.band.slope > ARM_SLOPE
+          or self.band.slope_raw is None or self.band.slope_raw > ARM_SLOPE):
         self.arm_confirm = 0
         return []
       if self.rearm_hold_s > 0.0:
