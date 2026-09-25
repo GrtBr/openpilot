@@ -11,6 +11,33 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-25 — DEPLOYED to comma4: hook 11 through `3b7299117`
+
+Car parked, offroad; deployed over ssh (write + fsync + atomic rename). Takes the car from `69f19ec86`
+to `3b7299117`, i.e. three changes at once:
+- `94c95234a` — the band samples every frame (no prob gate, no re-seed); arming unchanged.
+- `4408a9758` — range-rate filter gains 0.10/0.003 → 0.20/0.0222.
+- `3b7299117` — FLOOR −0.40 → −0.20 (`HANDOFF_ACCEL` stays −0.40); recorder docstring fix.
+Files: `grt/far_lead.py`, `grt/hooks.py` (docstring only), and the two test files. No cereal.
+
+- Backup: `/data/grt_backup_20260925_pre_3b7299117/` (= `69f19ec86`). Restore = copy back + reboot.
+- On device before reboot: `test_far_lead` 130/130, `test_hooks` 68/68, schema 34/34.
+- After reboot, read back from flash: all four md5 = local HEAD (far_lead `58d0a5e2…`, hooks
+  `70902c33…`), 0 NUL bytes. Live import: FLOOR −0.2, HANDOFF_ACCEL −0.4, ALPHA 0.2, BETA 0.0222,
+  PHYS 14 / 0.45; SEED_SIGMA and STEP guard absent; the band samples a prob-0.01 range; v_filt a float.
+- plannerd steady on one PID; swaglog since boot: nothing from hook 11 (six unrelated uploader
+  `KeyError('url')` lines, INFO level).
+
+**Watch on the next drive.**
+1. False arms at pickup of a new lead (the section-30 kind) are expected back: 20 extra on the
+   four-drive replay. Bookmark 2's shape — model range settling onto a newly seen car — still
+   reaches CAP in replay (about 0.35 s with the new gains).
+2. The release blind spot should be gone: no long FLOOR hold that only the gas ends.
+3. Softer early braking at FLOOR −0.20 (may feel like coasting); firmer once real closing is read,
+   0.7–1.5 s sooner than before.
+
+---
+
 ## 2026-09-24 — hook 11: FLOOR −0.40 → −0.20, operator decision
 
 **Change.** `far_lead.py` `FLOOR` −0.40 → −0.20. `HANDOFF_ACCEL` stays −0.40 (decoupled since 09-22, so
