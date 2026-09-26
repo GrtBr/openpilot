@@ -31,7 +31,13 @@ hold is removed by the AND gate (0.5 s lead-lost alone would not have: its longe
 45 → 110 m jump no longer arms (the deployed file arms at frame 204), a genuine close still arms;
 lead-lost — 0.45 s dropout keeps the arm, 0.6 s releases. `test_hooks.py` 68/68.
 
-**Deploy status: NOT deployed.** The car runs `3b7299117`.
+**Deploy status: DEPLOYED 2026-09-26 ~07:03 UTC over ssh** (car parked). `far_lead.py` and
+`test_far_lead.py` backed up to `/data/grt_backup/20260926T070251Z/`, written with fsync + atomic rename.
+On device before reboot: `test_far_lead` 136/136, `test_hooks` 68/68. After reboot (uptime 77 s):
+md5 `49c922fa…` / `91237306…` match the commit, 0 NUL bytes in either file, live import from
+`/data/openpilot` reads ALPHA 0.1, BETA 0.003, LEAD_LOST_S 0.5, `_BandSlope.slope_raw` present;
+modeld, controlsd and plannerd running; no far_lead/grt exceptions in the newest swaglogs.
+Rollback: copy the backup back and reboot (it is `3b7299117`'s far_lead.py).
 
 ---
 
