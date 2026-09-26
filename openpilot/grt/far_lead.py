@@ -675,6 +675,15 @@ RELEASE_DIST = 20.0          # m -- absolute backstop regardless of stock
 LEAD_LOST_S = 0.5            # s -- release if the lead itself is lost longer than this. 1.0 until
                              # 2026-09-25 (operator): an armed hook rode dropouts on frozen last_known
                              # values; lead gaps while armed are median 0.15-0.25 s. FINDINGS 41.
+CHECK_S = 1.5                # s -- ARM CHECK (2026-09-26, operator): this long after arming, release
+CHECK_RATE = -2.0            # m/s -- unless the gap closed at least this fast over those frames.
+                             # The gap is corrected for our own braking (the distance not covered
+                             # since the arm because v_ego fell is added back), so the hook's own
+                             # response cannot read as the approach ending. Pre-arm data cannot
+                             # separate these arms from real ones (largest range step and 2 s drop
+                             # identical, FINDINGS 42); only what the gap does after arming can.
+                             # A release here sets RE_ARM_HOLD_S like a hand-off, because the band
+                             # slope is still past ARM_SLOPE and would re-arm on the next frame.
 
 # ---- band-slope arming gate (2026-09-22) -- see module docstring "BAND-SLOPE GATE" ----
 BAND_N = 100                 # samples (5.0 s) in the mean/stdev window on dRel_model
@@ -696,6 +705,9 @@ MODEL_RANGE_OFFSET = 1.52    # m -- modelV2 leadsV3 x[0] is measured from the ca
                              # 4,640 frames where both were present (max |diff| 0.0001 m).
 _SLOPE_XB = (SLOPE_N - 1) / 2.0
 _SLOPE_SXX = sum((i - _SLOPE_XB) ** 2 for i in range(SLOPE_N))
+_CHECK_N = round(CHECK_S / DT_MDL)
+_CHECK_XB = (_CHECK_N - 1) / 2.0
+_CHECK_SXX = sum((i - _CHECK_XB) ** 2 for i in range(_CHECK_N))
 
 
 def hot_a_req_for(dRel: float) -> float:
@@ -893,6 +905,9 @@ class FarLeadPreBrake:
     self.rearm_hold_s = 0.0        # counts down after a hand-off; see RE_ARM_HOLD_S
     self.arm_confirm = 0           # consecutive frames the arm condition has held
     self.last_known = None         # (dRel, vRel_range) held across a brief dropout while armed
+    self.check_v0 = 0.0            # v_ego at the arm; see CHECK_S
+    self.check_off = 0.0           # m -- distance not covered since the arm because v_ego fell
+    self.check_gaps = None         # corrected gap per armed frame; None once the check has run
 
   def step(self, present: bool, dRel: float, vRel_model: float, v_ego: float,
            relaxed: bool, long_active: bool, driver_input: bool, stock_min: float,
@@ -990,6 +1005,7 @@ class FarLeadPreBrake:
       # converged (that earliness is the whole point), so the severity formula below sees a small
       # closing rate and asks for little. It hardens as the filter catches up.
       self.armed = True
+      self.check_v0, self.check_off, self.check_gaps = v_ego, 0.0, []
       self.last_emitted = FLOOR
       self.last_known = (dRel, min(vRel_model, v_filt))
       return [(FLOOR, LongitudinalPlanSource.lead0, should_stop(v_ego, FLOOR))]
@@ -1024,6 +1040,19 @@ class FarLeadPreBrake:
     if self.band.crossed_release:
       self._reset()
       return []
+    # ARM CHECK -- see CHECK_S. One OLS over the first _CHECK_N armed frames, then never again.
+    if self.check_gaps is not None:
+      self.check_off += (self.check_v0 - v_ego) * DT_MDL
+      self.check_gaps.append(eff_dRel - self.check_off)
+      if len(self.check_gaps) == _CHECK_N:
+        g = self.check_gaps
+        gm = sum(g) / _CHECK_N
+        rate = (sum((i - _CHECK_XB) * (x - gm) for i, x in enumerate(g)) / _CHECK_SXX) / DT_MDL
+        self.check_gaps = None
+        if rate > CHECK_RATE:
+          self._reset()
+          self.rearm_hold_s = RE_ARM_HOLD_S   # set AFTER _reset, which clears it
+          return []
 
     # CORRECTED relative-motion kinematics -- see arming-gate comment above and module docstring
     # "ATTEMPT 5, DEPLOYED DESPITE FAILING VALIDATION".

@@ -9,6 +9,30 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-26 — hook 11: 1.5 s arm check (operator decision)
+
+**Change (`far_lead.py`).** `CHECK_S` 1.5 s after arming, fit a line to the gap over those 30 frames,
+with the distance we did not cover because we slowed since the arm added back. If it closed slower than
+`CHECK_RATE` (−2.0 m/s), release and set `RE_ARM_HOLD_S` (the band slope is still past `ARM_SLOPE` and would
+re-arm on the next frame). Runs once per arm.
+
+**Why.** Before arming, the arms this releases cannot be told from real ones (largest one-frame range
+step and 2 s range drop identical, FINDINGS 42); only what the gap does after arming separates them
+(+0.3 vs −8.1 m/s median). The AND gate cannot do this by construction.
+
+**Measured (needed-deceleration scorecard, c7+c8+cf+d7+e4, `35c868771` vs this; FINDINGS 43).** Braking
+on unnecessary arms 90.8 s / −101 km/h → 59.0 s / −78 km/h; all 16 needed and 4 extreme approaches still
+covered; braking on needed approaches −209 → −207 km/h. Arm count 69 → 73 (a released arm that re-arms
+after the hold counts twice).
+
+**Tests.** `test_far_lead.py` 136 → 144. The 2026-09-22 slow-close case (decay to −1.5 m/s right after
+arming) is RESTATED: it is now released at the check; a decay that starts after the check still holds.
+New: constants; flat gap released with the hold and no re-arm; 6 m/s close held; a 3 m/s close under
+2 m/s² of our own braking held (fails on a copy without the speed correction); 1 m/s close released.
+`test_hooks.py` 68/68.
+
+**Deploy status: NOT deployed.** The car runs `35c868771`.
+
 ---
 
 ## 2026-09-25 — hook 11: gains reverted, lead-lost 0.5 s, AND slope gate (operator decision)

@@ -495,9 +495,29 @@ def main():
   # this change: a long slow approach can hold FLOOR for tens of seconds where the old gate let
   # go. Measured on the c7+c8 replay the spans did not run long -- median 3.10 s, max 11.20 s --
   # but that is 0.62 h of evidence, and it is what the field test is watching for.
-  check("slow-but-real closing at -1.5 m/s HOLDS the arm (old v_filt release is gone)",
+  # BEHAVIOUR CHANGE AGAIN, 2026-09-26 (operator): the ARM CHECK (CHECK_S) now releases this case.
+  # The decay starts on the frame after arming, so the gap closes at 1.5 m/s over the check window,
+  # slower than CHECK_RATE: released at the check, with the re-arm hold set.
+  check("ARM CHECK: closing that decays to -1.5 m/s right after arming is released at CHECK_S",
+        out == [] and not h.armed and h.rearm_hold_s > 0.0)
+
+  # The residual trade described above still applies once the check has passed: a close that
+  # stays fast through the check window and only THEN decays to -1.5 m/s still HOLDS the arm.
+  h = new_hook()
+  _, dRel = arm(h, 120.0, 30.6, -8.0)
+  for _ in range(fl._CHECK_N + 2):          # fast through the check window
+    out = h.step(True, dRel, -8.0, 30.6, True, True, False, 1.0, dRel)
+    dRel -= 8.0 * DT_MDL
+  passed = h.armed and h.check_gaps is None
+  for _ in range(60):                       # then 3 s at the slow rate
+    out = h.step(True, dRel, -1.5, 30.6, True, True, False, 1.0, dRel)
+    dRel = max(0.0, dRel - 1.5 * DT_MDL)
+    if out == [] and not h.armed:
+      break
+  check("...a close that stays fast through the check passes it", passed)
+  check("...and a later decay to -1.5 m/s still HOLDS the arm (no second check)",
         h.armed and len(out) == 1)
-  check("...and it is held at FLOOR, not hardened", out[0][0] <= fl.FLOOR and out[0][0] >= fl.CAP)
+  check("...held between FLOOR and CAP", len(out) == 1 and fl.CAP <= out[0][0] <= fl.FLOOR)
 
   # ---- distance-neutral arming threshold (2026-09-04) ----
   # a_req = v^2/(2*(d-6)) means the CLOSING RATE arming demands grows with distance (3.85 m/s at
@@ -918,6 +938,40 @@ def main():
   h.step(False, 0.0, 0.0, 30.0, True, True, False, 1.0, None, None)
   check("no lead and no model range: the filter coasts, v_filt unchanged",
         h.v_filt == v0)
+
+  # ---------------------------------------------------------------- ARM CHECK (09-26)
+  # Operator, 2026-09-26: CHECK_S after arming, release unless the gap -- corrected for our own
+  # speed change since the arm -- closed at least CHECK_RATE. FINDINGS 40, 42.
+  check("CHECK_S 1.5 s = 30 frames, CHECK_RATE -2.0 m/s",
+        fl.CHECK_S == 1.5 and fl._CHECK_N == 30 and fl.CHECK_RATE == -2.0)
+
+  def after_arm(rel_v, decel=0.0, frames=None):
+    """Arm on a genuine -8 m/s close, then run `frames` with the lead moving rel_v relative to our
+    ARM speed while we slow at `decel`. Returns (armed at the end, rearm_hold_s, armed each frame)."""
+    h = new_hook()
+    _, d = arm(h, 120.0, 30.6, -8.0)
+    v0 = v = 30.6; states = []
+    for _ in range(frames or fl._CHECK_N + 5):
+      v = max(0.0, v - decel * DT_MDL)
+      d += (rel_v + (v0 - v)) * DT_MDL           # our slowing opens the gap
+      h.step(True, d, rel_v + (v0 - v), v, True, True, False, 1.0, d, 0.9)
+      states.append(h.armed)
+    return h, states
+
+  h, st_ = after_arm(0.0)
+  check("ARM CHECK: gap stops closing after the arm -> released at the check",
+        st_[fl._CHECK_N - 2] and not st_[fl._CHECK_N - 1])
+  check("...with the re-arm hold set, and no re-arm on the frames after", h.rearm_hold_s > 0.0
+        and not any(st_[fl._CHECK_N:]))
+  h, st_ = after_arm(-6.0)
+  check("ARM CHECK: gap keeps closing at 6 m/s -> still armed past the check", all(st_))
+  # Our own braking: the lead closes at 3 m/s relative to our ARM speed, but we shed 2 m/s^2, so the
+  # RAW gap closes at only ~1.5 m/s over the window -- slower than CHECK_RATE. Corrected, it is 3.
+  h, st_ = after_arm(-3.0, decel=2.0)
+  check("ARM CHECK: own braking is corrected for -- a 3 m/s close under 2 m/s^2 of our braking holds",
+        all(st_))
+  h, st_ = after_arm(-1.0)
+  check("ARM CHECK: a 1 m/s close (slower than CHECK_RATE) is released", not st_[-1])
 
   check("ARM_MIN_DIST 65 m ships only with the guards (73 m is the guards-only rollback)",
         fl.ARM_MIN_DIST == 65.0 and hasattr(fl._RangeRateFilter, "_switch"))
