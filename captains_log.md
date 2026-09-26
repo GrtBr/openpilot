@@ -23,7 +23,13 @@ The replay is open loop, so it does not show the closing speed stock inherits at
 
 **Tests.** `test_far_lead.py` 144 → 145 (pins 0.25). `test_hooks.py` 68/68.
 
-**Deploy status: NOT deployed.** The car runs `35c868771`.
+**Deploy status: DEPLOYED 2026-09-26 ~21:55 UTC over ssh with `07d0b3df1`** (car parked; the arm check and
+STOP_MARGIN_FRAC 0.25 went together). `far_lead.py` and `test_far_lead.py` backed up to
+`/data/grt_backup/20260926T215439Z/` (that is `35c868771`), written with fsync + atomic rename. On device
+before reboot: `test_far_lead` 145/145, `test_hooks` 68/68. After reboot (uptime 99 s): md5 `bd364592…` /
+`e2c96ed2…` match the commit, 0 NUL bytes, live import reads STOP_MARGIN_FRAC 0.25, CHECK_S 1.5,
+CHECK_RATE -2.0, _CHECK_N 30 (ALPHA 0.1, BETA 0.003, LEAD_LOST_S 0.5 unchanged); modeld, controlsd and
+plannerd running; no far_lead/grt exceptions in the newest swaglogs.
 
 ---
 
@@ -49,7 +55,13 @@ New: constants; flat gap released with the hold and no re-arm; 6 m/s close held;
 2 m/s² of our own braking held (fails on a copy without the speed correction); 1 m/s close released.
 `test_hooks.py` 68/68.
 
-**Deploy status: NOT deployed.** The car runs `35c868771`.
+**Deploy status: DEPLOYED 2026-09-26 ~21:55 UTC over ssh with `07d0b3df1`** (car parked; the arm check and
+STOP_MARGIN_FRAC 0.25 went together). `far_lead.py` and `test_far_lead.py` backed up to
+`/data/grt_backup/20260926T215439Z/` (that is `35c868771`), written with fsync + atomic rename. On device
+before reboot: `test_far_lead` 145/145, `test_hooks` 68/68. After reboot (uptime 99 s): md5 `bd364592…` /
+`e2c96ed2…` match the commit, 0 NUL bytes, live import reads STOP_MARGIN_FRAC 0.25, CHECK_S 1.5,
+CHECK_RATE -2.0, _CHECK_N 30 (ALPHA 0.1, BETA 0.003, LEAD_LOST_S 0.5 unchanged); modeld, controlsd and
+plannerd running; no far_lead/grt exceptions in the newest swaglogs.
 
 ---
 
