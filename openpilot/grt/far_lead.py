@@ -605,7 +605,11 @@ STOP_MARGIN = 6.0            # m -- same STOP_DISTANCE long_mpc.py uses. Still r
                              # arming gate's math (hot_a_req_for, and hook 11b's _ArmMirror in
                              # hooks.py, which shadows what that gate would have armed on) -- it
                              # must NOT follow STOP_MARGIN_FRAC or the comparator stops comparing.
-STOP_MARGIN_FRAC = 0.5       # PROPORTIONAL stopping target for the ARMED command, 2026-09-22.
+STOP_MARGIN_FRAC = 0.25      # PROPORTIONAL stopping target for the ARMED command, 2026-09-22.
+                             # 0.5 until 2026-09-26, LOOSENED to 0.25 (operator): bleed off the
+                             # closing rate within 3/4 of the gap instead of half, so every armed
+                             # command is 2/3 of its 0.5 value (a_req = v^2 / (1.5 dRel)).
+                             # History below describes 0.5.
                              # The severity question is "how hard to brake to bleed off the
                              # closing rate", and the answer scales with the room available, not
                              # with a fixed 6 m taken off it. Reaching the lead's speed within

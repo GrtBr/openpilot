@@ -9,6 +9,24 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-26 — hook 11: STOP_MARGIN_FRAC 0.5 → 0.25 (operator decision)
+
+**Change (`far_lead.py`).** The armed command now aims to bleed off the closing rate within 3/4 of the
+gap instead of half: `a_req = v²/(1.5·dRel)` instead of `v²/dRel`, so every armed command the formula
+governs is 2/3 of its old value. Arming, FLOOR, CAP and the jerk limit are unchanged.
+
+**Measured (FINDINGS 43, same five drives, both on top of the arm check).** Braking on unnecessary arms
+−78 → −64 km/h; on needed approaches −207 → −151 km/h; on extreme ones −51 → −39 km/h; mean command on
+extreme arms −1.11 → −0.86, hardest −2.00 → −1.89. Coverage unchanged (16/16, 4/4). **The cut is not
+selective:** needed approaches lose proportionally more braking (−27 %) than unnecessary arms (−18 %).
+The replay is open loop, so it does not show the closing speed stock inherits at the 50 m hand-off.
+
+**Tests.** `test_far_lead.py` 144 → 145 (pins 0.25). `test_hooks.py` 68/68.
+
+**Deploy status: NOT deployed.** The car runs `35c868771`.
+
+---
+
 ## 2026-09-26 — hook 11: 1.5 s arm check (operator decision)
 
 **Change (`far_lead.py`).** `CHECK_S` 1.5 s after arming, fit a line to the gap over those 30 frames,

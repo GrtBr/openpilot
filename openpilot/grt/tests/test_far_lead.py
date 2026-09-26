@@ -591,6 +591,8 @@ def main():
         fl.STOP_MARGIN == 6.0)
   check("the proportional target is a fraction of dRel, not a distance",
         0.0 < fl.STOP_MARGIN_FRAC < 1.0)
+  check("STOP_MARGIN_FRAC is 0.25 (0.5 until 2026-09-26): brake to the lead's speed within 3/4 of the gap",
+        fl.STOP_MARGIN_FRAC == 0.25)
 
   # With FRAC = 0.5 the denominator is exactly dRel, so a_req = v^2/dRel. Assert the KINEMATICS
   # rather than the algebra: the command must demand the closing rate be bled off over the
