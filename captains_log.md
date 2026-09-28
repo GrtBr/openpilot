@@ -34,7 +34,13 @@ evaluates but does not apply); release resets. The a_req source-string test is r
 `test_hooks.py` 68 → 74: sev line written once per evaluation, fr line carries sev/frac (None if the arm
 ended first), bad input swallowed, wired after hook 11c.
 
-**Deploy status: NOT deployed.** The car runs `07d0b3df1`.
+**Deploy status: DEPLOYED 2026-09-28 ~16:18 UTC over ssh with `dfa7a3047`** (car parked). `far_lead.py`,
+`hooks.py`, `test_far_lead.py`, `test_hooks.py` backed up to `/data/grt_backup/20260928T161708Z/` (that is
+`07d0b3df1`), written with fsync + atomic rename. On device before reboot: `test_far_lead` 157/157,
+`test_hooks` 74/74. After reboot (uptime 102 s): all four md5s match the commit, 0 NUL bytes, live import
+reads SEV_AT_S 1.0, SEV_THRESH 0.7, STOP_MARGIN_FRAC 0.25, STOP_MARGIN_FRAC_SEVERE 0.5, _SEV_N 20 and
+`hooks.observe_severity` present; modeld, controlsd and plannerd running; no far_lead/grt exceptions in the
+newest swaglogs; lead_filter.log heartbeats resumed. Rollback: copy the backup back and reboot.
 
 ---
 
