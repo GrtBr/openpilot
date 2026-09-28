@@ -374,6 +374,43 @@ def test_front_run():
     hooks._front_run = None
 
 
+def test_severity_recorder():
+  """Hook 11d: one "sev" line per far_lead severity evaluation, and the fr line carries sev/frac."""
+  print("\nhook 11d: severity recorder")
+  rec = []
+  saved = hooks._lead_write
+  hooks._lead_write = rec.append
+  try:
+    hooks._sev_seen = 0
+    hooks._front_run = hooks._FrontRun()
+    hooks._front_run.step(-0.4, 0.0, 100.0, 25.0, 0.0, -0.40)          # an open armed episode
+    sev = {"a_live": 0.81, "closing": 11.11, "d": 99.7, "d_safe": 24.5, "v_ego": 21.7, "severe": True, "frac": 0.5}
+    fl = NS(sev_count=1, sev_last=sev)
+    hooks.observe_severity(fl)
+    check("a new evaluation writes one sev line with the formula's inputs and the fraction chosen",
+          len(rec) == 1 and rec[0]["ev"] == "sev" and rec[0]["a_live"] == 0.81 and rec[0]["frac"] == 0.5
+          and all(k in rec[0] for k in ("t", "closing", "d", "d_safe", "v_ego", "severe")))
+    hooks.observe_severity(fl)
+    check("the same evaluation is not written twice (20 Hz loop)", len(rec) == 1)
+    hooks._front_run.step(None, 0.0, 90.0, 25.0, 1.0, -0.40)           # the episode ends
+    check("the episode's fr line carries sev and frac", len(rec) == 2 and rec[1]["ev"] == "fr"
+          and rec[1]["sev"] == 0.81 and rec[1]["frac"] == 0.5)
+    hooks._front_run.step(-0.4, 0.0, 80.0, 25.0, 2.0, -0.40)
+    hooks._front_run.step(None, 0.0, 79.0, 25.0, 2.5, -0.40)
+    check("an arm that ended before the test has sev/frac None", rec[-1]["ev"] == "fr"
+          and rec[-1]["sev"] is None and rec[-1]["frac"] is None)
+    n = len(rec)
+    hooks.observe_severity(NS(sev_count=2, sev_last="not a dict"))
+    hooks.observe_severity(None)
+    check("observe_severity swallows bad input instead of raising", len(rec) == n)
+    check("hook 11d is wired into far_lead_candidates, after hook 11c",
+          "observe_severity(fl)" in (GRT / "hooks.py").read_text())
+  finally:
+    hooks._lead_write = saved
+    hooks._front_run = None
+    hooks._sev_seen = 0
+
+
 def test_hook11_wiring():
   """far_lead_candidates() swallows every exception and returns [] -- so a wiring mistake does not
   crash the planner, it silently disables hook 11. Nothing else in this file actually CALLS it,
@@ -522,6 +559,7 @@ def main():
   FakeParams.vals.update(saved)
 
   test_front_run()
+  test_severity_recorder()
 
   test_hook3()
 

@@ -688,6 +688,15 @@ CHECK_RATE = -2.0            # m/s -- unless the gap closed at least this fast o
                              # identical, FINDINGS 42); only what the gap does after arming can.
                              # A release here sets RE_ARM_HOLD_S like a hand-off, because the band
                              # slope is still past ARM_SLOPE and would re-arm on the next frame.
+SEV_AT_S = 1.0               # s -- SEVERITY TEST (2026-09-28, operator; FINDINGS 49): this long after
+SEV_THRESH = 0.7             # m/s^2 -- arming, evaluate a_live = c^2 / (2 (d - d_safe)) once, with c the
+STOP_MARGIN_FRAC_SEVERE = 0.5  # closing speed from the RAW slope(40) of the model range, d = eff_dRel and
+                             # d_safe = 1.75 (v_ego - c) + 6 (the need label's own margin). Above
+                             # SEV_THRESH the rest of this arm brakes with STOP_MARGIN_FRAC_SEVERE, else
+                             # STOP_MARGIN_FRAC. Replayed over six drives, a_live >= 0.8 at 1 s flagged
+                             # 6/6 hard arms with 4 soft alerts, and 7 of 8 real stops at >= 2.5 m/s^2;
+                             # 0.7 is the operator's road-test setting. The raw slope beat v_filt, DSMA
+                             # and min(vRel, v_filt) here (3/6 hard for v_filt). Logged by hook 11d.
 
 # ---- band-slope arming gate (2026-09-22) -- see module docstring "BAND-SLOPE GATE" ----
 BAND_N = 100                 # samples (5.0 s) in the mean/stdev window on dRel_model
@@ -710,8 +719,20 @@ MODEL_RANGE_OFFSET = 1.52    # m -- modelV2 leadsV3 x[0] is measured from the ca
 _SLOPE_XB = (SLOPE_N - 1) / 2.0
 _SLOPE_SXX = sum((i - _SLOPE_XB) ** 2 for i in range(SLOPE_N))
 _CHECK_N = round(CHECK_S / DT_MDL)
+_SEV_N = round(SEV_AT_S / DT_MDL)
 _CHECK_XB = (_CHECK_N - 1) / 2.0
 _CHECK_SXX = sum((i - _CHECK_XB) ** 2 for i in range(_CHECK_N))
+
+
+def severity_a_live(closing: float, d: float, v_ego: float) -> tuple:
+  """The SEV_AT_S severity test: (a_live, d_safe). `closing` is positive when the gap shrinks.
+  Not closing -> 0.0. Closing with no room left beyond d_safe -> 9.99, i.e. certainly severe."""
+  d_safe = 1.75 * max(v_ego - closing, 0.0) + 6.0
+  if closing <= 0.0:
+    return 0.0, d_safe
+  if d <= d_safe:
+    return 9.99, d_safe
+  return min(closing * closing / (2.0 * (d - d_safe)), 9.99), d_safe
 
 
 def hot_a_req_for(dRel: float) -> float:
@@ -899,6 +920,9 @@ class FarLeadPreBrake:
     # EVERY frame, so v_filt always has a reading. See the top of step().
     self.filt = _RangeRateFilter(ALPHA, BETA)
     self.v_filt = 0.0
+    # hook 11d reads these; kept across _reset() so it can tell a new evaluation from an old one
+    self.sev_count = 0             # severity tests evaluated since start
+    self.sev_last = None           # the latest one, as a dict; see SEV_AT_S
     self._reset()
 
   def _reset(self) -> None:
@@ -912,6 +936,8 @@ class FarLeadPreBrake:
     self.check_v0 = 0.0            # v_ego at the arm; see CHECK_S
     self.check_off = 0.0           # m -- distance not covered since the arm because v_ego fell
     self.check_gaps = None         # corrected gap per armed frame; None once the check has run
+    self.armed_frames = 0          # already-armed frames since the arm; see SEV_AT_S
+    self.frac = STOP_MARGIN_FRAC   # this arm's stopping fraction; raised by the severity test
 
   def step(self, present: bool, dRel: float, vRel_model: float, v_ego: float,
            relaxed: bool, long_active: bool, driver_input: bool, stock_min: float,
@@ -1010,6 +1036,7 @@ class FarLeadPreBrake:
       # closing rate and asks for little. It hardens as the filter catches up.
       self.armed = True
       self.check_v0, self.check_off, self.check_gaps = v_ego, 0.0, []
+      self.armed_frames, self.frac = 0, STOP_MARGIN_FRAC
       self.last_emitted = FLOOR
       self.last_known = (dRel, min(vRel_model, v_filt))
       return [(FLOOR, LongitudinalPlanSource.lead0, should_stop(v_ego, FLOOR))]
@@ -1057,10 +1084,20 @@ class FarLeadPreBrake:
           self._reset()
           self.rearm_hold_s = RE_ARM_HOLD_S   # set AFTER _reset, which clears it
           return []
+    # SEVERITY TEST -- see SEV_AT_S. Once, _SEV_N frames after the arm; sets this arm's stopping fraction.
+    self.armed_frames += 1
+    if self.armed_frames == _SEV_N:
+      closing = -self.band.slope_raw if self.band.slope_raw is not None else 0.0
+      a_live, d_safe = severity_a_live(closing, eff_dRel, v_ego)
+      self.frac = STOP_MARGIN_FRAC_SEVERE if a_live > SEV_THRESH else STOP_MARGIN_FRAC
+      self.sev_count += 1
+      self.sev_last = {"a_live": round(a_live, 3), "closing": round(closing, 2), "d": round(eff_dRel, 1),
+                       "d_safe": round(d_safe, 1), "v_ego": round(v_ego, 2), "severe": a_live > SEV_THRESH,
+                       "frac": self.frac}
 
     # CORRECTED relative-motion kinematics -- see arming-gate comment above and module docstring
     # "ATTEMPT 5, DEPLOYED DESPITE FAILING VALIDATION".
-    a_req = (eff_vRel_range ** 2) / (2.0 * max(eff_dRel * (1.0 - STOP_MARGIN_FRAC), 1.0))
+    a_req = (eff_vRel_range ** 2) / (2.0 * max(eff_dRel * (1.0 - self.frac), 1.0))   # self.frac: SEV_AT_S
     target = max(CAP, min(-a_req, FLOOR))
     if target >= self.last_emitted:
       out = target                                          # rising (softer) -- immediate

@@ -578,8 +578,10 @@ def main():
   # ARMING gate's distance-neutralising scale (hot_a_req_for) -- that exists to make a threshold
   # equally reachable at every range, which is meaningless for a magnitude.
   _src = (GRT / "far_lead.py").read_text()
-  check("armed-branch severity a_req uses the proportional stopping target (2026-09-22)",
-        "a_req = (eff_vRel_range ** 2) / (2.0 * max(eff_dRel * (1.0 - STOP_MARGIN_FRAC), 1.0))"
+  # RESTATED 2026-09-28: the fraction is now this arm's (self.frac), set by the SEV_AT_S severity test;
+  # it starts every arm at STOP_MARGIN_FRAC.
+  check("armed-branch severity a_req uses the proportional stopping target (2026-09-22; per-arm since 09-28)",
+        "a_req = (eff_vRel_range ** 2) / (2.0 * max(eff_dRel * (1.0 - self.frac), 1.0))"
         in _src)
   check("...and is NOT scaled by the arming threshold's distance correction",
         "hot_a_req_for" not in _src.split("already armed")[-1])
@@ -974,6 +976,57 @@ def main():
         all(st_))
   h, st_ = after_arm(-1.0)
   check("ARM CHECK: a 1 m/s close (slower than CHECK_RATE) is released", not st_[-1])
+
+  # ---------------------------------------------------------------- SEVERITY TEST (09-28)
+  # Operator, 2026-09-28: SEV_AT_S after arming, a_live = c^2 / (2 (d - d_safe)) from the raw slope; above
+  # SEV_THRESH the rest of the arm uses STOP_MARGIN_FRAC_SEVERE. FINDINGS 49.
+  check("SEV_AT_S 1.0 s = 20 frames, SEV_THRESH 0.7, severe fraction 0.5, base fraction 0.25",
+        fl.SEV_AT_S == 1.0 and fl._SEV_N == 20 and fl.SEV_THRESH == 0.7
+        and fl.STOP_MARGIN_FRAC_SEVERE == 0.5 and fl.STOP_MARGIN_FRAC == 0.25)
+  a, dsf = fl.severity_a_live(11.11, 99.7, 21.7)            # 27 Sep bm1 at arm + 1 s
+  check("severity_a_live on the bm1 numbers: ~0.82, above 0.7", 0.78 < a < 0.86 and a > fl.SEV_THRESH)
+  check("...d_safe is 1.75 x lead speed + 6", abs(dsf - (1.75 * (21.7 - 11.11) + 6.0)) < 1e-9)
+  check("severity_a_live: a mild 5 m/s close at 100 m, 30 m/s is well below 0.7",
+        fl.severity_a_live(5.0, 100.0, 30.0)[0] < 0.3)
+  check("severity_a_live: not closing -> 0", fl.severity_a_live(0.0, 60.0, 25.0)[0] == 0.0
+        and fl.severity_a_live(-3.0, 60.0, 25.0)[0] == 0.0)
+  check("severity_a_live: closing inside d_safe -> 9.99 (certainly severe)",
+        fl.severity_a_live(5.2, 40.0, 25.0)[0] == 9.99)
+
+  def sev_run(rate, frames=fl._SEV_N + 5, thresh=None):
+    """Arm on a genuine close, then keep closing at `rate` m/s; record frac and commands per frame."""
+    h = new_hook()
+    saved = fl.SEV_THRESH
+    if thresh is not None:
+      fl.SEV_THRESH = thresh
+    try:
+      _, d = arm(h, 120.0, 30.6, rate)
+      fr, cmd = [], []
+      for _ in range(frames):
+        out = h.step(True, d, rate, 30.6, True, True, False, 1.0, d, 0.9)
+        d += rate * DT_MDL
+        fr.append(h.frac); cmd.append(out[0][0] if out else None)
+      return h, fr, cmd
+    finally:
+      fl.SEV_THRESH = saved
+  h, fr, _ = sev_run(-12.0)
+  check("a 12 m/s close: armed-frame 19 still at the base fraction", h.armed and fr[fl._SEV_N - 2] == 0.25)
+  check("...evaluated on armed frame 20 (1.0 s) and judged severe -> 0.5 for the rest of the arm",
+        fr[fl._SEV_N - 1] == 0.5 and all(x == 0.5 for x in fr[fl._SEV_N - 1:]))
+  check("...one evaluation, recorded for hook 11d", h.sev_count == 1 and h.sev_last["severe"] is True
+        and h.sev_last["frac"] == 0.5 and h.sev_last["a_live"] > 0.7)
+  h, fr, _ = sev_run(-6.0)
+  check("a 6 m/s close at ~110 m is judged not severe -> stays 0.25", h.sev_count == 1
+        and h.sev_last["severe"] is False and all(x == 0.25 for x in fr))
+  _, _, c_sev = sev_run(-8.0, thresh=-1.0)                  # force severe
+  _, _, c_not = sev_run(-8.0, thresh=99.0)                  # force not severe
+  check("the severe fraction brakes at least as hard on every frame, and harder once it matters",
+        all(a is not None and b is not None and a <= b + 1e-9 for a, b in zip(c_sev, c_not))
+        and any(a < b - 1e-3 for a, b in zip(c_sev, c_not)))
+  h, _, _ = sev_run(-12.0)
+  h.step(True, 100.0, -12.0, 30.6, True, True, True, 1.0, 100.0, 0.9)     # driver input -> _reset()
+  check("release resets the fraction and the frame count for the next arm",
+        not h.armed and h.frac == 0.25 and h.armed_frames == 0 and h.sev_count == 1)
 
   check("ARM_MIN_DIST 65 m ships only with the guards (73 m is the guards-only rollback)",
         fl.ARM_MIN_DIST == 65.0 and hasattr(fl._RangeRateFilter, "_switch"))

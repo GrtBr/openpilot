@@ -9,6 +9,35 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-28 — hook 11: severity test switches STOP_MARGIN_FRAC per arm (operator decision)
+
+**Change.** `far_lead.py`: once, `SEV_AT_S` (1.0 s) after arming, evaluate
+`a_live = c² / (2 (d − d_safe))` with `c` the closing speed from the raw slope(40) of the model range,
+`d = eff_dRel`, `d_safe = 1.75 (v_ego − c) + 6` (new `severity_a_live()`). If `a_live > SEV_THRESH` (0.7) the
+rest of that arm uses `STOP_MARGIN_FRAC_SEVERE` (0.5), else `STOP_MARGIN_FRAC` (0.25, unchanged); every arm
+starts at 0.25 and `_reset()` restores it. `hooks.py`: new hook 11d `observe_severity()`, measurement only,
+writes one `"sev"` line per evaluation to `/data/media/0/grt/lead_filter.log` (a_live, closing, d, d_safe,
+v_ego, severe, frac) and adds `sev`/`frac` to the arm's `"fr"` line.
+
+**Why.** FINDINGS 49/49c: at arm + 1 s, raw-slope a_live >= 0.8 flagged 6/6 hard arms with 4 soft alerts and
+7 of 8 real stops at >= 2.5 m/s²; the gap term beats the raw slope alone. 0.7 is the operator's road-test
+threshold.
+
+**Measured (FINDINGS 50, six drives, arms unchanged).** Braking on unnecessary arms −78 → −84 km/h; on needed
+approaches −163 → −201; on extreme −53 → −64; mean on extreme arms −0.79 → −0.93. Switched to 0.5: hard 6/6,
+normal 12/21, soft 6/34. FRAC 0.5 on every arm for comparison: −96 / −222 / −69.
+
+**Tests.** `test_far_lead.py` 145 → 157: constants; `severity_a_live` on the bm1 numbers (~0.82), a mild
+close, not closing, inside d_safe; evaluation on armed frame 20 not 19; severe close → 0.5 for the rest of
+the arm, mild → 0.25; the severe fraction brakes at least as hard on every frame (fails on a copy that
+evaluates but does not apply); release resets. The a_req source-string test is restated for `self.frac`.
+`test_hooks.py` 68 → 74: sev line written once per evaluation, fr line carries sev/frac (None if the arm
+ended first), bad input swallowed, wired after hook 11c.
+
+**Deploy status: NOT deployed.** The car runs `07d0b3df1`.
+
+---
+
 ## 2026-09-26 — hook 11: STOP_MARGIN_FRAC 0.5 → 0.25 (operator decision)
 
 **Change (`far_lead.py`).** The armed command now aims to bleed off the closing rate within 3/4 of the

@@ -727,6 +727,7 @@ def far_lead_candidates(sm, v_ego: float, stock_min: float) -> list:
     out = fl.step(bool(lead.present), float(lead.dRel), float(lead.vRel), float(v_ego),
                   relaxed, long_active, driver_input, float(stock_min), dRel_model, prob_model)
     observe_front_run(out, float(stock_min), lead, float(v_ego))   # hook 11c: measurement only
+    observe_severity(fl)                                            # hook 11d: measurement only
     return out
   except Exception:
     _log_exception("far_lead_candidates")
@@ -973,7 +974,8 @@ class _FrontRun:
                  "gain_s": round(end_t - e["t0"], 2), "gain_m": round(e["d0"] - end_d, 1),
                  "caught": e["catch_t"] is not None, "dRel_arm": round(e["d0"], 1),
                  "dRel_end": round(end_d, 1), "v_ego": round(e["v0"], 2),
-                 "cmd": round(e["cmd"], 3), "stock": round(e["stock"], 3)})
+                 "cmd": round(e["cmd"], 3), "stock": round(e["stock"], 3),
+                 "sev": e.get("sev"), "frac": e.get("frac")})   # hook 11d; None if the arm ended before it
 
 
 _front_run = None
@@ -1039,3 +1041,30 @@ def ramp_relaxed_accel(a_target: float, sm, long_active: bool) -> float:
   except Exception:
     _log_exception("ramp_relaxed_accel")
     return a_target
+
+
+# ----------------------------------------------------------------------------------------
+# SEVERITY-TEST RECORDER (hook 11d, 2026-09-28). NOT a control path.
+# ----------------------------------------------------------------------------------------
+# far_lead evaluates its severity test once per arm, SEV_AT_S after arming, and picks that arm's
+# stopping fraction from it. This writes each evaluation to lead_filter.log as one "sev" line the
+# moment it happens, and tags the open front-run episode so its "fr" line carries sev/frac too.
+_sev_seen = 0
+
+
+def observe_severity(fl) -> None:
+  """Hook 11d. MEASUREMENT ONLY -- returns nothing and can change no command."""
+  global _sev_seen
+  try:
+    n = int(getattr(fl, "sev_count", 0))
+    s = getattr(fl, "sev_last", None)
+    if n == _sev_seen or s is None:
+      return
+    _sev_seen = n
+    _lead_write({"ev": "sev", "t": round(time.monotonic(), 2), **s})
+    fr = _front_run
+    if fr is not None and fr.ep is not None:
+      fr.ep["sev"] = s.get("a_live")
+      fr.ep["frac"] = s.get("frac")
+  except Exception:
+    _log_exception("observe_severity")
