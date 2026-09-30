@@ -134,6 +134,16 @@ knows the target cannot win; the component that wins does not know the target.
                                         eat anything weaker). See far_lead.py for the full
                                         design, including why its call needs a `stock_min`
                                         argument the other hooks do not take.
+  hook 12 `danger_candidates()`       — grt/danger_hook.py. One more `min()` candidate, RELAXED
+                                        ONLY, independent of hook 11. Triggers on the driving
+                                        model's brake prediction (p at 6 s) + speed + a lead
+                                        published beyond 100 m, brakes at -A1 at once, decides
+                                        after 2 s whether the lead is stopped (escalate, up to
+                                        -2.5) or moving (release). Returns [] when inert, so it
+                                        can never make braking weaker. Logs every trigger,
+                                        verdict and release to danger_hook.log. Hand-off:
+                                        DANGER_HOOK_HANDOFF.md. Also here: hook 11's driver-pedal
+                                        outcome records (D4/D5) around its fl.step() call.
 """
 import json
 import os
@@ -724,8 +734,16 @@ def far_lead_candidates(sm, v_ego: float, stock_min: float) -> list:
       # wander differentiates into phantom closing. Dropping this argument leaves the band
       # ungated (prob=None reads as always-confident) -- the 2026-09-22 bug. See far_lead.
       prob_model = float(leads_v3[0].prob)
+    was_armed = bool(fl.armed)
     out = fl.step(bool(lead.present), float(lead.dRel), float(lead.vRel), float(v_ego),
                   relaxed, long_active, driver_input, float(stock_min), dRel_model, prob_model)
+    # D4/D5 outcome records. Its OWN try: the outer except below would otherwise turn a logging error into
+    # `return []`, silently dropping hook 11's candidate for the frame -- a control change caused by logging.
+    try:
+      _hook11_pedal_log(fl, was_armed, bool(cs.gasPressed), bool(cs.brakePressed), lead, float(v_ego), out,
+                        time.monotonic())
+    except Exception:
+      _log_exception("hook 11 pedal log")
     observe_front_run(out, float(stock_min), lead, float(v_ego))   # hook 11c: measurement only
     observe_severity(fl)                                            # hook 11d: measurement only
     return out
@@ -1068,3 +1086,88 @@ def observe_severity(fl) -> None:
       fr.ep["frac"] = s.get("frac")
   except Exception:
     _log_exception("observe_severity")
+
+
+# ----------------------------------------------------------------------------------------
+# HOOK 11 DRIVER-PEDAL OUTCOMES (operator D4/D5, 2026-09-30; DANGER_HOOK_HANDOFF.md section 3a). NOT a control path.
+# ----------------------------------------------------------------------------------------
+# far_lead already releases on either pedal (driver_input -> _reset()); only the record is new. Throttle while armed
+# -> outcome "false" (the driver overrode the braking); brake -> "fail" (the driver had to brake); both -> "fail".
+# carState and carControl can straddle a frame, so a release for any other reason is claimed by a pedal that
+# registers within the next _PEDAL_WINDOW frames: ONE record, on the pedal frame, armed_s measured to the release.
+# These are review labels for the road video, not a failure rate (baseline before hook 12: 4 % brake, 3 % throttle).
+_PEDAL_WINDOW = 5
+_h11 = {"t_arm": None, "last_cmd": None, "pending": None}
+
+
+def _hook11_pedal_log(fl, was_armed: bool, gas: bool, brake: bool, lead, v_ego: float, out: list, now: float) -> None:
+  st = _h11
+  pedal = "brake" if brake else ("gas" if gas else None)
+
+  def record(base, pedal_):
+    r = dict(base)
+    r.update({"ev": "driver", "hook": 11, "outcome": "fail" if pedal_ == "brake" else "false", "pedal": pedal_,
+              "t": round(now, 2)})
+    _lead_write(r)
+
+  if st["pending"] is not None:
+    if pedal is not None:
+      record(st["pending"][0], pedal)
+      st["pending"] = None
+    else:
+      st["pending"][1] -= 1
+      if st["pending"][1] <= 0:
+        st["pending"] = None             # no pedal followed: the fr line already covers this release
+  armed = bool(fl.armed)
+  if armed and not was_armed:
+    st["t_arm"] = now
+  if was_armed and not armed:
+    base = {"armed_s": round(now - st["t_arm"], 2) if st["t_arm"] is not None else None,
+            "dRel": round(float(lead.dRel), 1), "v_ego": round(v_ego, 2),
+            "cmd": round(st["last_cmd"], 3) if st["last_cmd"] is not None else None}
+    if pedal is not None:
+      record(base, pedal)
+    else:
+      st["pending"] = [base, _PEDAL_WINDOW]
+    st["t_arm"] = None
+  if out:
+    st["last_cmd"] = float(out[0][0])
+  elif not armed:
+    st["last_cmd"] = None
+
+
+# ----------------------------------------------------------------------------------------
+# HOOK 12 -- danger_hook (2026-09-30). See grt/danger_hook.py and DANGER_HOOK_HANDOFF.md.
+# ----------------------------------------------------------------------------------------
+_danger = None
+_danger_broken = False
+_DANGER_LOG = os.path.join(GRT_CONFIG_DIR, "danger_hook.log")
+
+
+def _danger_singleton():
+  """Return hook 12's state, or None if it cannot be built (latched off for the drive, as hook 11)."""
+  global _danger, _danger_broken
+  if _danger_broken:
+    return None
+  if _danger is None:
+    try:
+      from openpilot.grt.danger_hook import DangerHook
+      _danger = DangerHook(log_path=_DANGER_LOG, log_exception=_log_exception)
+    except Exception:
+      _danger_broken = True
+      _log_exception("danger_hook construction; hook 12 disabled")
+      return None
+  return _danger
+
+
+def danger_candidates(sm, v_ego: float) -> list:
+  """Hook 12. Early braking for a stopped/slow lead first seen far away, RELAXED personality only.
+  One more min() candidate; [] when inert. Never raises: any failure returns []."""
+  try:
+    dh = _danger_singleton()
+    if dh is None:
+      return []
+    return dh.step_sm(sm, float(v_ego), time.monotonic())
+  except Exception:
+    _log_exception("danger_candidates")
+    return []

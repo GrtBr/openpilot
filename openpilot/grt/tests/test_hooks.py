@@ -411,6 +411,135 @@ def test_severity_recorder():
     hooks._sev_seen = 0
 
 
+def test_danger_integration():
+  """Hook 12 (DANGER_HOOK_HANDOFF.md section 7, tests 9 and 10): it only competes in the planner's min(), and nothing
+  after the min() can soften it."""
+  print("\nhook 12: planner min() and post-min() layers")
+  src = (GRT.parent / "selfdrive" / "controls" / "lib" / "longitudinal_planner.py").read_text()
+  i11 = src.find("grt_hooks.far_lead_candidates(")
+  i12 = src.find("candidates += grt_hooks.danger_candidates(sm, v_ego)")
+  imin = src.find("min(candidates, key=")
+  check("planner: hook 12's candidate is added after hook 11's and before the min()", 0 < i11 < i12 < imin)
+  blk = src[src.rfind("# GRT-MOD-START", 0, i12):src.find("# GRT-MOD-END", i12)]
+  check("...inside its own GRT-MOD-START/END sentinel", "hook 12" in blk and "GRT-MOD-START" in blk)
+  h12 = [(-2.0, "lead0", False)]
+  pick = lambda cands: min(cands, key=lambda c: c[0])[0]
+  check("stock at -3.0: hook 12 at -2.0 does not change the output", pick([(-3.0, "mpc", False)] + h12) == -3.0)
+  check("stock at 0.0: the output is hook 12's", pick([(0.0, "mpc", False)] + h12) == -2.0)
+  check("hook 12 never makes the output less negative than without it",
+        all(pick([(a, "s", False)] + h12) <= a for a in (-3.5, -2.5, -2.0, -1.0, 0.0, 1.0)))
+  check("the planner's final clip floor ACCEL_MIN (-3.5) is below hook 12's CAP (-2.5)",
+        "ACCEL_MIN = -3.5" in (GRT.parents[1] / "opendbc_repo" / "opendbc" / "car" / "interfaces.py").read_text())
+  class SMr:
+    def __getitem__(self, k):
+      return NS(personality='relaxed') if k == 'selfdriveState' else NS()
+  outs = []
+  for a in (0.8, 0.8, 0.5, -2.0, -2.0):                     # throttle, then a -2.0 demand
+    r = hooks.ramp_relaxed_accel(a, SMr(), True)
+    outs.append(hooks.hold_throttle(r, SMr(), 25.0, 30.0, True))
+  check("hooks 7 and 10 (A+C) pass a -2.0 command through unsoftened, even straight after throttle",
+        outs[-2] <= -2.0 + 1e-9 and outs[-1] <= -2.0 + 1e-9)
+
+
+def test_hook11_pedal_outcomes():
+  """D4/D5 for hook 11 (section 3a, test 11b): throttle while armed -> 'false', brake -> 'fail', on the release frame
+  or within 5 frames; logging can never change hook 11's candidates."""
+  print("\nhook 11: driver-pedal outcome records (D4/D5)")
+
+  class FakeFL:
+    """A scripted hook 11: arms when told, releases on any driver input or longActive off, like far_lead."""
+    def __init__(self):
+      self.armed = False
+      self.arm = False
+
+    def step(self, present, dRel, vRel, v_ego, relaxed, long_active, driver_input, stock_min, dm, pm):
+      if driver_input or not long_active:
+        self.armed = False
+        return []
+      if self.arm:
+        self.armed = True
+      return [(-0.6, "lead0", False)] if self.armed else []
+
+  class SMp:
+    def __init__(self, gas=False, brake=False, la=True):
+      self.gas, self.brake, self.la = gas, brake, la
+
+    def __getitem__(self, k):
+      if k == 'selfdriveState':
+        return NS(personality='relaxed')
+      if k == 'carControl':
+        return NS(longActive=self.la)
+      if k == 'carState':
+        return NS(gasPressed=self.gas, brakePressed=self.brake)
+      if k == 'radarState':
+        return NS(leadOne=NS(present=True, dRel=90.0, vRel=-8.0))
+      if k == 'modelV2':
+        return NS(leadsV3=[NS(x=[91.5], prob=0.9)])
+      raise KeyError(k)
+
+  rec = []
+  saved_w, saved_fr = hooks._lead_write, hooks._front_run
+  hooks._lead_write = rec.append
+
+  def fresh():
+    rec.clear()
+    hooks._h11.update({"t_arm": None, "last_cmd": None, "pending": None})
+    hooks._far_lead = FakeFL(); hooks._far_lead_broken = False
+    hooks._front_run = hooks._FrontRun()
+    hooks._far_lead.arm = True
+    for _ in range(10):
+      hooks.far_lead_candidates(SMp(), 25.0, 0.0)
+    return hooks._far_lead
+
+  drv = lambda: [r for r in rec if r.get("ev") == "driver"]
+  try:
+    for pedal, kw, outcome in (("gas", dict(gas=True), "false"), ("brake", dict(brake=True), "fail"),
+                               ("both", dict(gas=True, brake=True), "fail")):
+      f = fresh()
+      f.arm = False
+      hooks.far_lead_candidates(SMp(**kw), 25.0, 0.0)
+      d = drv()
+      check(f"{pedal} while hook 11 armed -> one driver record, outcome {outcome}",
+            len(d) == 1 and d[0]["hook"] == 11 and d[0]["outcome"] == outcome
+            and all(k in d[0] for k in ("t", "armed_s", "dRel", "v_ego", "cmd", "pedal")) and d[0]["cmd"] == -0.6)
+    rec.clear(); hooks._h11.update({"t_arm": None, "last_cmd": None, "pending": None})
+    hooks._far_lead = FakeFL()
+    for kw in (dict(gas=True), dict(brake=True)):
+      hooks.far_lead_candidates(SMp(**kw), 25.0, 0.0)
+    check("pedal while hook 11 is not armed -> no record", drv() == [])
+    f = fresh(); f.arm = False
+    hooks.far_lead_candidates(SMp(la=False), 25.0, 0.0)          # released for longActive, no pedal yet
+    for _ in range(2):
+      hooks.far_lead_candidates(SMp(la=False), 25.0, 0.0)
+    hooks.far_lead_candidates(SMp(la=False, brake=True), 25.0, 0.0)
+    for _ in range(5):
+      hooks.far_lead_candidates(SMp(la=False, brake=True), 25.0, 0.0)
+    check("longActive off, brake 3 frames later -> exactly one record, fail", len(drv()) == 1 and drv()[0]["outcome"] == "fail")
+    f = fresh(); f.arm = False
+    for _ in range(6):
+      hooks.far_lead_candidates(SMp(la=False), 25.0, 0.0)
+    hooks.far_lead_candidates(SMp(la=False, brake=True), 25.0, 0.0)
+    check("brake 6 frames after the release -> no driver record", drv() == [])
+    f = fresh()
+    saved_log = hooks._hook11_pedal_log
+
+    def boom(*a, **k):
+      raise RuntimeError("logging failure")
+    hooks._hook11_pedal_log = boom
+    try:
+      out = hooks.far_lead_candidates(SMp(), 25.0, 0.0)
+    finally:
+      hooks._hook11_pedal_log = saved_log
+    check("a logging failure does not change hook 11's returned candidates", out == [(-0.6, "lead0", False)])
+    check("the pedal logger is called inside its own try in far_lead_candidates",
+          "_hook11_pedal_log(fl, was_armed" in (GRT / "hooks.py").read_text())
+  finally:
+    hooks._lead_write = saved_w
+    hooks._front_run = saved_fr
+    hooks._far_lead = None
+    hooks._h11.update({"t_arm": None, "last_cmd": None, "pending": None})
+
+
 def test_hook11_wiring():
   """far_lead_candidates() swallows every exception and returns [] -- so a wiring mistake does not
   crash the planner, it silently disables hook 11. Nothing else in this file actually CALLS it,
@@ -560,6 +689,8 @@ def main():
 
   test_front_run()
   test_severity_recorder()
+  test_danger_integration()
+  test_hook11_pedal_outcomes()
 
   test_hook3()
 

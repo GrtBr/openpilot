@@ -203,6 +203,11 @@ class LongitudinalPlanner:
     candidates += grt_hooks.far_lead_candidates(sm, v_ego, min(c[0] for c in candidates))
     # GRT-MOD-END
 
+    # GRT-MOD-START — hook 12: danger_hook (grt/danger_hook.py). Early braking for a stopped/slow lead first seen far away.
+    # Returns [] when inert, so it can only compete in the min() below, never make braking weaker than stock or hook 11.
+    candidates += grt_hooks.danger_candidates(sm, v_ego)
+    # GRT-MOD-END
+
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
 

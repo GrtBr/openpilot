@@ -64,6 +64,15 @@ REQUIRED = [
   ("grtSetSpeedState", "active"),
   ("grtSetSpeedState", "pendingIsIncrease"),
   ("grtSetSpeedState", "authorisedNextLimit"),
+  # hook 12, danger_hook (danger_hook.DangerHook.step_sm). The brake prediction is read by no other hook, so its
+  # field names are exactly the kind the stubbed tests would fake unnoticed.
+  ("modelV2", "meta.disengagePredictions.t"),
+  ("modelV2", "meta.disengagePredictions.brakeDisengageProbs"),
+  ("modelV2", "leadsV3.x"),
+  ("selfdriveState", "personality"),
+  ("carControl", "longActive"),
+  ("carState", "gasPressed"),
+  ("carState", "brakePressed"),
 ]
 
 # Union discriminants are POSITIONAL, not the @N ordinal, and they are what actually goes on the

@@ -9,6 +9,62 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-09-30 — hook 12 `danger_hook`: early braking for a stopped/slow lead first seen far away (operator decision)
+
+**What.** New `openpilot/grt/danger_hook.py`: `DangerController` (pure controller, a line-for-line port of
+`analysis/lead_filter/early_mode.py` `EarlyMode`) and `DangerHook` (adapter: gate, trigger, eligibility, lead lost,
+re-trigger hold, pedal outcomes, logging). `hooks.py`: `danger_candidates(sm, v_ego)` with the hook-11 singleton/latch
+pattern, plus hook 11's driver-pedal outcome records around its existing `fl.step()` call. `longitudinal_planner.py`:
+one GRT-MOD line directly after hook 11, before the `min()`. `far_lead.py` is not touched. Spec:
+`DANGER_HOOK_HANDOFF.md`; evidence FINDINGS 48-57 (the hook-12 series).
+
+**Behaviour.** Relaxed only (D3). Gate held 10 frames (0.5 s): model brake-disengage probability at t = 6 s >= 0.046
+(index looked up from `disengagePredictions.t` every frame), v_ego > 21 m/s, lead published with dRel >= 100 m,
+longActive, no pedal, a camera range. Then stage 1 at -A1 = -1.0 (D1), jerk-limited 1.5 m/s³. At trigger + 2 s the
+stopped-or-moving test compares the camera drop with what a stopped car would show through the far compression
+(knee 90 m, slope 0.43): f >= 0.5 → stopped, target the stopped-car need at the camera range up to CAP 2.5 (D2; at
+~27 m/s this saturates at CAP at once, intended); f < 0.5 → release. Stage 2 below an 85 m 0.5 s median. Releases:
+pulling away, closing ended, 5 s without the lead inside 90 m, lead lost > 0.5 s, gas (outcome `false`, D4), brake
+(`fail`, D5), longActive off, personality. Pedals are checked first every frame; a pedal within 5 frames claims a
+release made for another reason (`t_pedal` added). No hand-off to stock; [] on release; [] on any failure to read `sm`. Re-trigger only after 1 s of gate-False.
+Logs `trigger`, `verdict`, `stage2`, `release` (reason, outcome, f, ...) and a 30 s `hb` to
+`/data/media/0/grt/danger_hook.log` (4 MB, one rolled file, latched off on write failure). Hook 11 now also writes
+`{"ev": "driver", "hook": 11, "outcome": "false"|"fail", ...}` to `lead_filter.log` on a pedal release, in its own
+try so a logging error cannot drop hook 11's candidate.
+
+**What it is not.** It does not detect stopped leads earlier than hook 11 (triggers ~1 s after publication; hook 11
+arms at about the same moment). The gain is braking level and a stopped-or-moving verdict. At A1 1.0 it cannot stop
+a bm1-type approach on its own and relies on stock, which is always in the `min()`: replay with the stock proxy,
+27 Sep bm1 gap 2.7 → 4.8 m, peak −3.71 → −3.48 (A1 2.0 was validated as the stronger setting: 9.4 m, −2.80).
+
+**Verified.**
+- `test_danger_hook.py` (new) 67/67: gate and each missing condition, bad/missing sm data (a failed sm read
+  returns [] even while triggered; a missing camera range alone holds the last command), stage 1 ramp and CAP, the
+  2 s test (stopped / moving / no verdict), the CAP saturation at 27 m/s, single-frame stage-2 entry refused, the A1
+  floor above 60 m, every release reason with [] from that frame, the re-trigger hold, logging and rotation,
+  D4/D5 including check order and the 5-frame window, and the four real-trace fixtures open loop — bm1 trigger
+  339.63 stopped f 0.972; 1f3 1120.46 moving f 0.156; 1fc 1074.66 stopped f 0.773; 1de 814.60 moving f 0.314 (hand-off
+  0.97 / 0.17 / 0.77 / 0.30 ±0.05; the small shifts are the specified DT odometry vs the replay's real dt).
+- 24 deliberately broken variants (19 controller/adapter, 5 hooks/planner) each fail at least one test.
+- `test_hooks.py` 74 → 89 (min() integration and planner order, post-min() layers cannot soften -2.0, hook 11 pedal
+  records, a raising logger leaves hook 11's candidates unchanged). `test_far_lead.py` 157/157 unchanged.
+- `bm1_stock_replay.py` and `moving_lead_cost2.py` run with `DangerController as EarlyMode`: output identical to the
+  analysis controller, line for line.
+- `test_schema_conformance.py`: hook 12's seven fields added; cannot run on the Pi5 (no pycapnp) and the device was
+  offline — `modelV2.meta.disengagePredictions.{t, brakeDisengageProbs}` confirmed in `cereal/log.capnp`. It runs
+  on the device as part of the deploy.
+
+**Known limits (DANGER_HOOK_HANDOFF.md §11).** Only two stopped-traffic events in the data (bm1, 1fc); P6_GATE is
+bm1's own minimum and KNEE_SLOPE is from bm1. No data at 27 m/s. The stock behaviour in the replays is a proxy
+validated on bm1 only. The camera's near-range error is not a fixed scale. A model update can change the brake
+prediction's scale and the far compression: re-check P6_GATE and the stopped-lead f after any model change.
+First drives: pull `danger_hook.log` + rlog + GPS; review every `fail`/`false` against video (baseline before hook
+12: hook 11 armed 336 times, driver braked on 4 %, throttle on 3 %).
+
+**Deploy status: NOT deployed.** The car runs `dfa7a3047`.
+
+---
+
 ## 2026-09-28 — hook 11: severity test switches STOP_MARGIN_FRAC per arm (operator decision)
 
 **Change.** `far_lead.py`: once, `SEV_AT_S` (1.0 s) after arming, evaluate
