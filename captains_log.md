@@ -61,7 +61,17 @@ prediction's scale and the far compression: re-check P6_GATE and the stopped-lea
 First drives: pull `danger_hook.log` + rlog + GPS; review every `fail`/`false` against video (baseline before hook
 12: hook 11 armed 336 times, driver braked on 4 %, throttle on 3 %).
 
-**Deploy status: NOT deployed.** The car runs `dfa7a3047`.
+**Deploy status: DEPLOYED 2026-09-30 ~19:34 UTC over ssh with `be61e9f1f`** (car parked). Four changed files
+(`hooks.py`, `longitudinal_planner.py`, `test_hooks.py`, `test_schema_conformance.py`) backed up to
+`/data/grt_backup/20260930T193257Z/` (that is `dfa7a3047`); six new files (`danger_hook.py`, `test_danger_hook.py`,
+four fixtures) listed in that folder's `NEW_FILES`. All written with fsync + atomic rename. On device before reboot:
+`test_danger_hook` 67/67, `test_hooks` 89/89, `test_far_lead` 157/157, `test_schema_conformance` 41/41 -- the
+seven hook-12 fields, incl. `modelV2.meta.disengagePredictions.t`, exist in the car's real schema. After reboot
+(uptime 126 s): all ten md5s match the commit, 0 NUL bytes, live import reads A1 1.0, CAP 2.5, P6_GATE 0.046,
+V_GATE 21.0, D_GATE 100.0 with `hooks.danger_candidates` and `_hook11_pedal_log` present; the planner carries the
+hook-12 line; modeld, controlsd and plannerd running; no danger/far_lead/grt exceptions in the newest swaglogs;
+`danger_hook.log` created and writing its 30 s heartbeat (plannerd is calling hook 12 every frame).
+Rollback: copy the four backed-up files back, delete the six in `NEW_FILES`, reboot.
 
 ---
 
