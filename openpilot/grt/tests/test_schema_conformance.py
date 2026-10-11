@@ -69,6 +69,8 @@ REQUIRED = [
   ("modelV2", "meta.disengagePredictions.t"),
   ("modelV2", "meta.disengagePredictions.brakeDisengageProbs"),
   ("modelV2", "leadsV3.x"),
+  ("modelV2", "leadsV3.prob"),                      # 2026-10-11 gate window and lead lost
+  ("modelV2", "action.desiredAcceleration"),        # 2026-10-11 easing boost
   ("selfdriveState", "personality"),
   ("carControl", "longActive"),
   ("carState", "gasPressed"),

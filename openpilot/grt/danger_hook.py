@@ -19,8 +19,19 @@ holds; the command ramps to -A1 at JERK (reaches -1.0 about 0.7 s after trigger)
 trigger. With A1 1.0 (D1, the evaluation-period setting) hook 12 cannot stop a bm1-type approach on its own -- it
 relies on stock, which is always in the planner's min(), to finish (replay: gap 2.7 -> 4.8 m, peak -3.71 -> -3.48).
 
-GATE (all, GATE_HOLD consecutive frames): brake-disengage probability at t = 6 s >= P6_GATE, v_ego > V_GATE, a lead
-published with dRel >= D_GATE, longActive, no pedal, personality relaxed (D3), and a camera range available.
+GATE (operator 2026-10-11, FINDINGS 67-68): a window of GATE_HOLD consecutive frames, each with the brake-disengage
+probability at t = 6 s >= P6_GATE, the model's lead probability (leadsV3[0].prob) > PROB_MIN, longActive, no pedal,
+personality relaxed (D3) and a camera range. v_ego > V_GATE is checked ONCE, on the frame the window opens, and latched
+for the run (the model's own easing pulled v under 21 m/s inside the window on 252 and 215). Triggers when the lead is
+published at dRel >= D_GATE on MORE than PRES_MIN of the last GATE_HOLD frames and on none of them nearer: radard's
+lead drops out for a few frames at ~110-130 m (252: 7 of 10 frames, then out 0.55 s), which reset the old
+consecutive-frame count. Any failing frame empties the window (and the latch reopens on the next frame).
+
+EASING BOOST (FINDINGS 68). When the model's desiredAcceleration was <= BOOST_DA within BOOST_S before the trigger, the
+model is already easing for something ahead: stage 1 brakes at BOOST_GAIN x the stopped-car need at the camera median
+(capped at CAP, never softer than -A1) instead of -A1, until the 2 s test, which still runs and can release.
+BOOST_GAIN 1.2 is the calibrated stock-proxy factor SK (six approaches, per-event best 1.1-1.4). Cost when the lead
+turns out to be moving (1f0): ~8.7 km/h shed instead of ~3.8 before the 'moving' release.
 
 STAGE 1 -A1 (jerk-limited). 2 s TEST from trigger + TEST_S: predict where a STOPPED lead's camera range would be given
 our wheel distance and the far compression (KNEE_M, KNEE_SLOPE); f = observed camera drop / predicted drop.
@@ -31,7 +42,8 @@ STAGE 2 when the 0.5 s median camera range < ENTRY (never on one frame): stopped
 then the lead's ground speed from the slope of (camera range + our distance) over 1 s, the lowest of the last second;
 need = c^2 / (2 (z - (1.75 v_lead + 6))), never softer than -A1 while the median is >= TRUST or still closing.
 RELEASES: lead pulling away (camera range growing against our travel, held D_NEG_S); closing ended in stage 2; 5 s in
-stage 1 without the lead inside 90 m; 2 s test 'moving'; lead lost > LEAD_LOST_S; pedal; longActive off; personality.
+stage 1 without the lead inside 90 m; 2 s test 'moving'; lead lost (model lead prob < PROB_MIN) > LEAD_LOST_S; pedal;
+longActive off; personality.
 PEDALS FIRST (D4/D5): throttle -> release, outcome "false"; brake -> release, outcome "fail" (both -> "fail"); checked
 before longActive and personality every frame, and a pedal within 5 frames of any other release claims that release.
 These are the operator's review labels, not a verdict on the hook.
@@ -55,13 +67,20 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.drive_helpers import should_stop
 
-# ---- gate (FINDINGS 48a-b) ----
+# ---- gate (FINDINGS 48a-b; window, prob and speed latch: operator 2026-10-11, FINDINGS 67-68) ----
 P6_GATE = 0.046              # brake-disengage prob at t = 6 s; bm1's sustained minimum in its first second after
                              # publication (48b) -- FITTED TO ONE EVENT; re-check after any model change
 P6_T = 6.0                   # the prediction horizon read; its index is looked up in disengagePredictions.t every frame
-GATE_HOLD = 10               # frames (0.5 s) the whole gate must hold (48b)
-V_GATE = 21.0                # m/s; bm1 was 21.7 (48a) -- do not raise without new data
+GATE_HOLD = 10               # frames (0.5 s) in the gate window (48b)
+V_GATE = 21.0                # m/s, on the frame the window opens, latched; bm1 was 21.7 (48a) -- do not raise
 D_GATE = 100.0               # m, published dRel (48a-b)
+PROB_MIN = 0.3               # model lead prob: above this on every window frame; below it while triggered = lead lost
+PRES_MIN = 5                 # published at >= D_GATE on more than this many of the GATE_HOLD window frames
+
+# ---- easing boost (FINDINGS 68) ----
+BOOST_DA = -0.3              # m/s^2; model desiredAcceleration at or below this ...
+BOOST_S = 1.0                # ... within this long before the trigger -> boosted stage 1
+BOOST_GAIN = 1.2             # x the stopped-car need in boosted stage 1; the calibrated stock-proxy factor SK
 
 # ---- braking (FINDINGS 52, 55, 57; operator D1, D2) ----
 A1 = 1.0                     # m/s^2, stage-1 level and floor. D1: 1.0 for the practical evaluation period (2.0 validated)
@@ -114,8 +133,9 @@ class DangerController:
   `why` keeps EarlyMode's text (replays match on it); `reason` is the log code."""
 
   def __init__(self, A1=A1, CAP=CAP, WAIT=WAIT, JERK=JERK, ENTRY=ENTRY_M, TRUST=TRUST_M, DT=DT_MDL, TEST=True,
-               F_STOP=F_STOP, z0=None):
+               F_STOP=F_STOP, z0=None, boost=False):
     self.A1, self.CAP, self.WAIT, self.JERK, self.ENTRY, self.TRUST, self.DT = A1, CAP, WAIT, JERK, ENTRY, TRUST, DT
+    self.boost = boost                                          # easing boost: stage 1 before the verdict only
     self.stage = 1; self.rel = False; self.cmd = 0.0; self.zh = []; self.dh = []; self.zb = []; self.vh = []
     self.calm = 0.0; self.neg = 0.0; self.t1 = 0.0; self.why = None; self.reason = None
     self.TEST, self.F_STOP, self.z0 = TEST, F_STOP, z0; self.t0 = None; self.x0 = None; self.verdict = None; self.f = None
@@ -154,6 +174,8 @@ class DangerController:
       tgt = -self.A1; self.t1 += DT
       if self.verdict == "stopped":
         tgt = -min(max(v * v / (2 * max(zmed - 6, 1.0)), self.A1), self.CAP)
+      elif self.boost and self.verdict is None:
+        tgt = -min(max(BOOST_GAIN * v * v / (2 * max(zmed - 6, 1.0)), self.A1), self.CAP)
       if zmed < self.ENTRY:
         self.stage = 2; self.zb = []
       elif self.t1 > STAGE1_MAX_S and zmed > STAGE1_FAR_M:
@@ -231,7 +253,12 @@ class DangerHook:
     self.x = 0.0                    # odometry, previous speed x DT (as the validated replay integrates it)
     self.v_prev = None
     self.zbuf = []                  # last ZMED_N camera ranges, every frame, for z0 at trigger
-    self.gate_run = 0
+    self.win = []                   # the gate window: (published, published at >= D_GATE) per passing frame
+    self.v_latched = False          # v_ego > V_GATE on the frame the window opened
+    self.win_t0 = None              # when the window opened (trigger record)
+    self.last_dRel = 0.0            # last published dRel (trigger record)
+    self.da_buf = []                # (t, model desiredAcceleration) over the last BOOST_S
+    self.frame_ok = False           # this frame passed the gate's per-frame conditions (re-trigger hold)
     self.hold_frames = 0            # consecutive gate-False frames since a release
     self.need_hold = False
     self.ctl = None
@@ -255,17 +282,20 @@ class DangerHook:
       present, dRel = bool(lead.present), float(lead.dRel)
       mv = sm['modelV2']
       p6 = _p6_from(mv.meta.disengagePredictions)
-      z = None
+      da = float(mv.action.desiredAcceleration)
+      z = prob = None
       l3 = mv.leadsV3
-      if len(l3) > 0 and len(l3[0].x) > 0:
-        z = float(l3[0].x[0]) - MODEL_RANGE_OFFSET
+      if len(l3) > 0:
+        prob = float(l3[0].prob)
+        if len(l3[0].x) > 0:
+          z = float(l3[0].x[0]) - MODEL_RANGE_OFFSET
     except Exception:
       # [] -- never hold braking here: the pedal, longActive and lead-lost releases all read this same sm, so a
       # persistent read failure while holding would leave no release path (DANGER_HOOK_HANDOFF.md section 0.5).
       if self.log_exception is not None:
         self.log_exception("danger_hook sm read")
       return []
-    return self.step(now, p6, present, dRel, z, float(v_ego), long_active, gas, brake, personality)
+    return self.step(now, p6, present, dRel, z, float(v_ego), long_active, gas, brake, personality, prob, da)
 
   def _hold_output(self, v_ego):
     """A triggered frame with no camera range: keep the previous command. Safe because the pedal, longActive and
@@ -274,13 +304,37 @@ class DangerHook:
       return [(self.last_cmd, LongitudinalPlanSource.lead0, should_stop(v_ego, self.last_cmd))]
     return []
 
+  # -------------------------------------------------------------------------------- gate
+  def _gate(self, now, p6, present, dRel, z, v_ego, long_active, pedal, relaxed, prob) -> bool:
+    """One frame of the gate window (module docstring, GATE). True when the window is full and the lead was
+    published far on more than PRES_MIN of its frames and never nearer than D_GATE."""
+    if not self.win:
+      self.v_latched = v_ego > V_GATE; self.win_t0 = now
+    if present:
+      self.last_dRel = dRel
+    ok = (p6 is not None and p6 >= P6_GATE and prob is not None and prob > PROB_MIN and long_active
+          and pedal is None and relaxed and z is not None and self.v_latched)
+    self.frame_ok = ok
+    if not ok:
+      self.win = []
+      return False
+    self.win.append((present, present and dRel >= D_GATE)); self.win = self.win[-GATE_HOLD:]
+    return (len(self.win) == GATE_HOLD and sum(w[1] for w in self.win) > PRES_MIN
+            and all(w[1] for w in self.win if w[0]))
+
   # -------------------------------------------------------------------------------- one frame
-  def step(self, now, p6, present, dRel, z, v_ego, long_active, gas, brake, personality="relaxed") -> list:
+  def step(self, now, p6, present, dRel, z, v_ego, long_active, gas, brake, personality="relaxed", prob=None,
+           da=None) -> list:
+    """prob: model lead probability (leadsV3[0].prob); da: model desiredAcceleration. None -> the gate cannot
+    open / no boost."""
     if self.v_prev is not None:
       self.x += self.v_prev * DT_MDL
     self.v_prev = v_ego
     if z is not None:
       self.zbuf.append(z); self.zbuf = self.zbuf[-ZMED_N:]
+    if da is not None:
+      self.da_buf.append((now, da))
+    self.da_buf = [p for p in self.da_buf if now - p[0] <= BOOST_S + 1e-6]
     relaxed = personality == "relaxed"
     pedal = "brake" if brake else ("gas" if gas else None)
     self._heartbeat(now)
@@ -300,18 +354,17 @@ class DangerHook:
           self.pending = None
 
     if self.ctl is None:
-      gate = (p6 is not None and p6 >= P6_GATE and v_ego > V_GATE and present and dRel >= D_GATE
-              and long_active and pedal is None and relaxed and z is not None)
+      gate = self._gate(now, p6, present, dRel, z, v_ego, long_active, pedal, relaxed, prob)
       if self.need_hold:
-        self.hold_frames = 0 if gate else self.hold_frames + 1
+        # the per-frame conditions must be False REARM_S continuously; then a fresh window
+        self.hold_frames = 0 if self.frame_ok else self.hold_frames + 1
         if self.hold_frames >= round(REARM_S / DT_MDL):
           self.need_hold = False; self.hold_frames = 0
-        self.gate_run = 0
+        self.win = []
         return []
-      self.gate_run = self.gate_run + 1 if gate else 0
-      if self.gate_run < GATE_HOLD:
+      if not gate:
         return []
-      self._trigger(now, v_ego, dRel, p6, personality)
+      self._trigger(now, v_ego, p6, prob, personality)
 
     # ---- triggered. Pedals FIRST (D4/D5), then longActive, personality, lead lost.
     reason = None
@@ -324,7 +377,7 @@ class DangerHook:
     elif not relaxed:
       reason = "personality"
     else:
-      self.lost_frames = self.lost_frames + 1 if not present else 0
+      self.lost_frames = self.lost_frames + 1 if (prob is None or prob < PROB_MIN) else 0
       if self.lost_frames > round(LEAD_LOST_S / DT_MDL):
         reason = "lead_lost"
     if reason is None:
@@ -351,16 +404,22 @@ class DangerHook:
     return []
 
   # -------------------------------------------------------------------------------- events
-  def _trigger(self, now, v_ego, dRel, p6, personality):
+  def _trigger(self, now, v_ego, p6, prob, personality):
     z0 = _median(self.zbuf)
-    self.ctl = DangerController(z0=z0)
-    self.gate_run = 0
+    dRel = self.last_dRel
+    da_min = min((p[1] for p in self.da_buf), default=None)
+    boost = da_min is not None and da_min <= BOOST_DA
+    self.ctl = DangerController(z0=z0, boost=boost)
     self.lost_frames = 0
     self.last_cmd = 0.0
     self.n_trig += 1
     self.ev = {"t0": now, "v0": v_ego, "min_dRel": dRel, "hardest": 0.0, "verdict": None, "f": None}
     self.log.write({"ev": "trigger", "t": round(now, 2), "v_ego": round(v_ego, 2), "dRel": round(dRel, 1),
-                    "z0": round(z0, 1), "zmed": round(z0, 1), "p6": round(p6, 4), "personality": personality})
+                    "z0": round(z0, 1), "zmed": round(z0, 1), "p6": round(p6, 4), "personality": personality,
+                    "prob": round(prob, 3), "published": sum(w[1] for w in self.win),
+                    "win_s": round(now - self.win_t0, 2), "da_min": round(da_min, 3) if da_min is not None else None,
+                    "boost": boost})
+    self.win = []
 
   def _release(self, now, reason, v_ego):
     e, c = self.ev, self.ctl
@@ -374,7 +433,7 @@ class DangerHook:
     self.last_cmd = 0.0
     self.need_hold = True
     self.hold_frames = 0
-    self.gate_run = 0
+    self.win = []
     if outcome == "ok":
       self.pending = [rec, PEDAL_WINDOW]      # a pedal in the next PEDAL_WINDOW frames claims this release
     else:

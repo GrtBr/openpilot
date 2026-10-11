@@ -9,6 +9,60 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-10-11 — hook 12: prob-window gate with a speed latch, prob-based lead lost, easing boost ×1.2 (operator decision)
+
+**What.** `openpilot/grt/danger_hook.py` only (plus tests and fixtures). Operator, 2026-10-11: "open the hook-12 gate
+when the lead is present for >5 in 10 frames and probability stayed >0.3 (lead loss is when prob <0.3)", "speed check
+must latch on the speed at arming", and "find the reliable SK value and use it as an easing boost". Evidence:
+`analysis/lead_filter/tracker/FINDINGS.md` §67–68.
+
+**Behaviour.**
+- **Gate window.** 10 consecutive frames, each with p6 ≥ 0.046, the model's lead probability `leadsV3[0].prob` > 0.3,
+  longActive, no pedal, relaxed, a camera range. Trigger when radard published the lead at dRel ≥ 100 m on **more than
+  5** of the 10 and never nearer. Any failing frame empties the window. The old gate needed 10 consecutive published
+  frames; radard drops the lead for a few frames at 110–130 m, which is why 11 Oct bookmark 1 (00000252, red light)
+  never triggered (7 of 10, then out 0.55 s).
+- **Speed latch.** v_ego > 21 m/s is checked once, on the frame the window opens, and holds for the run. The model's
+  own easing had pulled v under 21 inside the window on 252 and 1 Oct 215.
+- **Lead lost** (while triggered) = model lead prob < 0.3 for > 0.5 s (was: radard lead not published).
+- **Easing boost.** If the model's `action.desiredAcceleration` was ≤ −0.3 at any point in the 1 s before the trigger,
+  stage 1 (before the 2 s verdict) targets −1.2 × the stopped-car need at the camera median, between −A1 and −CAP
+  (still jerk-limited at 1.5 m/s³). 1.2 is SK, the stock-proxy factor calibrated on six approaches (per-event best
+  1.1–1.4). The 2 s test still runs and still releases a moving lead; after a 'stopped' verdict the target is the plain
+  (×1.0) need, as before.
+- **Re-trigger hold** unchanged in meaning: after a release the per-frame conditions must be False for 1 s
+  continuously, then a fresh window.
+- `step()` takes `prob=None, da=None` (None → the gate cannot open / no boost); `step_sm` reads both in its existing
+  single try. Trigger record adds `prob`, `published`, `win_s`, `da_min`, `boost`.
+
+**Verified.**
+- `test_danger_hook.py` 67 → 101/101: window (5 of 10 never, 6 of 10 triggers, the 252 dropout pattern, a near
+  frame blocks until it leaves, prob ≤ 0.3 or None restarts), latch (25 at open then 20 triggers; 20 then 25 triggers
+  10 frames after the rise; a failing frame re-takes the latch), lead lost by prob (unpublished 1 s with prob 0.9 stays
+  triggered), boost (target −1.2 × need, CAP, JERK, −0.3 boundary, > 1 s before trigger no boost, da after trigger
+  ignored, moving lead still releases, ×1.0 after 'stopped'), step_sm reads both fields. Fixtures gained `prob` and
+  `da` columns (rows matched exactly to model_meta by t); new `danger_00000252_1503.csv`. Expected now: bm1 339.63
+  stopped 0.97; 1f3 1120.46 moving 0.16; 1fc **1074.46** (was 1074.66) stopped **0.58** (was 0.77); 1de 814.60 moving
+  0.31; 252 **1508.43 stopped 1.10, boost**.
+- 14 deliberate mutations: 12 fail at least one test; the 2 survivors are equivalent (boost after a 'stopped' verdict is
+  shadowed by the verdict branch; clearing the window in the hold is already done by the failing frame that ends it).
+- Open loop over all 62 model_meta drives (`analysis/lead_filter/hook12_impl_check.py`): the implementation gives
+  exactly the evaluated variant's 12 triggers (t, verdict, f, release reason); boosted: 1f0, 215, 252.
+- Closed loop (`closed_loop_event.py`, stock proxy SK 1.2), implementation = evaluated variant to the printed digit:
+  252 red light time at ≤ −2.0 3.1 s → 1.1 s, peak −2.27 → −2.24; 27 Sep bm1 gap 4.2 → 6.2 m (not boosted).
+- `test_hooks` 89/89, `test_far_lead` 157/157, all other grt suites pass. `test_schema_conformance.py`: two fields
+  added (`modelV2.leadsV3.prob`, `modelV2.action.desiredAcceleration`), confirmed in `cereal/log.capnp`; it runs on the
+  device at deploy (no pycapnp on the Pi5).
+
+**Known limits.** Three stopped-lead triggers in the data (bm1, 1fc, 252) and one more with the latch (215, which is
+knife-edge: v 20.97–21.0 when the window opens). Boost cost on a moving lead (1f0): ~8.7 km/h shed at −2.5 before the
+'moving' release instead of ~3.8. The closed loop's stock proxy brakes ~0.85 s earlier than real stock did on 252, so
+it understates the gate's benefit there. 12 triggers in 315 far-lead appearances (deployed gate: 10).
+
+**Deploy status: NOT deployed.** Awaiting the operator's go-ahead.
+
+---
+
 ## 2026-09-30 — hook 12 `danger_hook`: early braking for a stopped/slow lead first seen far away (operator decision)
 
 **What.** New `openpilot/grt/danger_hook.py`: `DangerController` (pure controller, a line-for-line port of
