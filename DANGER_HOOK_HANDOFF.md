@@ -6,6 +6,12 @@
 
 # Hook 12 — `danger_hook`: early braking for a stopped or slow lead that appears far away
 
+> **Superseded in part, 2026-10-11 (`77c4c99f5`).** The gate is now a 10-frame window: model lead prob > 0.3 on every
+> frame, lead published at ≥ 100 m on more than 5 of 10, v_ego > 21 m/s latched on the frame the window opens. Lead
+> lost = model lead prob < 0.3 for > 0.5 s. New easing boost (stage 1 at 1.2 × the stopped-car need when the model's
+> desiredAcceleration was ≤ −0.3 in the last 1 s). Where this document's gate or lead-lost text differs, the code
+> docstring and `captains_log.md` 2026-10-11 are current. Evidence: FINDINGS §67–69.
+
 Repo **`~/Comma/openpilot/nightly-dev`**, fork `github.com/GrtBr/openpilot`, branch **`nightly-dev`**, base openpilot
 v0.11.2. Target **comma 4**, Hyundai Staria 4th gen (CANFD, **camera only — there is no radar**), deployed over SSH.
 
