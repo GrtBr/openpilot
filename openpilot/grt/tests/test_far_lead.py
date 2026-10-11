@@ -367,7 +367,7 @@ def main():
   # They were equal (-0.40) from 2026-09-22 until 09-24, when FLOOR alone moved to -0.20. The hand-off
   # bar stays at -0.40: stock must be genuinely braking before the hook lets go, and a hand-off bar
   # softer than the hook's own floor would release on stock merely matching it.
-  check("HANDOFF_ACCEL is -0.40 and is at least as hard as FLOOR",
+  check("HANDOFF_ACCEL (since 2026-10-11 only recorded by hook 11c) is -0.40 and at least as hard as FLOOR",
         fl.HANDOFF_ACCEL == -0.40 and fl.HANDOFF_ACCEL <= fl.FLOOR)
   # Hook 10 (grt/throttle_hold.py) passes a request at or below ABANDON through unfiltered and may
   # hold back or clip anything milder -- so the hook's softest command must never be milder.
@@ -377,42 +377,71 @@ def main():
   check(f"FLOOR ({fl.FLOOR}) is never softer than hook 10's ABANDON ({_abandon})",
         fl.FLOOR <= _abandon)
   _fl_src = (GRT / "far_lead.py").read_text()
-  check("the release reads HANDOFF_ACCEL, not FLOOR",
-        "if stock_min <= HANDOFF_ACCEL:" in _fl_src and "if stock_min <= FLOOR:" not in _fl_src)
+  # ---- HAND-OFF ON STOCK CATCHING UP, 2026-10-11 (operator) ----
+  # "Release hook-11 if the braking command of stock > hook-11. Don't step aside unless stock caught up."
+  _fl_src = (GRT / "far_lead.py").read_text()
+  check("the stock hand-off compares stock with this hook's own command, not a fixed bar",
+        "if stock_min < out:" in _fl_src and "if stock_min <= HANDOFF_ACCEL:" not in _fl_src
+        and "if stock_min <= FLOOR:" not in _fl_src)
 
-  # stock exactly at the bar releases; a hair above it does not
-  h = new_hook(); _, d = arm(h, 120.0, 30.6, -8.0)
-  out = h.step(True, d, -8.0, 30.6, True, True, False, fl.HANDOFF_ACCEL, d)
-  check("stock reaching HANDOFF_ACCEL still returns this frame's candidate", len(out) == 1)
-  out2 = h.step(True, d, -8.0, 30.6, True, True, False, fl.HANDOFF_ACCEL, d)
-  check("...and the latch is dropped on the next frame", out2 == [] and not h.armed)
-  h = new_hook(); _, d = arm(h, 120.0, 30.6, -8.0)
-  h.step(True, d, -8.0, 30.6, True, True, False, fl.HANDOFF_ACCEL + 0.05, d)
-  check("stock a hair softer than the bar does NOT hand off", h.armed)
+  def climbed(target=-0.8, n=40):
+    """An armed hook whose command has climbed to `target` or harder with stock idle, closing at 15 m/s after the
+    arm so the command climbs within ~10 frames, far above HANDOFF_DIST; returns (hook, d, cmd)."""
+    h = new_hook(); _, d = arm(h, 120.0, 30.6, -8.0); cmd = fl.FLOOR
+    for _ in range(n):
+      d -= 15.0 * DT_MDL
+      o = h.step(True, d, -15.0, 30.6, True, True, False, 1.0, d)
+      if o:
+        cmd = o[0][0]
+      if cmd <= target or not h.armed:
+        break
+    return h, d, cmd
 
-  # THE POINT: moving FLOOR must not move the release bar. Tune the authority, keep the trust.
-  # Reproduce the 2026-08-31 SIXTH BUG's exact setup: FLOOR moved SOFTER (it was set to 0.00).
-  # Coupled, that made the release `stock_min <= 0.00` -- true whenever stock merely was not
-  # accelerating, so the hook self-released within a few frames of every arm. Decoupled, the trust
-  # bar stays at -0.40 and a barely-braking stock no longer counts as "handled".
+  h, d, cmd = climbed()
+  check(f"setup: armed with the command climbed to {cmd:.2f} at {d:.0f} m", h.armed and cmd <= -0.8 and d > 80.0)
+  for _ in range(3):
+    d -= 15.0 * DT_MDL
+    o = h.step(True, d, -15.0, 30.6, True, True, False, fl.HANDOFF_ACCEL, d)
+  check("stock at the OLD bar (-0.40) while this hook brakes harder: does NOT hand off", h.armed and len(o) == 1)
+  for _ in range(3):
+    d -= 15.0 * DT_MDL
+    o = h.step(True, d, -15.0, 30.6, True, True, False, -0.79, d)
+  check("stock at -0.79, still softer than this hook: does NOT hand off", h.armed and o[0][0] < -0.79)
+  d -= 15.0 * DT_MDL
+  o = h.step(True, d, -15.0, 30.6, True, True, False, 1.0, d)
+  cmd = o[0][0]
+  d -= 15.0 * DT_MDL
+  o = h.step(True, d, -15.0, 30.6, True, True, False, cmd - 2.0, d)
+  check("stock harder than this hook's command: this frame's candidate is still returned", len(o) == 1)
+  d -= 15.0 * DT_MDL
+  o2 = h.step(True, d, -15.0, 30.6, True, True, False, cmd - 2.0, d)
+  check("...and the latch is dropped on the next frame, with the re-arm hold set",
+        o2 == [] and not h.armed and h.rearm_hold_s > 0.0)
+  h, d, cmd = climbed(target=fl.CAP, n=60)
+  check(f"setup: the command held at CAP ({cmd:.2f}) at {d:.0f} m", h.armed and cmd == fl.CAP and d > 55.0)
+  for _ in range(3):
+    d -= 15.0 * DT_MDL
+    h.step(True, d, -15.0, 30.6, True, True, False, fl.CAP, d)
+  check("stock exactly equal to this hook's command (both at CAP): not harder, still armed", h.armed)
+  d -= 15.0 * DT_MDL
+  h.step(True, d, -15.0, 30.6, True, True, False, fl.CAP - 0.05, d)
+  d -= 15.0 * DT_MDL
+  h.step(True, d, -15.0, 30.6, True, True, False, fl.CAP - 0.05, d)
+  check("stock 0.05 harder than this hook's command: hands off", not h.armed)
+  h = new_hook(); _, d = arm(h, 120.0, 30.6, -8.0)
+  for _ in range(20):
+    d -= 15.0 * DT_MDL
+    h.step(True, d, -15.0, 30.6, True, True, False, -0.10, d)
+  check("stock merely coasting (-0.10, softer than FLOOR) never hands off -- the sixth bug cannot return",
+        h.armed)
+  check("...because this hook's command is never softer than FLOOR, which is pinned no softer than ABANDON",
+        fl.FLOOR <= _abandon and "target = max(CAP, min(-a_req, FLOOR))" in _fl_src)
   _saved = fl.FLOOR
   try:
-    fl.FLOOR = 0.00
-    h = new_hook(); _, d = arm(h, 120.0, 30.6, -8.0)
-    h.step(True, d, -8.0, 30.6, True, True, False, -0.10, d)   # stock barely braking
-    check("FLOOR at 0.00: stock at -0.10 does NOT hand off (coupled, this was the sixth bug)",
-          h.armed)
-    h2 = new_hook(); _, d2 = arm(h2, 120.0, 30.6, -8.0)
-    h2.step(True, d2, -8.0, 30.6, True, True, False, fl.HANDOFF_ACCEL, d2)
-    h2.step(True, d2, -8.0, 30.6, True, True, False, fl.HANDOFF_ACCEL, d2)
-    check("...and genuine braking at HANDOFF_ACCEL still hands off, whatever FLOOR is",
-          not h2.armed)
-    # and a HARDER floor, which is what FINDINGS 25 actually contemplates
     fl.FLOOR = -0.80
     h3 = new_hook(); _, d3 = arm(h3, 120.0, 30.6, -8.0)
     h3.step(True, d3, -8.0, 30.6, True, True, False, -0.30, d3)
-    check("FLOOR at -0.80: the release bar is unmoved, stock at -0.30 does not hand off",
-          h3.armed)
+    check("FLOOR at -0.80: stock at -0.30 does not hand off", h3.armed)
   finally:
     fl.FLOOR = _saved
 

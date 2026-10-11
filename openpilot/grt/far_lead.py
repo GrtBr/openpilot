@@ -226,7 +226,7 @@ REVERTED. `FLOOR` restored to -0.40. The fifth finding (arming on top of a stock
 approach) remains open and still points to the `stock_min` arm-time gate, decoupled from
 `FLOOR`'s value, as the next real fix to design and validate.
 
-WHY A FIXED THRESHOLD, NOT HOOK 11's OWN LIVE VALUE
+WHY A FIXED THRESHOLD, NOT HOOK 11's OWN LIVE VALUE  -- SUPERSEDED 2026-10-11, see "HAND-OFF ON STOCK CATCHING UP"
 ----------------------------------------------------
 The release check compares `stock_min` against the constant `FLOOR`, not against whatever hook
 11 itself is currently computing (`self.last_emitted` / `target`, which climbs toward `CAP` as
@@ -409,8 +409,8 @@ gate on the SLOPE OF A LOWER BOLLINGER BAND over the model's range series:
 
 ARM when that slope CROSSES below ARM_SLOPE, on a frame with a radar lead present and
 dRel > HANDOFF_DIST. RELEASE when it crosses back above RELEASE_SLOPE, or eff_dRel falls under
-HANDOFF_DIST, or stock reaches FLOOR, or the lead is lost. No persistence timer on anything: the
-5.0 s mean and the 2.0 s slope fit ARE the persistence.
+HANDOFF_DIST, or stock brakes harder than this hook's own command (2026-10-11), or the lead is lost.
+No persistence timer on anything: the 5.0 s mean and the 2.0 s slope fit ARE the persistence.
 
 WHY THE BAND AND NOT THE MEAN. For steady closing the band's slope settles at EXACTLY the true
 closing rate, but the -BAND_K*stdev term makes it get there ~2.5 s sooner, because stdev grows
@@ -475,6 +475,21 @@ setup exactly (FLOOR = 0.00, stock at -0.10) and asserts the hook now stays arme
 
 Hook 11c reads `HANDOFF_ACCEL` too, so the recorder measures the bar the hook actually releases on.
 FINDINGS.md 25-26.
+
+HAND-OFF ON STOCK CATCHING UP, 2026-10-11 (operator)
+------------------------------------------------------
+"Release hook-11 if the braking command of stock > hook-11. Don't step aside unless stock caught up." The stock
+hand-off is now `stock_min < out` -- stock's best candidate this frame is HARDER than the command this hook just
+issued -- instead of `stock_min <= HANDOFF_ACCEL`. The fixed bar let go as soon as stock reached -0.40 even when
+this hook was commanding far more: of 470 stock hand-offs in the 1-11 Oct logs, 45 happened with stock never having
+matched this hook's command, the car's braking stepping from as hard as -2.0 back to stock's -0.40 (hook 11c `fr`
+records, `handoff` true and `caught` false). Releasing only once stock is harder means the planner's min() output does
+not soften at the hand-off. This deliberately accepts the stickiness the old section rejected: the hook stays armed
+while its own command climbs, until stock out-brakes it or another release fires (band slope back above 0, eff_dRel
+under HANDOFF_DIST -- the 50 m hand-off is UNCHANGED, operator 2026-10-11 --, the 1.5 s check, lead lost, driver).
+The sixth bug cannot return through this: `out` is never softer than FLOOR (-0.20, pinned no softer than hook 10's
+ABANDON), so stock must be braking at least that hard to be "harder". `HANDOFF_ACCEL` no longer releases anything;
+hook 11c still records its crossing so the old and new hand-off points can be compared.
 
 ARMING IS A LEVEL TEST, 2026-09-22
 -----------------------------------
@@ -635,7 +650,11 @@ CAP = -2.0                   # m/s^2 -- hardest command this hook may ever issue
 JERK_ARM = 1.5               # m/s^3 -- rate limit on the FALLING edge only, first armed frames
 
 # ---- release (spec section 6, amended -- see module docstring) ----
-HANDOFF_ACCEL = -0.40        # m/s^2 -- THE HAND-OFF BAR: hook 11 lets go once the planner's own
+HANDOFF_ACCEL = -0.40        # m/s^2 -- NOT THE RELEASE SINCE 2026-10-11 (module docstring "HAND-OFF ON
+                             # STOCK CATCHING UP"): the hook now lets go only once stock brakes harder
+                             # than its own command. Kept for hook 11c, which records when stock crossed
+                             # this old bar. History follows.
+                             # THE OLD HAND-OFF BAR: hook 11 let go once the planner's own
                              # best candidate has reached this, i.e. once stock is genuinely
                              # braking. DECOUPLED from FLOOR 2026-09-22 and deliberately equal to
                              # it, so this commit changes no behaviour.
@@ -1106,9 +1125,9 @@ class FarLeadPreBrake:
     self.last_emitted = out
     cand = [(out, LongitudinalPlanSource.lead0, should_stop(v_ego, out))]
 
-    if stock_min <= HANDOFF_ACCEL:
-      self._reset()          # stock has caught up -- hand off starting next frame.
-                             # HANDOFF_ACCEL, never FLOOR: see that constant for why they are
-                             # separate even while they hold the same value.
+    if stock_min < out:
+      self._reset()          # stock is braking harder than this hook -- hand off starting next frame.
+                             # 2026-10-11 (operator): never step aside while stock is softer; see the
+                             # module docstring "HAND-OFF ON STOCK CATCHING UP".
       self.rearm_hold_s = RE_ARM_HOLD_S   # set AFTER _reset, which clears it
     return cand

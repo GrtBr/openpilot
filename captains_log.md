@@ -9,6 +9,44 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-10-11 (b) — hook 11 hands off to stock only once stock brakes harder than hook 11 (operator decision)
+
+**What.** `openpilot/grt/far_lead.py`: the stock hand-off is `stock_min < out` (stock's best candidate this frame is
+harder than the command hook 11 just issued) instead of `stock_min <= HANDOFF_ACCEL` (−0.40). Operator: "Release
+hook-11 if braking command of stock > hook-11. Don't step aside unless stock caught up." The 50 m distance hand-off
+(`HANDOFF_DIST`) is **unchanged** — operator chose to apply the rule to the stock hand-off only. Every other release
+(band slope back above 0, the 1.5 s check, lead lost, 20 m backstop, driver, longActive, personality) is unchanged,
+and so is the 1 s re-arm hold after a stock hand-off. `HANDOFF_ACCEL` stays as a constant only so hook 11c (`fr`
+records in `lead_filter.log`) keeps recording when stock crossed the old bar; `hooks.py` comments say so (no code
+change there).
+
+**Why.** Hook 11c `fr` records, 1–11 Oct (829 unique armed spans): 470 ended on the stock hand-off, and in 45 of
+them stock had never matched hook 11's command — the planner's output stepped from hook 11's command (as hard as
+−2.0; −0.47 to −2.0 across the 45) back to stock's ≈ −0.40 at the hand-off. Under the new rule the output cannot
+soften at the hand-off, because hook 11 only lets go when stock is already braking harder. This reverses the
+2026-08-31 decision "WHY A FIXED THRESHOLD, NOT HOOK 11's OWN LIVE VALUE" (marked superseded in the docstring): the
+hook is now stickier while its own command climbs, by design.
+
+**Safety argument.** Hook 11's command is never softer than FLOOR (−0.20, pinned no softer than hook 10's ABANDON),
+so "stock harder than hook 11" always means stock brakes at least 0.20 — a coasting stock can never trigger the
+hand-off, so the 2026-08-31 sixth bug (release on "stock not accelerating") cannot return through this path. Hook 11
+is still only a `min()` candidate: staying armed longer can only add braking where hook 11 is the harder candidate.
+
+**Verified.** `test_far_lead.py` 157 → 162/162. The three tests that pinned the −0.40 bar are replaced: stock at
+−0.40 while hook 11 commands −0.87 does not hand off; stock at −0.79 does not; stock harder than the command returns
+this frame's candidate and drops the latch next frame with the re-arm hold set; stock equal to the command (both at
+CAP −2.0) stays armed, 0.05 harder hands off; a coasting stock (−0.10) never hands off; FLOOR −0.80 with stock −0.30
+stays armed. 7 deliberate mutations (old bar, `<=`, a 0.1 margin, vs FLOOR, vs the un-jerk-limited target, no re-arm
+hold, never hand off) each fail 2–6 tests. `test_hooks` 89/89 (one label updated), all other grt suites pass.
+Not replayable offline: the tracker harness feeds `stock_min = 0`, so it never exercises the stock hand-off — the
+first drives' `fr` records are the check: a span that ends on the stock hand-off must now have `caught` true
+(stock reached hook 11's command), and `handoff` true with `caught` false should only appear on spans ended by
+another release (50 m, slope, check, lead lost).
+
+**Deploy status: NOT deployed.** Together with 2026-10-11 hook 12 (`77c4c99f5`), awaiting the operator's go-ahead.
+
+---
+
 ## 2026-10-11 — hook 12: prob-window gate with a speed latch, prob-based lead lost, easing boost ×1.2 (operator decision)
 
 **What.** `openpilot/grt/danger_hook.py` only (plus tests and fixtures). Operator, 2026-10-11: "open the hook-12 gate

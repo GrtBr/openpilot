@@ -367,7 +367,7 @@ def test_front_run():
 
     check("the hand-off bar comes from far_lead, not a copy that could drift",
           "from openpilot.grt.far_lead import HANDOFF_ACCEL" in (GRT / "hooks.py").read_text())
-    check("hook 11c measures HANDOFF_ACCEL, the bar far_lead actually releases on, not FLOOR",
+    check("hook 11c records HANDOFF_ACCEL (the old hand-off bar, for comparison), not FLOOR",
           "time.monotonic(), HANDOFF_ACCEL)" in (GRT / "hooks.py").read_text())
   finally:
     hooks._lead_write = saved

@@ -947,9 +947,9 @@ class _FrontRun:
     self.episodes = 0
 
   def step(self, cand, stock_min: float, dRel: float, v_ego: float, now: float, floor: float) -> None:
-    """`floor` is far_lead.HANDOFF_ACCEL, the bar hook 11 itself hands off on (NOT far_lead.FLOOR --
-    the two have differed since 2026-09-24) -- passed in rather than imported here so it cannot
-    drift from the release rule, and so this stays unit-testable."""
+    """`floor` is far_lead.HANDOFF_ACCEL -- hook 11's hand-off bar until 2026-10-11, recorded as `handoff` /
+    `floor_*` so old and new hand-off points can be compared. Since 2026-10-11 hook 11 hands off when stock
+    is HARDER than its command, which is `caught` / `catch_*` here (<= vs <: equality is measure-zero)."""
     if cand is None:
       if self.ep is not None:
         self._close(dRel, now)
@@ -969,10 +969,9 @@ class _FrontRun:
     if e["catch_t"] is None and stock_min <= cand + 1e-6:
       e["catch_t"] = now
       e["catch_d"] = float(dRel)
-    # THE HAND-OFF BAR. far_lead releases on `stock_min <= HANDOFF_ACCEL`, not on stock matching this
-    # hook's own (harder) command, so this is the crossing that actually ends the span and the one
-    # that answers "how much earlier did braking start". `catch_*` above is the stricter bar and
-    # is nearly always never reached -- 7 of the first 8 real spans, 2026-09-16.
+    # THE OLD HAND-OFF BAR (until 2026-10-11 far_lead released on `stock_min <= HANDOFF_ACCEL`). Since
+    # 2026-10-11 the release is stock harder than this hook's command -- `catch_*` above -- and this
+    # crossing is kept only for comparison with the logs before that date.
     if e["floor_t"] is None and stock_min <= floor + 1e-6:
       e["floor_t"] = now
       e["floor_d"] = float(dRel)
@@ -1023,7 +1022,7 @@ def observe_front_run(out: list, stock_min: float, lead, v_ego: float) -> None:
     fr = _front_run_singleton()
     if fr is None:
       return
-    from openpilot.grt.far_lead import HANDOFF_ACCEL   # the bar far_lead actually releases on
+    from openpilot.grt.far_lead import HANDOFF_ACCEL   # the OLD hand-off bar; recorded for comparison
     cand = float(out[0][0]) if out else None
     fr.step(cand, float(stock_min), float(lead.dRel), float(v_ego), time.monotonic(), HANDOFF_ACCEL)
   except Exception:
