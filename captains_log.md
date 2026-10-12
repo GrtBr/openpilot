@@ -43,7 +43,19 @@ first drives' `fr` records are the check: a span that ends on the stock hand-off
 (stock reached hook 11's command), and `handoff` true with `caught` false should only appear on spans ended by
 another release (50 m, slope, check, lead lost).
 
-**Deploy status: NOT deployed.** Together with 2026-10-11 hook 12 (`77c4c99f5`), awaiting the operator's go-ahead.
+**Deploy status: DEPLOYED 2026-10-12 ~05:00 UTC over ssh with `c9cd52528`**, together with hook 12 `77c4c99f5`
+below (car parked, offroad). The twelve files changed since `5955a2fa4` (`danger_hook.py`, `far_lead.py`, `hooks.py`, the
+four test files, five fixtures) were checked on the device to match `5955a2fa4` first; eleven backed up to
+`/data/grt_backup/20261012T045958Z/`, the new `danger_00000252_1503.csv` listed in its `NEW_FILES`. All written with
+fsync + atomic rename. On device before reboot: `test_schema_conformance` 43/43 (`modelV2.leadsV3.prob` and
+`modelV2.action.desiredAcceleration` exist in the car's real schema), `test_danger_hook` 101/101, `test_far_lead`
+162/162, `test_hooks` 89/89. After reboot (uptime 111 s): all twelve md5s match the commit, 0 NUL bytes (two
+methods), live import reads PROB_MIN 0.3, PRES_MIN 5, BOOST_DA -0.3, BOOST_S 1.0, BOOST_GAIN 1.2, GATE_HOLD 10 and
+far_lead carries `if stock_min < out:`; modeld, controlsd and plannerd running; no tracebacks in the swaglog since
+boot; `danger_hook.log` writing its 30 s heartbeat. Rollback: copy the eleven backed-up files back, delete the file in
+`NEW_FILES`, reboot.
+First drives: pull `far_lead` fr records -- every stock hand-off should now show `caught` true; and `danger_hook.log`
+triggers with `prob`, `published`, `boost`.
 
 ---
 
@@ -97,7 +109,7 @@ knife-edge: v 20.97–21.0 when the window opens). Boost cost on a moving lead (
 'moving' release instead of ~3.8. The closed loop's stock proxy brakes ~0.85 s earlier than real stock did on 252, so
 it understates the gate's benefit there. 12 triggers in 315 far-lead appearances (deployed gate: 10).
 
-**Deploy status: NOT deployed.** Awaiting the operator's go-ahead.
+**Deploy status: DEPLOYED 2026-10-12 ~05:00 UTC over ssh** with `c9cd52528` -- see 2026-10-11 (b) above.
 
 ---
 
