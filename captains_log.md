@@ -9,6 +9,70 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-10-13 — tiles rebuilt from a fresh OSM extract with `generate_tiles_ver3b.py`, DEPLOYED (no code change)
+
+No code in this checkout changed. Only the tile data under `/data/media/0/osm/offline` was replaced.
+
+### Source PBF
+Geofabrik `africa/south-africa-latest.osm.pbf` redirects to the dated file `south-africa-261011.osm.pbf`
+(Last-Modified 12 Oct 2026 00:42 UTC, 422,232,026 bytes). MD5 `2a8015502a66b7a076d305cdc6a9f204` matched
+Geofabrik's published `.md5`, on the Pi5 and again on the USB copy used by the build machine. It replaces
+the 9 May 2026 extract (429,758,320 bytes), which has been deleted from the Pi5 and the USB stick.
+**No script fetches the PBF.** Download it by hand with `wget` (none of the generators do it;
+`mapd_source/scripts/download_planet.sh` is upstream's whole-planet fetch and is not used).
+
+### Generator: ver3b, which is NOT the committed ver3
+Built on another machine (Windows, ≥8 GB RAM; a full SA build runs the Pi5 out of memory) by
+`generate_tiles_ver3b.py` from the USB stick (`osm_offline/`, 12 Oct 20:07). It was committed byte-identical to
+the sunnypilot repo afterwards as `6bd89c7e17` (branch `precompute-curvature-and-added-stop-signs`). Compared with the committed `generate_tiles_ver3.py` (`13772b0a27`), it changes two behaviours,
+**both in T-junction stem tagging only**:
+1. tag-repeat: a candidate is rejected when more than 2 OSM ways share one name/ref at the node;
+2. a new geometry post-pass, `_verify_t_junctions_geometry`. The crossbar must bend no more than 25°
+   (`_T_THROUGH_MAX_BEND_DEG`) and the stem must be within 35° of a right angle
+   (`_T_STEM_MAX_RIGHT_DEV_DEG`). Otherwise the stem is re-picked from the terminating legs at about 90° to
+   the straightest leg pair, or the candidate is dropped.
+The rest is cosmetic: ASCII status lines and forced UTF-8 stdout for a cp1252 Windows console. κ
+suppression (≥3-way junctions, dead ends) and chain building are unchanged.
+
+**Unlike 2026-08-04, "the build machine ran the reviewed code" does NOT hold.** ver3b was not reviewed
+or committed before the build, and its `geometry: N ok / N reassigned / N rejected` console line was not captured.
+That line is the only record of how many stems ver3b changed.
+
+### Result and transfer
+**2,049 files / 602 MB, bands -24 … -36**, written 12–13 Oct. The August set had 2,046 files, so there are
+3 more files. Why is unknown, because no August set is left to diff against.
+Transfer: rsync → `offline.new`, **all 2,049 per-file md5s matched the USB source**, `mv` swap, and
+`offline.old` deleted at the operator's instruction. `/data` 9.5 GB free afterwards.
+`~/Comma/sunnypilot/tiles/` on the Pi5 is byte-identical to the deployed set (per-file md5).
+
+### Deployed ONROAD, mapd not restarted
+Unlike 08-04 (offroad, rebooted), the swap ran while the car was on: uptime 2–4 min, modeld running.
+mapd (pid 13174) was **left running**, per the rule against signalling manager-owned processes.
+`mv` keeps open handles valid. Tiles mapd already loaded stay in memory, and every tile it reads from now
+on is new. The set is fully in effect from the next ignition cycle. SSH dropped right after the swap
+(car switched off), so the post-swap device commit was not re-read. The last logged deploy is
+2026-10-12 (hook 11 `c9cd52528` + hook 12 `77c4c99f5`), and this deploy touches no code.
+
+### Verified
+- Gate 1a (`parity_check_ver2.py`, "≥3-way node ⇒ stored κ == 0.0") on the deployed tiles against a
+  Garden Route clip cut from **the same 261011 PBF** (bbox -34.06,22.22 → -33.82,22.92) with `clip_pbf.py` (15 min, 186 MB RSS on the Pi5): **4,820 ≥3-way nodes checked, 0 violations, PASS** (exit 0; 112,614 tile nodes matched ≤ 2 m). Gate 1b is informational only, by design (max diff 0.20, 4,251 of 56,125 over 1e-6, same match noise as before).
+- **What gate 1a does NOT cover:** it checks only κ at junctions. ver3b's changes are all in T-junction
+  stem assignment, which gate 1a never reads. A PASS shows the κ rule survived ver3b. It does not show
+  that the stems are right.
+
+### No rollback
+The August tiles are gone from the device, the USB stick (`offline_bck/` was removed) and
+`sunnypilot/tiles/` (now this set). The 9 May PBF is gone too. If this set turns out wrong, the fix is a
+rebuild, either with committed ver3 on this PBF or from a Geofabrik archive extract. There is nothing to
+revert to.
+
+### STILL OUTSTANDING
+- A drive that watches **T-junction / stop behaviour** (where ver3b moved stems), not only curve approach.
+  Use `/data/media/0/mapd_debug.log`.
+- ~~Commit `generate_tiles_ver3b.py`~~ DONE: sunnypilot `6bd89c7e17`.
+
+---
+
 ## 2026-10-11 (b) — hook 11 hands off to stock only once stock brakes harder than hook 11 (operator decision)
 
 **What.** `openpilot/grt/far_lead.py`: the stock hand-off is `stock_min < out` (stock's best candidate this frame is
