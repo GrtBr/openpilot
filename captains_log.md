@@ -9,6 +9,40 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-10-22 — tile generator ver4 (traffic islands), committed, NOT built or deployed
+
+No code in this checkout changed, and the deployed tiles are still the 2026-10-13 ver3b set. This entry only records the
+generator change: sunnypilot `f1dc36bac5` (branch `precompute-curvature-and-added-stop-signs`, pushed to GrtBr) adds
+`generate_tiles_ver4.py` and `parity_check_ver4.py`, built on ver3b.
+
+### Change
+- **Island-split nodes**: a two-way way meeting one inbound and one outbound one-way way that leave on the same side
+  (legs ≤ 60° apart, two-way leg ≥ 135° from their bisector, one highway tag). They keep κ (were blocked as 3-way
+  junctions) and are never T-junction candidates.
+- **Chain builder**: U-turn reject (twin branch, or a turn > 120°; Menger κ cannot tell a reversal from straight on);
+  `visited` keyed on (way, direction), so a chain with a one-way way may run a used two-way way the other way round for
+  ≤ 300 m of context, filling only missing κ; never extend into a way that repeats a chain node (stop short of a ring
+  instead of dropping the whole chain); refuse a weak-tier pick when the way has a stronger name/ref partner.
+- **parity_check_ver4.py**: gate 1a exempts island-split nodes (recomputed with the generator's own function); new gate
+  1c: no `T-Junction` hazard at an island node.
+
+### Verified (Garden Route clip, `sunnypilot/drive_analysis/clip/garden_route.osm.pbf`, Pi5, ~100 MB RSS)
+- ver3b → ver4: 157 island-split nodes. κ>0 nodes 47,416 → 51,132: 3,779 gained, 63 lost, 1,236 changed.
+  `T-Junction` tags identical (2,557). ver3b's geometry pass had already rejected every island false-T on this clip,
+  so the T-side guard changes nothing here.
+- 51 island return branches that were κ-less stubs now sit in multi-way chains. No island branch got worse.
+- **Not island-specific:** 3,388 of the gains are former ring chains that ver3b discarded whole; 147 of those are
+  R < 15 m (ver3b already stores 741 such values). 55 of the 63 losses sit at Y-forks where the other branch now takes
+  the through chain.
+- `parity_check_ver4`: 1a PASS (3,867 junction nodes, 0 violations), 1c PASS. The ver2 gate fails on the 489 island κ
+  values, as expected. A mutant without the island guards fails 1c (8 violations).
+
+### Not done
+- Full-SA build (needs ≥ 8 GB, so the Windows build machine, not the Pi5) and a drive through islands.
+- ver4 is not on the USB stick (`osm_offline/`); copy it there before building.
+
+---
+
 ## 2026-10-22 — mapd shared-route split fix (GrtBr/mapd `f389f05`), DEPLOYED
 
 The vendored mapd binary was replaced. No Python in this checkout changed. This is the fix for FINDINGS §76 (the false
