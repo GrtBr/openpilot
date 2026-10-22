@@ -5,12 +5,12 @@ This is a **fork** build of mapd. Do not replace it with an upstream release.
 | | |
 |---|---|
 | Source repo | `github.com/GrtBr/mapd` (fork of `pfeiferj/openpilot-mapd`) |
-| Commit | `07ea8db` — "mapd: detect hazard on current way exit node (T-Junction fix)" |
-| Built | 2026-06-01 |
-| md5 | `0c3b552c229addc273e2c39c28924fbc` |
-| Size | 21211912 bytes |
+| Commit | `f389f05` — "mapd: go straight at shared-route splits (FINDINGS §76)", branch `fix/shared-route-straight` (on top of `07ea8db` T-Junction fix) |
+| Built | 2026-10-21, go1.26.8, clean tree (`vcs.modified=false`) |
+| md5 | `5003bea85d60b8666b649bd11abead4b` |
+| Size | 21146272 bytes |
 | Arch | ELF 64-bit aarch64, statically linked |
-| Copied from | `~/Comma/sunnypilot/third_party/mapd_pfeiferj/mapd` (byte-identical to `mapd_source/build/mapd`) |
+| Copied from | `~/Comma/sunnypilot/mapd_source/build/mapd_shared_route` |
 
 ## Why this matters
 
@@ -18,7 +18,8 @@ This build contains fork-only work that upstream mapd does **not** have:
 
 - precomputed per-node **curvature** in the tile schema,
 - node-level **stop-sign / hazard** detection,
-- the **T-junction fix**.
+- the **T-junction fix**,
+- the **shared-route split fix** (go straight where an `x;y` road splits, FINDINGS §76).
 
 Consequences:
 
