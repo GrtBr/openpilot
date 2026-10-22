@@ -9,6 +9,47 @@ The two branches diverge — changes logged here are not present there unless ch
 
 ---
 
+## 2026-10-22 — mapd shared-route split fix (GrtBr/mapd `f389f05`), DEPLOYED
+
+The vendored mapd binary was replaced. No Python in this checkout changed. This is the fix for FINDINGS §76 (the false
+'stop' 20 km/h hazard and the 51-55 km/h curve on N2 at the R43 and R317 splits, 18 Oct bm1-bm3). Full write-up: FINDINGS §77
+(`~/Comma/openpilot/analysis/lead_filter/tracker/FINDINGS.md`).
+
+### Change (mapd, not this repo)
+`maps/way.go`, `NextWay` partial-ref stage only: if the current road's ref or the candidate's ref contains `;`
+and some candidate continues within 30° of straight, candidates that turn more than 60° are dropped. Before the
+fix, "N2;R43" partially matched both N2 and R43. The 90° turn passed the circumradius test (nodes ~12 m apart),
+the priorities tied, and tile order put the R road first, so its stop node 11-13 m in became the hazard.
+GrtBr/mapd branch `fix/shared-route-straight`, commit `f389f05`, on top of `07ea8db`. Pushed.
+
+### Verified before deploy
+- Tests (the fork's first): `NextWay` run on 5 real junctions from the 2026-10-13 tiles, kept in tile order. All 5
+  were red at `07ea8db` (each picked the sharp leg) and all 5 are green now. 5 synthetic filter cases and a turn-angle
+  check also pass. `go vet` is clean.
+- National replica scan (1,115,035 way ends): 120 picks change, 16 of which had removed a stop or give_way ≤50 m
+  on the wrong leg. 0 picks change where both refs are single.
+
+### Binary
+md5 `0c3b552c229addc273e2c39c28924fbc` → **`5003bea85d60b8666b649bd11abead4b`**, 21,146,272 bytes,
+go1.26.8, static, clean tree (`vcs.revision=f389f05`, `vcs.modified=false`). The June binary was `+dirty` from
+`07ea8db` with go1.26.2, so it may differ in more than this fix. `third_party/mapd/{mapd,README.md}`
+were updated in `8474b9c8d` and pushed to origin/nightly-dev, together with `cd9b7d9a1`.
+
+### Deploy
+The car was parked (gear park, vEgo 0, not engaged) with the ignition on. The binary was staged as
+`third_party/mapd/.mapd.new`, `mv` swapped, and the device rebooted; mapd was never signalled. The README was copied
+to the device too. After boot, the running mapd's `/proc/<pid>/exe` md5 was `5003bea8…` and mapdOut was publishing at
+~8 Hz. `tileLoaded=False` because there was no GPS fix yet, so a tile load with the new binary is **not yet observed**.
+On the device, `git status` now shows the mapd binary and README modified. Rollback: `git checkout
+third_party/mapd/mapd` on the device, then reboot.
+
+### Next drive
+Drive N2 straight through the R43 and R317 splits. There should be no 'stop' hazard and no 51-55 km/h curve; read
+`/data/media/0/mapd_debug.log`. Also confirm `tileLoaded=True` once there is a fix. Not addressed: the 87.8 km/h
+curve on the R317 approach (tile κ at an OSM node kink, a generator issue).
+
+---
+
 ## 2026-10-13 — tiles rebuilt from a fresh OSM extract with `generate_tiles_ver3b.py`, DEPLOYED (no code change)
 
 No code in this checkout changed. Only the tile data under `/data/media/0/osm/offline` was replaced.

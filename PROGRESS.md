@@ -37,7 +37,11 @@ than good** — do not read the absence of complaints as validation.
   `AlertManager.add_many`); the card→selfdrived channel is `grtSetSpeedState` on renamed
   reserved slot 16. Default OFF via `/data/media/0/grt/SmartCruiseControlSetSpeed`.
   104 tests + 25 schema checks. Prior: APPROACH PROFILE VALIDATED on drive 3 (median decel -0.51 vs -0.50 target; user: "felt perfect"). NEXT: set-speed-tracks-limit feature — DESIGNED and feasibility-verified, NOT implemented; see captains_log 2026-07-29. Prior status: FIRST TEST DRIVE FAILED (feature was a silent no-op) -> ROOT-CAUSED AND FIXED (radarState lead field is `present`, not `status`). Fix deployed; awaiting a SECOND test drive. Prior: ENABLED AND LIVE ON THE CAR (offroad-verified). Speed ceiling ON; hazard braking still OFF. Only the road test remains. Prior: ON-DEVICE IN PROGRESS. Offline block complete; deployed to comma4; Phase 0 gates 1&2 PASS. **Feature is currently INERT on device (params unknown until a C++ build) — this is the safe designed fallback.** Prior status: ✅ **OFFLINE BLOCK COMPLETE.** Phases 1a, 2, 3, 4, 5, 6, 7 all done and committed; Verification 2 done; Verification 1 reassigned to the device (impossible on Pi5). Auto-resume cron cancelled. **Next work requires the car.**
-- **Last action:** 2026-10-13: replaced the tile set on comma4 with one rebuilt from a fresh OSM
+- **Last action:** 2026-10-22: deployed mapd `f389f05` (GrtBr/mapd `fix/shared-route-straight`, md5
+  `5003bea8…`, vendored in `8474b9c8d`). Where an "x;y" route splits, `NextWay` no longer takes the sharp side
+  leg and its stop node (FINDINGS §76/§77, 18 Oct bm1-bm3 at the N2/R43 and N2/R317 splits). 5 real-junction tests
+  went red→green. Swapped parked with an `mv` and rebooted; mapd running the new exe, mapdOut live, no GPS fix yet.
+  Prior: 2026-10-13: replaced the tile set on comma4 with one rebuilt from a fresh OSM
   extract (Geofabrik `south-africa-261011`, MD5-verified) by `generate_tiles_ver3b.py`. That is
   committed ver3 plus a stricter T-junction tag-repeat rule and a geometry post-pass that can
   re-pick or drop a stem. 2,049 files / 602 MB; per-file md5 verified on device; no code change;
@@ -46,7 +50,9 @@ than good** — do not read the absence of complaints as validation.
   `_ramp_curve_ceiling()` in `scc_map.py`. Deployed. Prior: Cut map curve speed 10% (`map_curve_target_lat_a` 2.5 → 2.025) and deployed the
   national tile set (601 MB, bands -24…-36) to comma4. Both verified pre-deploy: gate 1a passed on
   the delivered tiles, and `write_settings_file()` on device emits 2.025. Device rebooted, healthy.
-- **Next step:** On the next drive, also watch **T-junction / stop behaviour**. ver3b changed
+- **Next step:** On the next drive, go **N2 straight through the R43 and R317 splits**. There should be no 'stop'
+  20 km/h hazard and no 51-55 km/h curve (bm positions in `analysis/lead_filter/tracker/data/1018/bm_positions.csv`).
+  Confirm `tileLoaded=True` with the new binary once there is a fix. Also watch **T-junction / stop behaviour**. ver3b changed
   T-junction stem tagging (2026-10-13 tiles), parity gate 1a does not test stems, and nothing
   has validated them. Then, still outstanding: **DRIVE IT** and judge the curve APPROACH (corner speed itself was
   already judged OK on 08-05). Instrument `/data/media/0/mapd_debug.log`, which now logs
@@ -153,7 +159,7 @@ All match → the rename is wire-neutral and agrees with the binary. Also verifi
 
 - [x] **grt/ scaffold** — DONE (`__init__.py`, `registry.py`; `hooks.py`/`scc_map.py`/`settings.py` pending Phases 4-5) — `openpilot/grt/{__init__.py,registry.py,hooks.py,scc_map.py,settings.py,README.md,params_keys.inc}`
 - [x] **Phase 2 — cereal schema** — DONE. `custom.capnp` (CustomReserved17/18/19 → MapdExtendedOut/MapdIn/MapdOut, IDs unchanged; MapdOut 24 fields @0–@23; enums Mapd-prefixed for upstream-collision safety, wire-safe) + `log.capnp` union renames @143/144/145; GRT-MOD sentinels on both. Verified via pycapnp (see evidence above). Real `scons` codegen still pending on device.
-- [x] **Phase 1a — vendor binary** — DONE. md5 `0c3b552c...fbc` verified, 21211912 bytes, ELF aarch64; provenance in `third_party/mapd/README.md` — copy `~/Comma/sunnypilot/third_party/mapd_pfeiferj/mapd` → `third_party/mapd/mapd`, verify md5 `0c3b552c229addc273e2c39c28924fbc`, write `grt/README.md` provenance
+- [x] **Phase 1a — vendor binary** — DONE. **UPDATED 2026-10-22: now GrtBr/mapd `f389f05` (shared-route split fix), md5 `5003bea85d60b8666b649bd11abead4b`, 21146272 bytes (see captains_log 2026-10-22).** Original: md5 `0c3b552c...fbc` verified, 21211912 bytes, ELF aarch64; provenance in `third_party/mapd/README.md` — copy `~/Comma/sunnypilot/third_party/mapd_pfeiferj/mapd` → `third_party/mapd/mapd`, verify md5 `0c3b552c229addc273e2c39c28924fbc`, write `grt/README.md` provenance
 - [x] **Phase 3 — registration splices** — DONE. services.py (INLINED, see gotcha), params_keys.h `#include` + `.inc`, process_config `procs += grt_procs()`, plannerd `+ GRT_SUB`, selfdrived `- GRT_IGNORED_PROCESSES` — `registry.py` (GRT_SERVICES/GRT_SUB/GRT_PROCS/MAPD_ROOT) + one-line splices in `services.py`, `process_config.py`, `params_keys.h`(+`.inc`), `plannerd.py`, and the `selfdrived.py` not_running exclusion
 - [x] **Phase 4 — MapdSettings** — DONE. `grt/settings.py` (write-once, `--force`/`--show`, best-effort reloadSettings notify). speed_limit_control ON, vision_curve OFF, tuning preserved. NO 1 Hz rewrite loop (key is PERSISTENT) — `grt/settings.py` writes defaults (speed_limit_control_enabled=true, curve on, vision off, tuned jerk/accel/offset)
 - [x] **Phase 5 — control path** — DONE. `grt/scc_map.py` ported (MapState IntEnum, vestigial param reads dropped, MIN_V/PARAMS_UPDATE_PERIOD inlined), `grt/hooks.py`, Hook 1 in longitudinal_planner (11 added lines, 0 deletions). 12/12 behavioural tests pass (`openpilot/grt/tests/test_scc_map.py`) — port `grt/scc_map.py` from sunnypilot map_controller.py; `grt/hooks.py` (limit_v_cruise + extra_accel_candidates); two sentinel hooks in `longitudinal_planner.py`
